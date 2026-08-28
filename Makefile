@@ -10,7 +10,7 @@ PY    ?= python3
 # Tools live in toolchain/; env.sh puts them on PATH without polluting the shell.
 ENV := source $(ROOT)/toolchain/env.sh &&
 
-.PHONY: help regress regress-v list lint formal model clean tools
+.PHONY: help regress regress-v list lint formal model models clean tools
 
 help:
 	@echo "make regress    - run the full regression (nonzero exit on failure)"
@@ -19,13 +19,17 @@ help:
 	@echo "make lint       - Verilator lint over all RTL"
 	@echo "make formal     - run formal checks"
 	@echo "make model      - run Python golden-model self-tests"
+	@echo "make models     - build the instrumented C golden model"
 	@echo "make tools      - print resolved tool versions"
 	@echo "make clean      - remove build/sim artifacts"
 
-regress:
+models:
+	@$(MAKE) -s -C $(ROOT)/model/cref
+
+regress: models
 	@$(ENV) $(PY) $(ROOT)/tb/run_regress.py
 
-regress-v:
+regress-v: models
 	@$(ENV) $(PY) $(ROOT)/tb/run_regress.py -v
 
 list:
