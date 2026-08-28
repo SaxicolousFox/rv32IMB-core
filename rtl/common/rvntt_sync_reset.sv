@@ -22,8 +22,14 @@ module rvntt_sync_reset #(
   // reports a spurious counterexample where reset is already released.
   // PROCASSINIT is expected here: the initial value is the FPGA power-on state,
   // and the procedural assignment is the async reset.  Both are intended.
+  // SYNCASYNCNET is expected and is the entire purpose of this module: sync_q is
+  // clocked synchronously, while the rst_n it produces is consumed as an
+  // asynchronous reset elsewhere.  That is the async-assert / sync-release
+  // structure, not a clock-domain mistake.
   /* verilator lint_off PROCASSINIT */
+  /* verilator lint_off SYNCASYNCNET */
   logic [STAGES-1:0] sync_q = '0;
+  /* verilator lint_on SYNCASYNCNET */
   /* verilator lint_on PROCASSINIT */
 
   always_ff @(posedge clk or negedge arst_n) begin
