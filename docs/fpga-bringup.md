@@ -8,13 +8,19 @@ still be suspects.
 
 ## What the design does
 
-| Signal | Meaning |
-|---|---|
-| `led[0]` | 1 Hz, counted in the **raw 100 MHz** oscillator domain |
-| `led[1]` | 1 Hz, counted in the **75 MHz MMCM** domain |
-| `led[2]` | MMCM `LOCKED` |
-| `led[3]` | BRAM self-test passed |
-| `uart_rxd_out` (D10) | 115200 8N1, one status line per second |
+| Silkscreen | Port | Pin | Meaning |
+|---|---|---|---|
+| **LD4** | `led[0]` | H5 | 1 Hz, counted in the **raw 100 MHz** oscillator domain |
+| **LD5** | `led[1]` | J5 | 1 Hz, counted in the **75 MHz MMCM** domain |
+| **LD6** | `led[2]` | T9 | MMCM `LOCKED` |
+| **LD7** | `led[3]` | T10 | BRAM self-test passed |
+| — | `uart_rxd_out` | D10 | 115200 8N1, one status line per second |
+
+> **The silkscreen numbering is offset, and this is normal.** On the Arty A7,
+> **LD0-LD3 are the RGB LEDs** (`led0_r/g/b` …), which this design does not
+> drive — expect them to stay dark. The four plain green LEDs are silkscreened
+> **LD4-LD7**, and Digilent's schematic calls them `led[4..7]` while the XDC port
+> is `led[0..3]`. So `led[0]` lights **LD4**. Nothing is shifted.
 
 Expected UART output, once per second:
 
@@ -40,10 +46,18 @@ completely opposed within about 6.
 1. **Check the build actually met timing.** `fpga/build/post_route_timing.rpt`,
    and the build fails on negative slack by design — a bitstream that misses
    timing usually works on the bench and fails later.
-2. **Check the BRAM was inferred**, not turned into fabric. The build prints
-   `=== inferred BRAM primitives: N ===`; N must be ≥ 1. If it were 0 the
-   self-test would still pass in simulation but A12's 64 KB instruction memory
-   would not fit.
+2. **Check the BRAM was inferred**, not turned into fabric. This is Vivado
+   *console* output, so it is in `fpga/build/vivado.log`, **not** in the timing
+   report:
+
+   ```sh
+   grep 'inferred BRAM primitives' fpga/build/vivado.log
+   # === inferred BRAM primitives: 1 ===
+   ```
+
+   N must be ≥ 1. Cross-check in `post_route_util.rpt`, which should show
+   `Block RAM Tile | 0.5`. If it were 0 the self-test would still pass in
+   simulation, but A12's 64 KB instruction memory would not fit.
 3. **Confirm the part** is `xc7a100tcsg324-1`. An Arty A7-**35**T has a
    different device and this bitstream will refuse to load.
 
@@ -69,17 +83,28 @@ step where eyes on the hardware matter.
 - `led[0]` and `led[1]` should blink together at 1 Hz. Watch for ~30 seconds.
   **Any visible drift between them means the MMCM ratio is not 3:4.**
 
-**2. UART.** From WSL the Arty usually appears as `/dev/ttyUSB1` (the second of
-the two interfaces the FT2232 exposes; `/dev/ttyUSB0` is JTAG):
+**2. UART.** **Use a Windows terminal — this is the expected path.** WSL2 does
+not see USB serial devices unless they are explicitly attached with `usbipd`, so
+`/dev/ttyUSB*` will simply not exist by default. Don't spend time on it.
 
-```sh
-ls -l /dev/ttyUSB*
-screen /dev/ttyUSB1 115200        # exit with Ctrl-A then K
+PuTTY: *Connection type* **Serial**, *Serial line* the Arty's COM port (check
+Device Manager → Ports; e.g. **COM7**), *Speed* **115200**, and under
+Connection → Serial set *Flow control* to **None**. Then Open.
+
+If you would rather use WSL, attach the device first from an **admin**
+PowerShell:
+
+```powershell
+usbipd list                      # find the Arty's BUSID
+usbipd attach --wsl --busid <BUSID>
 ```
 
-If WSL does not pass the USB device through (common — it needs `usbipd`), just
-use a Windows terminal (PuTTY or Tera Term) on the Arty's COM port at
-**115200 8N1, no flow control**.
+then in WSL it appears as `/dev/ttyUSB1` (the FT2232 exposes two interfaces;
+`/dev/ttyUSB0` is the JTAG channel):
+
+```sh
+screen /dev/ttyUSB1 115200        # exit with Ctrl-A then K
+```
 
 You should see, once per second:
 
@@ -96,6 +121,7 @@ rvntt P0.5 clk=75MHz bram=0xD76C0E8D PASS
 | `led[0]`/`led[1]` drift apart | MMCM ratio wrong; check `CLKFBOUT_MULT_F`/`CLKOUT0_DIVIDE_F` |
 | LEDs fine, no UART | TX/RX swapped: `uart_rxd_out` (D10) is what the **FPGA drives** |
 | UART garbage | Baud mismatch — the divisor assumes a 75 MHz core clock |
+| Lines much faster than 1/sec | Report FSM gap constant wrong (fixed; regression now checks this) |
 | `FAIL 0x00000000` | BRAM synthesised but `$readmemh` init did not reach the bitstream |
 | `FAIL <other>` | BRAM initialised but the address generator is wrong |
 

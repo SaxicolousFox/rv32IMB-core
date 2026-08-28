@@ -37,7 +37,13 @@ module rvntt_uart_report #(
   logic [4:0]  idx_q;        // index within PRE (0..27) or SUF (0..6)
   logic [2:0]  nib_q;        // which nibble, 7 down to 0
   logic [31:0] sum_q;
-  logic [26:0] wait_q;
+  // Gap between lines.  Size the counter from the constant rather than picking a
+  // width and then scaling the constant to fit it -- the original code used a
+  // hardcoded 27-bit counter and CLK_HZ/16, which silently produced 15 lines a
+  // second while the comment claimed one.
+  localparam int GAP_CYCLES = CLK_HZ;                 // one second
+  localparam int GAP_W      = $clog2(GAP_CYCLES + 1);
+  logic [GAP_W-1:0] wait_q;
 
   logic [7:0] tx_data;
   logic       tx_valid;
@@ -104,13 +110,13 @@ module rvntt_uart_report #(
           end
         end
         S_WAIT: begin
-          // Roughly one line per second.
-          if (wait_q == 27'(CLK_HZ / 16)) begin
+          // One line per second.
+          if (wait_q == GAP_W'(GAP_CYCLES - 1)) begin
             sum_q   <= sum;
             idx_q   <= '0;
             state_q <= S_PRE;
           end else begin
-            wait_q <= wait_q + 27'd1;
+            wait_q <= wait_q + GAP_W'(1);
           end
         end
         default: state_q <= S_IDLE;
