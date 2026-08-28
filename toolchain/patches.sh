@@ -35,6 +35,14 @@ declare -A UPSTREAM=(
   [llvm]="origin/main"
 )
 
+# Careful: under `set -e` + pipefail, both `ls <nonmatching glob> | wc -l` and
+# `find <missing dir> | wc -l` abort the whole script rather than yielding 0.
+count_patches() {
+  local d="$ROOT/patches/$1"
+  [ -d "$d" ] || { echo 0; return 0; }
+  find "$d" -maxdepth 1 -name '*.patch' | wc -l
+}
+
 projects() { if [ $# -gt 0 ] && [ -n "${1:-}" ]; then echo "$1"; else echo "spike llvm"; fi; }
 
 have() { local p="$1"; [ -d "$ROOT/${SRCDIR[$p]}/.git" ]; }
@@ -60,7 +68,7 @@ do_export() {
   local out="$ROOT/patches/$p"
   rm -rf "$out"; mkdir -p "$out"
   git -C "$dir" format-patch --no-signature -o "$out" "$base..$BRANCH" >/dev/null
-  local n; n=$(ls "$out"/*.patch 2>/dev/null | wc -l)
+  local n; n=$(count_patches "$p")
   echo "$p: exported $n patch(es) to patches/$p/ (base ${base:0:12})"
 }
 
@@ -105,7 +113,7 @@ do_status() {
     if [ "$base" != "unpinned" ] && git -C "$dir" rev-parse --verify -q "$BRANCH" >/dev/null; then
       n=$(git -C "$dir" rev-list --count "$base..$BRANCH" 2>/dev/null || echo "?")
     fi
-    np=$(ls "$ROOT/patches/$p"/*.patch 2>/dev/null | wc -l)
+    np=$(count_patches "$p")
     printf "%-8s %-14s %-8s %s\n" "$p" "${base:0:12}" "$n" "$np"
   done
 }
