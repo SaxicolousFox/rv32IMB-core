@@ -47,7 +47,7 @@ toolchain/.uv-cache/
 .gitmodules
 .ripgreprc
 .mcp.json
-.idea/
-.vscode/
+.idea
+.vscode
 .claude/
 tb/formal/*.sby
