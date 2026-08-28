@@ -70,6 +70,9 @@ def discover() -> list:
     t.append(Test("model_selftest", "model",
                   [py, os.path.join(ROOT, "model/selftest.py")], timeout=120))
 
+    t.append(Test("patches_in_sync", "toolchain",
+                  [py, os.path.join(ROOT, "tb/cosim/check_patches.py")], timeout=120))
+
     t.append(Test("kyber_ref_kats", "model",
                   [py, os.path.join(ROOT, "model/run_kyber_kats.py")], timeout=900))
 
