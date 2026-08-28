@@ -63,6 +63,10 @@ def discover() -> list:
                   cwd=os.path.join(ROOT, "tb/cocotb"),
                   requires=["verilator"], timeout=600))
 
+    t.append(Test("spike_smoke", "cosim",
+                  [py, os.path.join(ROOT, "tb/cosim/run_spike_smoke.py")],
+                  requires=["spike", "riscv-none-elf-gcc"], timeout=300))
+
     t.append(Test("model_selftest", "model",
                   [py, os.path.join(ROOT, "model/selftest.py")], timeout=120))
 
