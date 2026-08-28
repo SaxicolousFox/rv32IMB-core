@@ -51,3 +51,5 @@ toolchain/.uv-cache/
 .vscode
 .claude/
 tb/formal/*.sby
+model/dumps/
+model/cref/ntt_dump

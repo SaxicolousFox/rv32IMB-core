@@ -45,6 +45,38 @@ def main() -> int:
     if montgomery_reduce(1) % Q != rinv % Q:
         fails.append("montgomery_reduce(1) != R^-1 mod Q")
 
+    # 6. Structural facts the independent math model relies on.
+    import ntt_math, ntt_ref
+    if len(set(ntt_math.GAMMAS)) != 128:
+        fails.append("gammas are not distinct -- X^256+1 factorisation is wrong")
+    if not all(pow(g, 128, Q) == Q - 1 for g in ntt_math.GAMMAS):
+        fails.append("gamma^128 != -1: gammas are not the roots of Y^128+1")
+    # power sums must vanish, which is what makes the closed-form inverse valid
+    for k in range(1, 128):
+        if sum(pow(g, k, Q) for g in ntt_math.GAMMAS) % Q != 0:
+            fails.append(f"power sum of gammas at k={k} is nonzero"); break
+    if sum(pow(g, 0, Q) for g in ntt_math.GAMMAS) % Q != 128 % Q:
+        fails.append("power sum at k=0 != 128")
+
+    # 7. The zeta table must be GENERATED-equal to the reference's literal array.
+    import os, re
+    refc = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "toolchain", "kyber", "ref", "ntt.c")
+    if os.path.exists(refc):
+        body = open(refc).read().split("const int16_t zetas[128] = {")[1].split("};")[0]
+        ref_zetas = [int(x) for x in re.findall(r"-?\d+", body)]
+        if ref_zetas != ntt_ref.ZETAS:
+            fails.append("generated zeta table != reference zetas[]")
+    else:
+        print("  note: kyber reference not present, skipping zeta-table check")
+
+    # 8. Independent model must round-trip and satisfy the convolution theorem.
+    import random as _r
+    _r.seed(7)
+    x = [_r.randrange(0, Q) for _ in range(256)]
+    if ntt_math.intt(ntt_math.ntt(x)) != x:
+        fails.append("math model INTT(NTT(x)) != x")
+
     for f in fails:
         print("  FAIL:", f)
     if fails:

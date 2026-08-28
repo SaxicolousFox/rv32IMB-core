@@ -70,6 +70,13 @@ def discover() -> list:
     t.append(Test("model_selftest", "model",
                   [py, os.path.join(ROOT, "model/selftest.py")], timeout=120))
 
+    t.append(Test("kyber_ref_kats", "model",
+                  [py, os.path.join(ROOT, "model/run_kyber_kats.py")], timeout=900))
+
+    t.append(Test("ntt_golden_compare", "model",
+                  [py, os.path.join(ROOT, "model/compare_ntt.py"), "-n", "1000"],
+                  timeout=900))
+
     # ---- harness self-check: proves FAIL is actually detected (see P0.2) ----
     t.append(Test("harness_detects_failure", "meta",
                   [py, "-c", "import sys; sys.exit(3)"],

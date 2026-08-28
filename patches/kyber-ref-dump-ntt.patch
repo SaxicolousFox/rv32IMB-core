@@ -1,0 +1,79 @@
+--- toolchain/kyber/ref/ntt.c	2026-08-27 20:37:27.482591588 -0500
++++ model/cref/ntt_dump.c	2026-08-27 21:08:22.415334445 -0500
+@@ -3,6 +3,33 @@
+ #include "ntt.h"
+ #include "reduce.h"
+ 
++/* ---------------------------------------------------------------------------
++ * DUMP_NTT instrumentation (plan P0.3).
++ *
++ * Writes the coefficient array as hex at every layer boundary, so a mismatch
++ * against the Python model localises to "layer 4 is wrong" rather than
++ * "my NTT is wrong".  Values are dumped as raw int16 bit patterns (%04x of the
++ * uint16 reinterpretation) so the *unreduced, lazily-reduced* representation is
++ * preserved exactly -- including sign.  Normalising here would defeat the whole
++ * point (plan section 1.3).
++ * ------------------------------------------------------------------------- */
++#ifdef DUMP_NTT
++#include <stdio.h>
++FILE *kntt_dump_fp = NULL;
++int   kntt_dump_idx = 0;
++void kntt_dump(const char *tag, int layer, const int16_t r[256]) {
++  int i;
++  if (!kntt_dump_fp) return;
++  fprintf(kntt_dump_fp, "%d %s %d", kntt_dump_idx, tag, layer);
++  for (i = 0; i < 256; i++)
++    fprintf(kntt_dump_fp, " %04x", (unsigned)(uint16_t)r[i]);
++  fputc('\n', kntt_dump_fp);
++}
++#define KNTT_DUMP(tag, layer, r) kntt_dump((tag), (layer), (r))
++#else
++#define KNTT_DUMP(tag, layer, r) do { } while (0)
++#endif
++
+ /* Code to generate zetas and zetas_inv used in the number-theoretic transform:
+ 
+ #define KYBER_ROOT_OF_UNITY 17
+@@ -81,6 +108,9 @@
+   unsigned int len, start, j, k;
+   int16_t t, zeta;
+ 
++  int kntt_layer = 0;
++  KNTT_DUMP("ntt_in", -1, r);
++
+   k = 1;
+   for(len = 128; len >= 2; len >>= 1) {
+     for(start = 0; start < 256; start = j + len) {
+@@ -91,7 +121,9 @@
+         r[j] = r[j] + t;
+       }
+     }
++    KNTT_DUMP("ntt_layer", kntt_layer++, r);
+   }
++  KNTT_DUMP("ntt_out", -1, r);
+ }
+ 
+ /*************************************************
+@@ -108,6 +140,9 @@
+   int16_t t, zeta;
+   const int16_t f = 1441; // mont^2/128
+ 
++  int kntt_layer = 0;
++  KNTT_DUMP("invntt_in", -1, r);
++
+   k = 127;
+   for(len = 2; len <= 128; len <<= 1) {
+     for(start = 0; start < 256; start = j + len) {
+@@ -119,10 +154,12 @@
+         r[j + len] = fqmul(zeta, r[j + len]);
+       }
+     }
++    KNTT_DUMP("invntt_layer", kntt_layer++, r);
+   }
+ 
+   for(j = 0; j < 256; j++)
+     r[j] = fqmul(r[j], f);
++  KNTT_DUMP("invntt_out", -1, r);
+ }
+ 
+ /*************************************************
