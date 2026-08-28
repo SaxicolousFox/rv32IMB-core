@@ -147,8 +147,12 @@ Recorded from the batch build of `fpga/scripts/build_blinky.tcl`.
 
 | Metric | Value |
 |---|---|
-| WNS | +6.252 ns |
-| WHS | +0.082 ns |
+| WNS | +6.127 ns |
+| WHS | +0.114 ns |
+
+(Rebuild after the UART gap fix; the first build was WNS +6.252 / WHS +0.082.
+The design is ~0.3% of the device, so slack moves a little run to run and means
+nothing here — it will matter in A12.)
 
 **Clocks** — this is the MMCM ratio confirmed *in the implemented design*,
 independently of the LED check:
@@ -164,7 +168,7 @@ will be measured against in A12.
 
 | Resource | Used | Available | % |
 |---|---|---|---|
-| Slice LUTs | 203 | 63,400 | 0.32 |
+| Slice LUTs | 200 | 63,400 | 0.32 |
 | Slice Registers | 209 | 126,800 | 0.16 |
 | Block RAM Tile | 0.5 | 135 | 0.37 |
 | DSPs | 0 | 240 | 0.00 |
