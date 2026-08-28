@@ -53,3 +53,4 @@ toolchain/.uv-cache/
 tb/formal/*.sby
 model/dumps/
 model/cref/ntt_dump
+toolchain/llvm-project/
