@@ -1,0 +1,53 @@
+# Large third-party toolchain payloads — never commit
+toolchain/dist/
+toolchain/opt/
+toolchain/spike-src/
+toolchain/spike-build/
+toolchain/kyber/
+toolchain/install/
+.venv/
+
+# Build / sim artifacts
+build/
+obj_dir/
+sim_build/
+*.o
+*.d
+*.a
+*.elf
+*.bin
+*.hex
+*.vcd
+*.fst
+*.ghw
+__pycache__/
+*.pyc
+.pytest_cache/
+results.xml
+
+# Vivado
+fpga/build/
+*.jou
+*.log
+.Xil/
+vivado*.str
+usage_statistics_webtalk.*
+
+# Formal
+tb/formal/*/
+toolchain/.uv-cache/
+
+# Editor / shell dotfiles that live in this dir but are not project files
+.bashrc
+.bash_profile
+.profile
+.zshrc
+.zprofile
+.gitconfig
+.gitmodules
+.ripgreprc
+.mcp.json
+.idea/
+.vscode/
+.claude/
+tb/formal/*.sby
