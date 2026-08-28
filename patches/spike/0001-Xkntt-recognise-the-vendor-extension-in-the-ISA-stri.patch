@@ -1,4 +1,4 @@
-From f9a356ea78c8455afbb657787b8fdadb5020cd99 Mon Sep 17 00:00:00 2001
+From a6c1a9f051c0f1338fdad9f42103a712bb358156 Mon Sep 17 00:00:00 2001
 From: Liam Fucich <liam.fucich@gmail.com>
 Date: Thu, 27 Aug 2026 21:23:51 -0500
 Subject: [PATCH] Xkntt: recognise the vendor extension in the ISA-string
