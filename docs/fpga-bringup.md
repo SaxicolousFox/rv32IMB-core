@@ -110,3 +110,42 @@ the `.mem` image and the expected value, so the two cannot disagree. The
 checksum rotates before accumulating, making it **order-sensitive** — an address
 generator that read one address 256 times, or walked backwards, is caught rather
 than summing to the same value.
+
+---
+
+## Build results (Vivado 2025.2, xc7a100tcsg324-1)
+
+Recorded from the batch build of `fpga/scripts/build_blinky.tcl`.
+
+**Timing** — `All user specified timing constraints are met.`
+
+| Metric | Value |
+|---|---|
+| WNS | +6.252 ns |
+| WHS | +0.082 ns |
+
+**Clocks** — this is the MMCM ratio confirmed *in the implemented design*,
+independently of the LED check:
+
+| Clock | Period | Frequency |
+|---|---|---|
+| `sys_clk` (E3 oscillator) | 10.000 ns | 100.000 MHz |
+| `clk_core_raw` (MMCM CLKOUT0) | 13.333 ns | **75.000 MHz** |
+
+**Utilization** — essentially nothing, as expected; the point is that the flow
+works, not that the design is big. It also establishes the baseline the core
+will be measured against in A12.
+
+| Resource | Used | Available | % |
+|---|---|---|---|
+| Slice LUTs | 203 | 63,400 | 0.32 |
+| Slice Registers | 209 | 126,800 | 0.16 |
+| Block RAM Tile | 0.5 | 135 | 0.37 |
+| DSPs | 0 | 240 | 0.00 |
+| Bonded IOB | 7 | 210 | 3.33 |
+| MMCME2_ADV | 1 | 6 | 16.67 |
+
+`=== inferred BRAM primitives: 1 ===` — the BRAM was inferred as a real block
+RAM (half a tile, i.e. one RAMB18), not built out of fabric.
+
+Bitstream: `fpga/build/rvntt_blinky_top.bit` (3,825,917 bytes).
