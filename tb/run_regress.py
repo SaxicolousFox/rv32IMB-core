@@ -45,13 +45,16 @@ def discover() -> list:
 
     # ---- P0.2 placeholders that nonetheless exercise the real toolchain ----
     t.append(Test("verilator_lint", "rtl",
-                  ["verilator", "--lint-only", "-Wall", "--timing",
-                   os.path.join(ROOT, "rtl/common/rvntt_sync_reset.sv")],
-                  requires=["verilator"], timeout=120))
+                  [py, os.path.join(ROOT, "tb/lint_all.py")],
+                  requires=["verilator"], timeout=300))
 
     t.append(Test("verilator_sim_sync_reset", "rtl",
                   [py, os.path.join(ROOT, "tb/unit/test_sync_reset_verilator.py")],
                   requires=["verilator"], timeout=300))
+
+    t.append(Test("verilator_sim_blinky", "rtl",
+                  [py, os.path.join(ROOT, "tb/unit/test_blinky_verilator.py")],
+                  requires=["verilator"], timeout=600))
 
     t.append(Test("formal_sync_reset", "formal",
                   [py, os.path.join(ROOT, "tb/formal/run_formal.py"),

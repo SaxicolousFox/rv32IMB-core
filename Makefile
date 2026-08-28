@@ -10,7 +10,7 @@ PY    ?= python3
 # Tools live in toolchain/; env.sh puts them on PATH without polluting the shell.
 ENV := source $(ROOT)/toolchain/env.sh &&
 
-.PHONY: help regress regress-v list lint formal model models clean tools
+.PHONY: help regress regress-v list lint formal model models clean tools bitstream
 
 help:
 	@echo "make regress    - run the full regression (nonzero exit on failure)"
@@ -21,6 +21,7 @@ help:
 	@echo "make model      - run Python golden-model self-tests"
 	@echo "make models     - build the instrumented C golden model"
 	@echo "make tools      - print resolved tool versions"
+	@echo "make bitstream  - build the P0.5 FPGA bitstream via Windows Vivado"
 	@echo "make clean      - remove build/sim artifacts"
 
 models:
@@ -36,9 +37,7 @@ list:
 	@$(ENV) $(PY) $(ROOT)/tb/run_regress.py --list
 
 lint:
-	@$(ENV) for f in $$(find $(ROOT)/rtl -name '*.sv'); do \
-	   echo "lint $$f"; verilator --lint-only -Wall "$$f" || exit 1; done; \
-	 echo "LINT OK"
+	@$(ENV) $(PY) $(ROOT)/tb/lint_all.py
 
 formal:
 	@$(ENV) $(PY) $(ROOT)/tb/run_regress.py -k formal
@@ -54,6 +53,10 @@ tools:
 	 echo "riscv gcc : $$(riscv-none-elf-gcc --version 2>&1 | head -1)"; \
 	 echo "spike     : $$(spike --help 2>&1 | head -1 || echo 'NOT BUILT')"; \
 	 echo "cocotb    : $$($(PY) -c 'import cocotb;print(cocotb.__version__)' 2>/dev/null || echo 'NOT INSTALLED')"
+
+bitstream:
+	@$(ROOT)/fpga/scripts/gen_bram_init.py
+	@$(ROOT)/fpga/scripts/build_fpga.sh
 
 clean:
 	rm -rf $(ROOT)/tb/formal/*/ $(ROOT)/tb/formal/*.sby
