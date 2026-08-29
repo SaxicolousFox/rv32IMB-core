@@ -23,6 +23,12 @@
 // not.  Counting retirements is the cheapest possible shadow of what A5's
 // commit-log differ will do properly.
 //
+// The reported `span` -- the cycle distance from the first retirement to the
+// last -- is what tb/cosim/cycle_model.py compares against an independently
+// predicted stall and flush count.  Nothing here interprets it; this testbench
+// only has to report it honestly, because a phantom stall changes no
+// architectural state and a commit-log diff can never see one.
+//
 // A fifth check has no flag: commit_reg_write must never be asserted with
 // commit_rd == 0.  Spike never reports a write to x0, so a trace that did could
 // not be compared against it -- and the shadow register file below would hide
@@ -48,6 +54,15 @@ static VTOP* dut;
 
 static uint32_t xreg[32];       // shadow architectural registers
 static long     retired = 0;
+
+// The cycle of the first and last retirement.  Their DIFFERENCE is the useful
+// number: it is independent of how long reset is held and of how many cycles
+// the pipeline takes to fill, so a cycle model does not have to know either.
+// In a pipeline with no stalls the span is exactly retired-1; every stall and
+// every flush adds to it, which is what makes it a check on the hazard logic
+// rather than on the datapath.  See tb/cosim/cycle_model.py.
+static long     first_commit = -1;
+static long     last_commit  = -1;
 
 static void tick() {
     dut->clk = 0; dut->eval();
@@ -120,6 +135,8 @@ int main(int argc, char** argv) {
                 return 1;
             }
             retired++;
+            if (first_commit < 0) first_commit = cycle;
+            last_commit = cycle;
             if (trace)
                 printf("  %6ld  pc=0x%08x insn=0x%08x%s\n", retired,
                        dut->commit_pc, dut->commit_insn,
@@ -140,7 +157,8 @@ int main(int argc, char** argv) {
     // of any particular program.
     if (no_check) {
         printf("CORE_TB_TRACE_OK  (%ld instructions retired, %ld cycles, "
-               "ecall=%d)\n", retired, cycle, (int)saw_ecall);
+               "ecall=%d, span=%ld)\n", retired, cycle, (int)saw_ecall,
+               (first_commit < 0) ? -1 : last_commit - first_commit);
         delete dut;
         return saw_ecall ? 0 : 1;
     }
@@ -165,7 +183,9 @@ int main(int argc, char** argv) {
 
     if (rc == 0)
         printf("CORE_TB_OK  x%d = 0x%08x  (%ld instructions retired, "
-               "%ld cycles)\n", expect_reg, xreg[expect_reg], retired, cycle);
+               "%ld cycles, span=%ld)\n", expect_reg, xreg[expect_reg],
+               retired, cycle,
+               (first_commit < 0) ? -1 : last_commit - first_commit);
 
     delete dut;
     return rc;

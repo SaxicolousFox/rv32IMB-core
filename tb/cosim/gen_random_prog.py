@@ -169,11 +169,37 @@ class Gen:
         self._emit(f"{op:<6} x{rd}, x{rs1}, {imm}")
         self._wrote(rd)
 
+    # LUI and AUIPC have no rs1 operand: instruction bits 19:15 are part of
+    # their immediate.  Left to chance those bits name a live register only
+    # rarely, and that is the ONLY shape in which a hazard unit keying on the
+    # FIELD rather than on `uses_rs1` misbehaves -- it stalls behind a load into
+    # a register the instruction never reads.  Such a phantom stall changes no
+    # value, so the commit-log diff is byte-identical and only the cycle model
+    # sees it.
+    #
+    # Fault injection found this directly: the mutation that ties `uses_rs1`
+    # high was caught by the directed test and escaped the random suite,
+    # because reaching it needed a specific immediate bit pattern immediately
+    # after a load into that exact register (about 0.5% per load).  Filling the
+    # field with the MOST RECENTLY WRITTEN register makes the shape common
+    # instead of accidental, and does so generically -- nothing here knows or
+    # cares that the interesting predecessor is a load.
+    P_UPPER_FIELD_LIVE = 0.5
+
+    def _most_recent_write(self):
+        if not self.last_write:
+            return None
+        return max(self.last_write, key=lambda r: self.last_write[r])
+
     def upper(self):
         # LUI and AUIPC read no register, so they are the generator's way of
         # injecting fresh entropy without creating a dependency.
         rd = self._r()
         imm = self.rng.randrange(0, 1 << 20)
+        live = self._most_recent_write()
+        if live is not None and self.rng.random() < self.P_UPPER_FIELD_LIVE:
+            # imm bits 7:3 land in insn[19:15], the rs1 field.
+            imm = (imm & ~(0x1F << 3)) | (live << 3)
         op = "lui" if self.rng.random() < 0.7 else "auipc"
         self._emit(f"{op:<6} x{rd}, {imm}")
         self._wrote(rd)

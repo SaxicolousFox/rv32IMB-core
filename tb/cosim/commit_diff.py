@@ -93,13 +93,18 @@ def spike_records(elf, isa=None):
     return out
 
 
-def rtl_records(path):
+def rtl_records(path, stop_at_ecall=True):
     """
     Parse the RTL monitor's log, truncated BEFORE the ECALL it retires.
 
     Exclusive, not inclusive: Spike prints no commit line for a trapping
     instruction, so its log ends one entry earlier.  The ECALL is the stop
     marker, not part of the program under comparison.
+
+    `stop_at_ecall=False` keeps it, which the cycle model needs: the ECALL is
+    the last instruction the RTL retires, so it is the one whose cycle ends the
+    measured span.  Dropping it there would make the prediction short by one on
+    every program.
     """
     out = []
     with open(path) as f:
@@ -115,7 +120,7 @@ def rtl_records(path):
                     "  rvntt_trace.sv and commit_diff.render() have diverged.")
             pc = int(m.group(1), 16)
             insn = int(m.group(2), 16)
-            if insn == ECALL_WORD:
+            if stop_at_ecall and insn == ECALL_WORD:
                 break
             writes = []
             if m.group(3) is not None:

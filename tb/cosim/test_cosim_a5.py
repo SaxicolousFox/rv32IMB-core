@@ -20,6 +20,7 @@ this same generator and this same differ.
 """
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -30,6 +31,7 @@ sys.path.insert(0, os.path.join(ROOT, "tb/cosim"))
 sys.path.insert(0, os.path.join(ROOT, "tb/unit"))
 import spike_asm          # noqa: E402
 import commit_diff        # noqa: E402
+import cycle_model        # noqa: E402
 import gen_random_prog    # noqa: E402
 import test_core_verilator as t4   # noqa: E402
 
@@ -70,8 +72,18 @@ def assemble(src_text, tmp, name):
     return elf
 
 
-def run_one(exe, elf, tmp, image_path, name, context=6, verbose=False):
-    """Load `elf`'s image, run the RTL, diff against Spike.  True if identical."""
+SPAN_RE = re.compile(r"span=(-?\d+)")
+
+
+def run_one(exe, elf, tmp, image_path, name, context=6, verbose=False,
+            check_cycles=True):
+    """
+    Load `elf`'s image, run the RTL, diff against Spike.  True if identical.
+
+    Two checks, not one.  The commit-log diff covers architectural state; the
+    span check covers TIMING, which the diff is structurally unable to see -- a
+    phantom stall produces a byte-identical log.  See tb/cosim/cycle_model.py.
+    """
     hexf, _n = t4.elf_to_hex(elf, tmp)
     shutil.copy(hexf, image_path)
 
@@ -89,13 +101,29 @@ def run_one(exe, elf, tmp, image_path, name, context=6, verbose=False):
     sp = commit_diff.spike_records(elf)
     rt = commit_diff.rtl_records(trace)
     report = commit_diff.diff(sp, rt, context)
-    if report is None:
-        if verbose:
-            print(f"  {name}: OK  ({len(sp)} commits byte-identical)")
-        return True
-    print(f"\n=== {name}: COMMIT LOGS DIVERGE ===")
-    print(report)
-    return False
+    if report is not None:
+        print(f"\n=== {name}: COMMIT LOGS DIVERGE ===")
+        print(report)
+        return False
+
+    if check_cycles:
+        m = SPAN_RE.search(out)
+        if not m:
+            print(f"\n=== {name}: no span reported ===\n    " + out)
+            return False
+        actual = int(m.group(1))
+        pred = cycle_model.analyse(
+            commit_diff.rtl_records(trace, stop_at_ecall=False))
+        if pred["span"] != actual:
+            print(f"\n=== {name}: CYCLE COUNT DISAGREES ===")
+            print("  The commit logs are byte-identical, so this is a timing "
+                  "bug, not a data one.")
+            print(cycle_model.explain(pred, actual))
+            return False
+
+    if verbose:
+        print(f"  {name}: OK  ({len(sp)} commits byte-identical)")
+    return True
 
 
 def main():
