@@ -17,6 +17,7 @@ package is parsed and compared, and the tests call this first.
 """
 import os
 import re
+import sys
 
 MASK32 = 0xFFFFFFFF
 
@@ -225,3 +226,223 @@ def check_pkg_agreement():
 if __name__ == "__main__":
     n = check_pkg_agreement()
     print(f"rv32i_ref: package agreement OK ({n} enum members checked)")
+
+
+# =============================================================================
+# Instruction decoder (plan A3)
+# =============================================================================
+# Written from the ISA specification and, for the custom opcodes, delegated to
+# model/isa/xkntt.py -- the FROZEN contract.  Delegating rather than
+# reimplementing is the point: the four-way agreement in the root CLAUDE.md is
+# defined as the RTL decoder, model/isa/xkntt.py, Spike and the LLVM SchedModel
+# all matching.  A second hand-written copy of the Xkntt decode rules here would
+# be a fourth thing to keep in sync, and it could agree with the RTL while both
+# disagreed with the contract.
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "isa"))
+import xkntt as _xkntt   # noqa: E402
+
+# ------------------------------------------------------------------ opcodes
+OPC_LOAD     = 0x03
+OPC_CUSTOM_0 = 0x0B
+OPC_MISC_MEM = 0x0F
+OPC_OP_IMM   = 0x13
+OPC_AUIPC    = 0x17
+OPC_STORE    = 0x23
+OPC_CUSTOM_1 = 0x2B
+OPC_OP       = 0x33
+OPC_LUI      = 0x37
+OPC_BRANCH   = 0x63
+OPC_JALR     = 0x67
+OPC_JAL      = 0x6F
+OPC_SYSTEM   = 0x73
+
+# -------------------------------------------------------------- alu_src_a_e
+SRCA_RS1, SRCA_PC, SRCA_ZERO = 0, 1, 2
+# -------------------------------------------------------------- alu_src_b_e
+SRCB_RS2, SRCB_IMM = 0, 1
+# ------------------------------------------------------------- result_sel_e
+RES_ALU, RES_MEM, RES_PC4, RES_CSR, RES_XKNTT = 0, 1, 2, 3, 4
+# --------------------------------------------------------------- xkntt_op_e
+XK_NONE, XK_KMM, XK_KBFCT, XK_KBFGS, XK_KBMUL0, XK_KMAC, XK_KBMUL1 = range(7)
+XK_NTT_CFG, XK_NTT_START, XK_NTT_WAIT, XK_NTT_STAT = 7, 8, 9, 10
+
+# Xkntt mnemonic (as model/isa/xkntt.py names it) -> xkntt_op_e encoding.
+XK_BY_MNEMONIC = {
+    "kmm": XK_KMM, "kbfct": XK_KBFCT, "kbfgs": XK_KBFGS,
+    "kbmul0": XK_KBMUL0, "kmac": XK_KMAC, "kbmul1": XK_KBMUL1,
+    "kntt.cfg": XK_NTT_CFG, "kntt.start": XK_NTT_START,
+    "kntt.wait": XK_NTT_WAIT, "kntt.stat": XK_NTT_STAT,
+}
+
+# The fields of ctrl_t, in the order the struct declares them.  Used by the
+# testbench to compare and to report a mismatch by name.
+CTRL_FIELDS = [
+    "reg_write", "mem_read", "mem_write", "mem_op", "branch", "jump", "jalr",
+    "alu_op", "alu_src_a", "alu_src_b", "result_sel", "imm_fmt",
+    "uses_rs1", "uses_rs2", "uses_rs3",
+    "is_ecall", "is_ebreak", "is_mret", "is_csr", "is_xkntt", "xkntt_op",
+    "is_illegal",
+]
+
+F7_BASE, F7_ALT = 0b0000000, 0b0100000
+
+# funct3 -> alu_op for the non-shift OP/OP-IMM operations.
+_ALU_BY_F3 = {
+    0b000: ALU_ADD, 0b010: ALU_SLT, 0b011: ALU_SLTU,
+    0b100: ALU_XOR, 0b110: ALU_OR, 0b111: ALU_AND,
+}
+
+
+def _blank():
+    d = {f: 0 for f in CTRL_FIELDS}
+    d["is_illegal"] = 1
+    return d
+
+
+def decode(insn):
+    """
+    Decode one 32-bit word into the ctrl_t bundle, as a dict keyed by
+    CTRL_FIELDS, plus the four register addresses.
+
+    Returns (ctrl, regs) where regs is {"rd", "rs1", "rs2", "rs3"}.
+
+    Legality follows three separate rules; see rtl/core/rvntt_decode.sv's header
+    for why they are not one rule:
+      1. Xkntt reserved fields are strict (delegated to model/isa/xkntt.py).
+      2. FENCE's unused fields are ignored, per the base ISA.
+      3. Anything outside rv32i_zicsr_zicntr_xkntt0p1 is illegal -- no M, no
+         Zifencei.
+    """
+    insn = u32(insn)
+    opcode = bits(insn, 6, 0)
+    funct3 = bits(insn, 14, 12)
+    funct7 = bits(insn, 31, 25)
+    funct12 = bits(insn, 31, 20)
+
+    regs = {
+        "rd":  bits(insn, 11, 7),
+        "rs1": bits(insn, 19, 15),
+        "rs2": bits(insn, 24, 20),
+        "rs3": bits(insn, 31, 27),
+    }
+
+    c = _blank()
+    f7_base = funct7 == F7_BASE
+    f7_alt = funct7 == F7_ALT
+
+    if opcode == OPC_LUI:
+        c.update(reg_write=1, imm_fmt=IMM_U, alu_op=ALU_PASS_B,
+                 alu_src_b=SRCB_IMM, result_sel=RES_ALU, is_illegal=0)
+
+    elif opcode == OPC_AUIPC:
+        c.update(reg_write=1, imm_fmt=IMM_U, alu_op=ALU_ADD, alu_src_a=SRCA_PC,
+                 alu_src_b=SRCB_IMM, result_sel=RES_ALU, is_illegal=0)
+
+    elif opcode == OPC_JAL:
+        c.update(reg_write=1, jump=1, imm_fmt=IMM_J, alu_op=ALU_ADD,
+                 alu_src_a=SRCA_PC, alu_src_b=SRCB_IMM, result_sel=RES_PC4,
+                 is_illegal=0)
+
+    elif opcode == OPC_JALR:
+        if funct3 == 0:
+            c.update(reg_write=1, jump=1, jalr=1, uses_rs1=1, imm_fmt=IMM_I,
+                     alu_op=ALU_ADD, alu_src_a=SRCA_RS1, alu_src_b=SRCB_IMM,
+                     result_sel=RES_PC4, is_illegal=0)
+
+    elif opcode == OPC_BRANCH:
+        if funct3 not in (0b010, 0b011):
+            c.update(branch=1, uses_rs1=1, uses_rs2=1, imm_fmt=IMM_B,
+                     alu_op=ALU_ADD, alu_src_a=SRCA_PC, alu_src_b=SRCB_IMM,
+                     is_illegal=0)
+
+    elif opcode == OPC_LOAD:
+        if funct3 in (0b000, 0b001, 0b010, 0b100, 0b101):
+            c.update(reg_write=1, mem_read=1, mem_op=funct3, uses_rs1=1,
+                     imm_fmt=IMM_I, alu_op=ALU_ADD, alu_src_b=SRCB_IMM,
+                     result_sel=RES_MEM, is_illegal=0)
+
+    elif opcode == OPC_STORE:
+        if funct3 in (0b000, 0b001, 0b010):
+            c.update(mem_write=1, mem_op=funct3, uses_rs1=1, uses_rs2=1,
+                     imm_fmt=IMM_S, alu_op=ALU_ADD, alu_src_b=SRCB_IMM,
+                     is_illegal=0)
+
+    elif opcode == OPC_OP_IMM:
+        c.update(reg_write=1, uses_rs1=1, imm_fmt=IMM_I, alu_src_b=SRCB_IMM,
+                 result_sel=RES_ALU)
+        if funct3 in _ALU_BY_F3:
+            c.update(alu_op=_ALU_BY_F3[funct3], is_illegal=0)
+        elif funct3 == 0b001:                       # SLLI
+            c.update(alu_op=ALU_SLL, is_illegal=0 if f7_base else 1)
+        else:                                       # 0b101, SRLI / SRAI
+            c.update(alu_op=ALU_SRA if f7_alt else ALU_SRL,
+                     is_illegal=0 if (f7_base or f7_alt) else 1)
+
+    elif opcode == OPC_OP:
+        c.update(reg_write=1, uses_rs1=1, uses_rs2=1, alu_src_b=SRCB_RS2,
+                 result_sel=RES_ALU)
+        if funct3 == 0b000:                         # ADD / SUB
+            c.update(alu_op=ALU_SUB if f7_alt else ALU_ADD,
+                     is_illegal=0 if (f7_base or f7_alt) else 1)
+        elif funct3 == 0b101:                       # SRL / SRA
+            c.update(alu_op=ALU_SRA if f7_alt else ALU_SRL,
+                     is_illegal=0 if (f7_base or f7_alt) else 1)
+        elif funct3 == 0b001:
+            c.update(alu_op=ALU_SLL, is_illegal=0 if f7_base else 1)
+        else:
+            c.update(alu_op=_ALU_BY_F3[funct3], is_illegal=0 if f7_base else 1)
+
+    elif opcode == OPC_MISC_MEM:
+        # FENCE: the fm/pred/succ/rs1/rd fields are ignored by base
+        # implementations, so any value of them is legal.  FENCE.I (funct3=1)
+        # is Zifencei, which is not in this core's ISA string.
+        if funct3 == 0b000:
+            c.update(is_illegal=0)
+
+    elif opcode == OPC_SYSTEM:
+        if funct3 == 0b000:
+            if regs["rd"] == 0 and regs["rs1"] == 0:
+                if funct12 == 0x000:
+                    c.update(is_ecall=1, is_illegal=0)
+                elif funct12 == 0x001:
+                    c.update(is_ebreak=1, is_illegal=0)
+                elif funct12 == 0x302:
+                    c.update(is_mret=1, is_illegal=0)
+                elif funct12 == 0x105:              # WFI, a legal NOP
+                    c.update(is_illegal=0)
+        elif funct3 in (0b001, 0b010, 0b011):
+            c.update(is_csr=1, reg_write=1, uses_rs1=1, imm_fmt=IMM_I,
+                     result_sel=RES_CSR, is_illegal=0)
+        elif funct3 in (0b101, 0b110, 0b111):
+            # rs1 is a uimm here, not a register: uses_rs1 must stay 0.
+            c.update(is_csr=1, reg_write=1, imm_fmt=IMM_Z,
+                     result_sel=RES_CSR, is_illegal=0)
+        # funct3 == 0b100 is reserved.
+
+    elif opcode in (OPC_CUSTOM_0, OPC_CUSTOM_1):
+        c["is_xkntt"] = 1
+        d = _xkntt.decode(insn)          # the frozen contract decides legality
+        if d is not None:
+            op = XK_BY_MNEMONIC[d["mnemonic"]]
+            c.update(xkntt_op=op, is_illegal=0)
+            if opcode == OPC_CUSTOM_0:
+                c.update(reg_write=1, uses_rs1=1, uses_rs2=1,
+                         result_sel=RES_XKNTT)
+                if op in (XK_KBMUL0, XK_KMAC):
+                    c["uses_rs3"] = 1
+            elif op == XK_NTT_CFG:
+                c.update(uses_rs1=1, uses_rs2=1)
+            elif op == XK_NTT_START:
+                c.update(uses_rs1=1, reg_write=1, result_sel=RES_XKNTT)
+            else:                        # kntt.wait / kntt.stat
+                c.update(reg_write=1, result_sel=RES_XKNTT)
+
+    # An illegal instruction has no architectural effect.  The WHOLE bundle is
+    # reset, not just the side-effect flags: several branches above set
+    # result_sel or imm_fmt before legality is known.  The RTL states the same
+    # rule the same way, at the bottom of its always_comb.
+    if c["is_illegal"]:
+        c = _blank()
+
+    return c, regs

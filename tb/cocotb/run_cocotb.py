@@ -41,6 +41,17 @@ DESIGNS = {
         module="test_immgen_cocotb",
         build_args=[],
     ),
+    # The toplevel is a testbench-only wrapper that flattens ctrl_t into scalar
+    # ports, because Verilator gives cocotb no member access into a packed
+    # struct.  -Wall so the wrapper is linted here -- it lives under tb/ and so
+    # is not covered by tb/lint_all.py, which walks rtl/ only.
+    "decode": dict(
+        sources=[PKG, ROOT / "rtl/core/rvntt_decode.sv",
+                 Path(__file__).resolve().parent / "rvntt_decode_flat.sv"],
+        toplevel="rvntt_decode_flat",
+        module="test_decode_cocotb",
+        build_args=["-Wall"],
+    ),
 }
 
 
