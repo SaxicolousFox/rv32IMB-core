@@ -19,6 +19,11 @@ toolchain/patches.sh verify spike    # round-trip check
 
 **Re-export after every commit to a fork**, or `patches_in_sync` fails.
 
+**`origin/master` here is not this repo.** `patches.sh` and
+`upstream-pins.txt` name `origin/master` because that is **riscv-isa-sim's**
+default branch. This project's own default branch is `main`. Renaming those
+strings would break `patches.sh rebase`.
+
 `verify` normalises the `From <sha>` and `index` lines before comparing:
 `git am` necessarily creates new commit objects, so those differ after any
 round-trip even when the content is identical. The stronger check is `apply` —

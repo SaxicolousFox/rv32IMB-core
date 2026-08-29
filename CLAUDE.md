@@ -180,8 +180,32 @@ TIER2 backend, no RTL verification, and no `make KAT` target. Any milestone
 whose criteria depend on the full three-backend suite — M14 in particular —
 must not be marked complete.
 
-### Keep this file current
+### When a milestone is met — the full ritual
 
-When a milestone's "Done when" is genuinely met, **update this file and commit
-the change as part of that work.** This is your own workflow, not something to
-be asked for each time.
+This is your own workflow, not something to be asked for each time. On
+confirming a milestone's actual "Done when" text is satisfied:
+
+1. **Update the milestone table above** and any affected `CLAUDE.md`, in the
+   same commit as the work.
+2. **Commit**, with the trailers above.
+3. **Tag**, annotated, named for the milestone and what is distinctive about
+   it — e.g. `m3-tier1-kat`. Write the annotation so it stands alone: what is
+   verified, what is explicitly *not* settled, and where to go next. Someone
+   will land on it cold.
+4. **Push the branch and the tags.**
+
+```sh
+git push origin main
+git push origin --tags
+```
+
+Push at milestone boundaries and at the end of a track or phase — not after
+every commit, and never leave a completed milestone unpushed. `origin` is
+`github.com/SaxicolousFox/riscv-ntt`, authenticated, and `main` tracks
+`origin/main`.
+
+> **`main` is this repo; `master` is upstream Spike.** The default branch here
+> was renamed to `main`. The `origin/master` in `toolchain/patches.sh` and
+> `toolchain/upstream-pins.txt` refers to **riscv-isa-sim's** default branch,
+> which really is `master`. Do not "fix" those — it would break
+> `patches.sh rebase`.
