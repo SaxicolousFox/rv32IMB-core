@@ -14,10 +14,13 @@ was the whole reason C1 came before this.
 | `rvntt_alu.sv` | A2 | `cocotb_alu`, `formal_alu`, Vivado elaboration |
 | `rvntt_immgen.sv` | A2 | `cocotb_immgen`, `formal_immgen`, Vivado elaboration |
 | `rvntt_decode.sv` | A3 | `cocotb_decode`, `formal_decode`, Vivado elaboration |
-| `rvntt_core.sv` | A4 | `core_a4_checksum`, Vivado elaboration |
+| `rvntt_forward.sv` | A6 | `formal_forward`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
+| `rvntt_core.sv` | A4, A6 | `core_a4_checksum`, `cosim_commit_log`, Vivado elaboration |
 | `../soc/rvntt_ram.sv`, `../soc/rvntt_core_sim_top.sv` | A4 | `core_a4_checksum` |
 | `tb/unit/rvntt_trace.sv` + `rvntt_trace_top.sv` | A5 | `cosim_commit_log` |
 | `tb/cosim/commit_diff.py`, `gen_random_prog.py` | A5 | `cosim_commit_log` |
+| `sw/tests/a6_forward.S` | A6 | `cosim_directed` |
+| `tb/mutate/run_mutation.py` | A6 | run by hand; see below |
 
 ### `rv32i_pkg.sv`
 
@@ -120,12 +123,12 @@ packed struct. It duplicates the field list by hand, so the fault-injection
 table carries **one mutation per `ctrl_t` field** — if a field were wired to the
 wrong port, its mutation would escape.
 
-### `rvntt_core.sv` — what A4 deliberately does *not* have
+### `rvntt_core.sv` — what the pipeline deliberately does *not* have yet
 
 Plan A4's bring-up strategy is to build the datapath with hazard handling
 absent, verify against NOP-padded code, then add each layer. So these are the
-design, not a to-do list: **no forwarding** (A6), **no load-use interlock**
-(A7), **no control flow at all** (A8 — the PC is `pc+4`, always).
+design, not a to-do list: **no load-use interlock** (A7), **no control flow at
+all** (A8 — the PC is `pc+4`, always). Forwarding (A6) is present.
 
 That last one is dangerous, so it is not left to a comment. **`dbg_unsupported`
 pulses whenever an instruction retires that this core cannot execute
@@ -141,6 +144,57 @@ address comes from the PC register in IF, so the instruction arrives in ID.
 Port B's address comes from the **combinational** ALU result in EX, not from
 the EX/MEM register — driving it from the registered result pushes load data
 into WB and adds a second load-use bubble the plan's timing does not have.
+
+### A6 — forwarding, and where the three distances are handled
+
+`rvntt_forward.sv` resolves EX/MEM→EX and MEM/WB→EX for both operands. What is
+easy to miss is that **the forwarding network alone does not cover every
+distance** — it covers 1 and 2, and distance 3 is the register file's
+*write-through*. Those two mechanisms are in different files, and the boundary
+between them is exactly where the random generator's `RAW_DISTANCE = 3` sits.
+A mutation that deletes write-through leaves the forwarding unit provably
+correct and the pipeline broken.
+
+**Loads are excluded from `FWD_MEM` on purpose.** A load in MEM does have its
+data by then — `rvntt_ram` registers the address back in EX — so forwarding it
+would work functionally. It would also put the BRAM output register on the path
+`BRAM → sign-extend → forward mux → ALU → BRAM address` inside one cycle, which
+is the worst path in the design and the one A-FPGA will have to close at
+100 MHz. A7's one-cycle interlock exists to avoid that path, not because the
+data is unavailable. The exclusion lives in `rvntt_forward`'s `mem_mem_read`
+input; the interlock is what makes it *safe*.
+
+**Forwarding is gated on `uses_rs1` / `uses_rs2`, and that gate is shared with
+A7's interlock.** Forwarding into an operand the instruction does not read is
+harmless on its own — the source mux would not select it — but the same
+predicate decides whether the pipeline *stalls*, and a stall on a register field
+that is really part of an immediate (LUI's `rs1` bits) is a phantom stall:
+invisible in a functional test, visible only as an IPC discrepancy much later.
+One predicate, so the two cannot disagree.
+
+**`rs3` is deliberately absent** from both the forwarding unit and the
+interlock. It is read only by the Xkntt R4-type instructions, which no stage
+executes yet, so a path for it could not be tested — and untestable logic that
+looks verified is worse than no logic. It goes in with the coprocessor
+interface, with its own tests.
+
+**The MEM-stage forward source is not `mem_result`.** It is a separate mux over
+`alu_result` and `pc_plus4` only. `mem_result` includes the load path, so using
+it would reintroduce the BRAM-to-ALU path through the back door while looking
+like a simplification.
+
+### Formal properties must not be written in terms of the code they check
+
+`rvntt_forward`'s properties originally reused the module's own
+`mem_supplies` / `wb_supplies` wires. Every priority, completeness and soundness
+property was therefore checking those wires against themselves, and a mutation
+*inside* them sailed straight through. The mutation harness found it. The
+properties now rebuild the predicates from the raw input ports, in De Morgan
+form so they are not the same text twice.
+
+This generalises: **a property that reuses an intermediate signal from the
+design under test cannot detect a bug in that signal.** It is the assertion
+equivalent of testing a function by calling it.
 
 ### A5 — the cosimulation harness
 
@@ -246,11 +300,42 @@ Not hypothetical — these are defects the practice found in this directory:
   that constrains a handful of specific encodings out of 2³² needs a directed
   sweep. Random testing covers the common case and never the rare constraint.
 
+- **Formal properties written in terms of the design's own intermediate
+  signals** (A6). `rvntt_forward`'s priority, completeness and soundness
+  properties all went through `mem_supplies` / `wb_supplies`, so a mutation
+  inside those wires was invisible to every one of them. See the section above.
+- **A directed test that could not reach the path it padded around** (A6).
+  `a4_checksum.S` pads every RAW with three NOPs, putting its dependencies at
+  distance 4 — so it never exercises the register file's write-through at
+  distance 3, and was wrongly credited with covering it. The manifest's
+  "which test must catch this" field is what turned that into a `PARTIAL`
+  verdict instead of a silent over-estimate.
+
 The general lesson: fault-inject *each* checking mechanism separately, against
 the same mutation table. Of the 15 A2 mutations, 14 were caught by both cocotb
 and formal — and the one that was not is precisely the one that found a real
 hole. Running only the mechanism that happened to be stronger would have left
 the proof quietly incomplete.
+
+### `tb/mutate/run_mutation.py`
+
+Through A5 this was a throwaway script per step, which made every result
+unreproducible the moment the session ended — the wrong property for the habit
+that has caught the most here. It is now a committed harness with a manifest.
+
+Two things about it are worth keeping:
+
+- **Every mutation declares *which* tests must catch it**, and a declared
+  catcher that does not catch is a failure (`PARTIAL`), not a footnote.
+  Requiring only that *something* catches each mutation lets a manifest decay
+  until one broad test is credited with everything.
+- **A mutation that fails to build is an error, not a catch.** Deleting an
+  expression's only use makes Verilator's `UNUSEDSIGNAL` the detector rather
+  than the test. Two A4 mutations and two A6 ones had to be reformulated so
+  every signal stayed referenced.
+
+A baseline run against unmutated RTL comes first, so a stuck-at-fail test
+cannot appear to catch everything.
 
 ## Formal depth
 

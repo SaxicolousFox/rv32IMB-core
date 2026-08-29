@@ -1,16 +1,19 @@
 // ============================================================================
-// rvntt_core -- the 5-stage RV32I pipeline, with hazard handling DELIBERATELY
-// ABSENT (plan A4).
+// rvntt_core -- the 5-stage RV32I pipeline.
 //
-// Plan A4's bring-up strategy is explicit: build the datapath with no
-// forwarding, no stalls and no flushes, verify it against hand-scheduled
-// NOP-padded code, and only then add each hazard layer.  Every bug then has a
-// small suspect list.  So the omissions below are the design, not a to-do list:
+// Plan A4's bring-up strategy was to build the datapath with no forwarding, no
+// stalls and no flushes, verify it against hand-scheduled NOP-padded code, and
+// only then add each hazard layer.  A6 adds the first of those layers, so the
+// remaining omissions are still the design rather than a to-do list:
 //
-//   * NO FORWARDING (A6).  A RAW dependency must be separated by >= 3
-//     instructions or the reader sees a stale register.
-//   * NO LOAD-USE INTERLOCK (A7).  A load's result must not be used within 2
-//     instructions.
+//   * FORWARDING (A6) is present: EX/MEM -> EX and MEM/WB -> EX for both
+//     operands, the store-data operand included.  A RAW dependency at any
+//     distance now reads the right value -- EXCEPT a load's result at distance
+//     1, see below.
+//   * NO LOAD-USE INTERLOCK (A7).  A load's result is deliberately not a
+//     forwarding source from MEM (rvntt_forward.sv explains why), so until the
+//     interlock exists a load's result must not be used within 2 instructions.
+//     The random program generator pads that away with --load-use-density 0.
 //   * NO CONTROL FLOW (A8).  The PC is pc+4, always.  Branches and jumps do not
 //     redirect, so a program that needs them will silently compute nonsense.
 //
@@ -58,10 +61,32 @@ module rvntt_core #(
     output logic [31:0] commit_wdata,
     output logic        commit_is_ecall,
 
-    // Pulses with commit_valid when the retiring instruction is one this A4
-    // core cannot execute faithfully.  See the header.
+    // Pulses with commit_valid when the retiring instruction is one this core
+    // cannot execute faithfully.  See the header.
     output logic        dbg_unsupported
 );
+
+  // ==========================================================================
+  // Pipeline registers
+  // ==========================================================================
+  // Declared together and ahead of the stages, rather than each inside the
+  // stage that writes it, because A6's forwarding makes EX read ex_mem_q and
+  // mem_wb_q -- registers written by stages that appear below EX in this file.
+  // Neither Verilator nor Yosys accepts a reference above a declaration.
+  //
+  // UNUSEDSIGNAL on parts of id_ex_q and ex_mem_q is expected: rs3_addr and
+  // rs3_data feed the Xkntt R4 operands, and ex_mem_q carries mem_write and
+  // store_data for a store buffer this pipeline does not have.  The fields are
+  // in the structs because the pipeline registers are defined once, in the
+  // package, for the finished design -- not trimmed to whatever the current
+  // step happens to read.  Scoped to the declarations so UNUSEDSIGNAL stays
+  // live everywhere else.
+  rv32i_pkg::if_id_t  if_id_q, if_id;
+  /* verilator lint_off UNUSEDSIGNAL */
+  rv32i_pkg::id_ex_t  id_ex_q;
+  rv32i_pkg::ex_mem_t ex_mem_q;
+  /* verilator lint_on UNUSEDSIGNAL */
+  rv32i_pkg::mem_wb_t mem_wb_q;
 
   // ==========================================================================
   // IF -- program counter
@@ -81,8 +106,6 @@ module rvntt_core #(
   // The instruction itself is NOT flopped here: it arrives from the RAM's own
   // output register, which is the IF/ID insn register.  Flopping imem_rdata
   // again would add a stage.
-  rv32i_pkg::if_id_t if_id_q, if_id;
-
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       if_id_q.valid <= 1'b0;
@@ -139,16 +162,6 @@ module rvntt_core #(
   // ==========================================================================
   // ID/EX
   // ==========================================================================
-  // UNUSEDSIGNAL on parts of id_ex_q is expected at A4: rs3_addr/rs3_data feed
-  // the Xkntt R4 operands and ex_mem_q carries mem_read/mem_write/store_data
-  // for a store-buffer this stage does not have yet.  The fields are in the
-  // struct because the pipeline registers are defined once, in the package, for
-  // the finished design -- not trimmed to whatever the current step happens to
-  // read.  Scoped to the declaration so UNUSEDSIGNAL stays live elsewhere.
-  /* verilator lint_off UNUSEDSIGNAL */
-  rv32i_pkg::id_ex_t id_ex_q;
-  /* verilator lint_on UNUSEDSIGNAL */
-
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       id_ex_q <= '0;
@@ -169,21 +182,73 @@ module rvntt_core #(
   end
 
   // ==========================================================================
-  // EX -- ALU
+  // EX -- forwarding, then the ALU
   // ==========================================================================
+  // The forwarding muxes come FIRST, and everything in EX that reads a register
+  // operand reads their output: the ALU's two sources, and the store-data path.
+  // The store-data operand is the one that gets forgotten -- it does not go
+  // through the ALU, so a testbench that only checks arithmetic never notices
+  // that `sw` wrote a stale value.  Plan A7 names it explicitly for that
+  // reason, and there is exactly one rs2 signal in this stage so it cannot be
+  // half-fixed.
+  rv32i_pkg::fwd_sel_e ex_fwd_a, ex_fwd_b;
+  logic [31:0] ex_rs1_fwd, ex_rs2_fwd;
+
+  // The MEM stage's forwardable value.  NOT `mem_result`, which includes the
+  // load path: this mux is only over the two sources that are already
+  // registered, so the forwarding network can never put the BRAM output on the
+  // ALU's input path.  See rvntt_forward.sv.
+  logic [31:0] ex_mem_fwd_data;
+  always_comb begin
+    ex_mem_fwd_data = (ex_mem_q.result_sel == rv32i_pkg::RES_PC4)
+                      ? ex_mem_q.pc_plus4 : ex_mem_q.alu_result;
+  end
+
+  rvntt_forward u_forward (
+      .ex_rs1_addr   (id_ex_q.rs1_addr),
+      .ex_rs2_addr   (id_ex_q.rs2_addr),
+      .ex_uses_rs1   (id_ex_q.ctrl.uses_rs1),
+      .ex_uses_rs2   (id_ex_q.ctrl.uses_rs2),
+      .mem_valid     (ex_mem_q.valid),
+      .mem_reg_write (ex_mem_q.reg_write),
+      .mem_mem_read  (ex_mem_q.mem_read),
+      .mem_rd_addr   (ex_mem_q.rd_addr),
+      .wb_valid      (mem_wb_q.valid),
+      .wb_reg_write  (mem_wb_q.reg_write),
+      .wb_rd_addr    (mem_wb_q.rd_addr),
+      .fwd_a         (ex_fwd_a),
+      .fwd_b         (ex_fwd_b)
+  );
+
+  always_comb begin
+    unique case (ex_fwd_a)
+      rv32i_pkg::FWD_MEM: ex_rs1_fwd = ex_mem_fwd_data;
+      rv32i_pkg::FWD_WB:  ex_rs1_fwd = mem_wb_q.wb_data;
+      default:            ex_rs1_fwd = id_ex_q.rs1_data;
+    endcase
+  end
+
+  always_comb begin
+    unique case (ex_fwd_b)
+      rv32i_pkg::FWD_MEM: ex_rs2_fwd = ex_mem_fwd_data;
+      rv32i_pkg::FWD_WB:  ex_rs2_fwd = mem_wb_q.wb_data;
+      default:            ex_rs2_fwd = id_ex_q.rs2_data;
+    endcase
+  end
+
   logic [31:0] ex_alu_a, ex_alu_b, ex_alu_y;
 
   always_comb begin
     unique case (id_ex_q.ctrl.alu_src_a)
-      rv32i_pkg::SRCA_RS1:  ex_alu_a = id_ex_q.rs1_data;
+      rv32i_pkg::SRCA_RS1:  ex_alu_a = ex_rs1_fwd;
       rv32i_pkg::SRCA_PC:   ex_alu_a = id_ex_q.pc;
       rv32i_pkg::SRCA_ZERO: ex_alu_a = 32'h0;
-      default:              ex_alu_a = id_ex_q.rs1_data;
+      default:              ex_alu_a = ex_rs1_fwd;
     endcase
   end
 
   assign ex_alu_b = (id_ex_q.ctrl.alu_src_b == rv32i_pkg::SRCB_IMM)
-                    ? id_ex_q.imm : id_ex_q.rs2_data;
+                    ? id_ex_q.imm : ex_rs2_fwd;
 
   rvntt_alu u_alu (
       .op (id_ex_q.ctrl.alu_op),
@@ -198,20 +263,20 @@ module rvntt_core #(
   assign ex_byte_off = ex_alu_y[1:0];
 
   always_comb begin
-    dmem_wdata = id_ex_q.rs2_data;
+    dmem_wdata = ex_rs2_fwd;
     dmem_be    = 4'b0000;
     if (id_ex_q.valid && id_ex_q.ctrl.mem_write) begin
       unique case (id_ex_q.ctrl.mem_op)
         rv32i_pkg::F3_LB: begin                       // SB
-          dmem_wdata = {4{id_ex_q.rs2_data[7:0]}};
+          dmem_wdata = {4{ex_rs2_fwd[7:0]}};
           dmem_be    = 4'b0001 << ex_byte_off;
         end
         rv32i_pkg::F3_LH: begin                       // SH
-          dmem_wdata = {2{id_ex_q.rs2_data[15:0]}};
+          dmem_wdata = {2{ex_rs2_fwd[15:0]}};
           dmem_be    = ex_byte_off[1] ? 4'b1100 : 4'b0011;
         end
         rv32i_pkg::F3_LW: begin                       // SW
-          dmem_wdata = id_ex_q.rs2_data;
+          dmem_wdata = ex_rs2_fwd;
           dmem_be    = 4'b1111;
         end
         default: dmem_be = 4'b0000;   // reserved widths never reach here: the
@@ -225,10 +290,6 @@ module rvntt_core #(
   // ==========================================================================
   // EX/MEM
   // ==========================================================================
-  /* verilator lint_off UNUSEDSIGNAL */
-  rv32i_pkg::ex_mem_t ex_mem_q;
-  /* verilator lint_on UNUSEDSIGNAL */
-
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       ex_mem_q <= '0;
@@ -243,7 +304,7 @@ module rvntt_core #(
       ex_mem_q.result_sel <= id_ex_q.ctrl.result_sel;
       ex_mem_q.rd_addr    <= id_ex_q.rd_addr;
       ex_mem_q.alu_result <= ex_alu_y;
-      ex_mem_q.store_data <= id_ex_q.rs2_data;
+      ex_mem_q.store_data <= ex_rs2_fwd;
       ex_mem_q.pc_plus4   <= id_ex_q.pc + 32'd4;
     end
   end
@@ -286,8 +347,6 @@ module rvntt_core #(
   // ==========================================================================
   // MEM/WB
   // ==========================================================================
-  rv32i_pkg::mem_wb_t mem_wb_q;
-
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       mem_wb_q <= '0;
@@ -317,7 +376,7 @@ module rvntt_core #(
   assign commit_rd        = mem_wb_q.rd_addr;
   assign commit_wdata     = mem_wb_q.wb_data;
 
-  // ---- the A4 capability guard --------------------------------------------
+  // ---- the capability guard ------------------------------------------------
   // Decoded again at WB rather than piped down: this is diagnostic-only logic,
   // and re-decoding the retiring word costs nothing in simulation while keeping
   // three more fields out of every pipeline register.
