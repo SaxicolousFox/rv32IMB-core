@@ -54,3 +54,4 @@ tb/formal/*.sby
 model/dumps/
 model/cref/ntt_dump
 toolchain/llvm-project/
+sw/kyber/build/
