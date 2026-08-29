@@ -35,12 +35,17 @@ Two environment constraints that will otherwise waste a cycle each:
 
 | Where | What |
 |---|---|
-| `/mnt/c/Users/liamf/Downloads/RISC-V_NTT.txt` | **The plan document. Outside the repo** — not discoverable by searching it. |
+| `docs/RISC-V_NTT.txt` | **The plan document.** Present locally but **gitignored** — see the note below. |
 | `docs/isa-spec.md` | The frozen `Xkntt` contract: encodings, semantics, latency, exceptions. |
 | `docs/spike-xkntt.md` | The Spike fork. **Track A needs this** — Spike is the cosim reference. |
 | `docs/insn-bridge.md` | How to emit `Xkntt` instructions from C or a testbench. |
 | `docs/kyber-backends.md` | The ML-KEM-768 build with swappable NTT backends. |
 | `docs/patch-discipline.md`, `docs/fpga-bringup.md` | Toolchain forks; board bring-up. |
+
+> **The plan document is not in git.** It sits at `docs/RISC-V_NTT.txt` on this
+> machine, but `.gitignore` excludes it, so a fresh clone or a new worktree will
+> not have it. If it is missing, **ask the user for a copy** — do not proceed on
+> a reconstruction of it, and do not commit it if handed one.
 
 ---
 
@@ -163,7 +168,8 @@ not treat them as independently owned.**
 
 ## Milestones
 
-**Before marking anything complete, re-read §12 of the plan document directly.**
+**Before marking anything complete, re-read §12 of `docs/RISC-V_NTT.txt`
+directly.**
 Do not rely on remembered M-numbering — check the actual "Done when" text and
 confirm it is satisfied.
 
