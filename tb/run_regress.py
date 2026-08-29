@@ -108,6 +108,24 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "model/compare_ntt.py"), "-n", "1000"],
                   timeout=900))
 
+    # ---- Track A: the RV32I pipeline ----
+    # Kept in its own block so Track B can append its own section without a
+    # merge conflict in the middle of this list.
+    t.append(Test("verilator_sim_regfile", "rtl",
+                  [py, os.path.join(ROOT, "tb/unit/test_regfile_verilator.py")],
+                  requires=["verilator"], timeout=300))
+
+    # Depth 8, not the run_formal.py default of 20.  Every regfile property is
+    # combinational except the storage-stability one, which spans two cycles, so
+    # 8 is already 4x margin.  Depth matters a lot here: each BMC step adds
+    # another symbolic write to a 32x32 memory, and the solve time blows up
+    # superlinearly -- depth 8 proves in ~3s, while depth 20 was still grinding
+    # on step 13 after eight minutes with nothing further to find.
+    t.append(Test("formal_regfile", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_regfile", "--depth", "8"],
+                  requires=["sby", "yosys"], timeout=600))
+
     # ---- harness self-check: proves FAIL is actually detected (see P0.2) ----
     t.append(Test("harness_detects_failure", "meta",
                   [py, "-c", "import sys; sys.exit(3)"],
