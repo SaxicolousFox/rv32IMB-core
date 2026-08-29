@@ -155,6 +155,20 @@ def discover() -> list:
                    "--design", "rvntt_immgen", "--depth", "2"],
                   requires=["sby", "yosys"], timeout=600))
 
+    # A3.  The 10^6-word comparison against the Python decoder dominates the
+    # runtime (~40s) and is the acceptance test; it is not sampled down, because
+    # the legal/illegal boundary is exactly what a smaller run would under-cover.
+    t.append(Test("cocotb_decode", "cocotb",
+                  [py, os.path.join(ROOT, "tb/cocotb/run_cocotb.py"),
+                   "--design", "decode"],
+                  cwd=os.path.join(ROOT, "tb/cocotb"),
+                  requires=["verilator"], timeout=1200))
+
+    t.append(Test("formal_decode", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_decode", "--depth", "2"],
+                  requires=["sby", "yosys"], timeout=600))
+
     # ---- harness self-check: proves FAIL is actually detected (see P0.2) ----
     t.append(Test("harness_detects_failure", "meta",
                   [py, "-c", "import sys; sys.exit(3)"],

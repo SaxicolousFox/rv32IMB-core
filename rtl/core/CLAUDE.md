@@ -13,6 +13,7 @@ was the whole reason C1 came before this.
 | `rvntt_regfile.sv` | A1 | `verilator_sim_regfile`, `formal_regfile`, Vivado elaboration |
 | `rvntt_alu.sv` | A2 | `cocotb_alu`, `formal_alu`, Vivado elaboration |
 | `rvntt_immgen.sv` | A2 | `cocotb_immgen`, `formal_immgen`, Vivado elaboration |
+| `rvntt_decode.sv` | A3 | `cocotb_decode`, `formal_decode`, Vivado elaboration |
 
 ### `rv32i_pkg.sv`
 
@@ -73,6 +74,48 @@ and a formal proof that restates each result in a second, different idiom.
   Every cocotb test calls it first. Without it, renumbering an enum would leave
   every test passing while testing the wrong operation.
 
+### `rvntt_decode.sv`
+
+RV32I + Zicsr + Xkntt, combinational, producing `ctrl_t` plus the four register
+addresses. Compared against `model/rv32i_ref.py::decode` over 10⁶ random words.
+
+**Three different legality rules, and they are genuinely different:**
+
+1. **Xkntt reserved fields are strict.** A register field an instruction does
+   not use is reserved, and a nonzero value there is an *illegal instruction*
+   (`docs/isa-spec.md` decode rule 3). `kntt.wait rd` with a nonzero rs1 is
+   illegal. This is the rule the root `CLAUDE.md` warns about — a lax and a
+   strict decoder disagree on exactly the random words this test generates.
+2. **Base RV32I FENCE fields are *not* strict.** The base ISA says FENCE's
+   fm/pred/succ/rs1/rd are reserved for future fences and base implementations
+   *shall ignore* them. Ignoring is spec-mandated, so nonzero there is legal.
+   Copying rule 1 onto FENCE would diverge from Spike, which is A5's reference.
+3. **Anything outside `rv32i_zicsr_zicntr_xkntt0p1` is illegal.** No M, so OP
+   with `funct7=0000001` is illegal. No Zifencei, so FENCE.I is illegal.
+
+**The Python side delegates custom-0/custom-1 to `model/isa/xkntt.py`** rather
+than reimplementing the rules. That is deliberate: the four-way agreement is
+*defined* on the frozen contract, and a second hand-written copy could agree
+with the RTL while both drifted from it.
+
+**An illegal instruction produces exactly the reset bundle** — the whole
+`ctrl_t`, not just the side-effect flags. Several decode arms set `result_sel`
+or `imm_fmt` before legality is known, and leaving those at whatever the arm
+assigned makes "illegal" mean something slightly different per opcode. This is
+not a stylistic preference: the partial version *shipped*, and the 10⁶-word
+comparison caught it — an illegal custom-0 word left `result_sel = RES_XKNTT`
+in the RTL and `RES_ALU` in the model.
+
+**`uses_rs1` is low for CSRRWI/CSRRSI/CSRRCI.** That field is a uimm, not a
+register. A phantom dependency there never shows up as a wrong answer — only as
+unexplained stalls and a worse IPC number, which is far harder to find later.
+
+`tb/cocotb/rvntt_decode_flat.sv` is a testbench-only wrapper flattening `ctrl_t`
+to scalar ports, because the simulator gives cocotb no member access into a
+packed struct. It duplicates the field list by hand, so the fault-injection
+table carries **one mutation per `ctrl_t` field** — if a field were wired to the
+wrong port, its mutation would escape.
+
 ## Tool disagreements found the hard way
 
 These cost a cycle each; they will recur as more core RTL lands.
@@ -117,6 +160,17 @@ Not hypothetical — these are defects the practice found in this directory:
 - **An elaboration wrapper that could only report failure.** `-log` after
   `-tclargs` is swallowed as a script argument, so Vivado wrote to the default
   log and the grep found nothing. Correct polarity, wrong argument order.
+- **A partial illegal-instruction reset in the decoder** (A3), where the RTL and
+  the model disagreed on a don't-care field. Found by the 10⁶-word comparison
+  rather than by mutation, which is the point of running it at that scale: a
+  10⁴-word run would very likely have missed it.
+- **A missing reserved-field test for the SYSTEM opcode** (A3). Dropping the
+  `rs1 == 0` half of the ECALL/EBREAK/MRET/WFI check escaped *every* test in the
+  file, 10⁶ random words included — such a word has probability ~7.1 × 10⁻⁸, so
+  0.07 expected hits per million draws. The Xkntt reserved fields had an
+  exhaustive sweep from the start; these did not. **Generalise this:** a rule
+  that constrains a handful of specific encodings out of 2³² needs a directed
+  sweep. Random testing covers the common case and never the rare constraint.
 
 The general lesson: fault-inject *each* checking mechanism separately, against
 the same mutation table. Of the 15 A2 mutations, 14 were caught by both cocotb
