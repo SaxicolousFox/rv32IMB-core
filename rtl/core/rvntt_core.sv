@@ -13,14 +13,15 @@
 //     not a forwarding source from MEM (rvntt_forward.sv explains why), so a
 //     consumer one slot behind a load stalls for one cycle and then takes the
 //     value from FWD_WB.
-//   * NO CONTROL FLOW (A8).  The PC is pc+4, always.  Branches and jumps do not
-//     redirect, so a program that needs them will silently compute nonsense.
+//   * CONTROL FLOW (A8) is present: branches resolve in EX, and a taken branch
+//     or a jump redirects the PC and squashes the two younger instructions
+//     already in flight.  The penalty is therefore two cycles, always.
 //
-// That last one is the dangerous one, so it is not left to a comment:
-// `dbg_unsupported` pulses whenever an instruction retires that this core
-// cannot execute faithfully, and the testbench treats it as a failure.  A guard
-// beats a footnote -- without it, A5's commit-log differ would report a
-// mismatch somewhere downstream of the real cause.
+// `dbg_unsupported` still pulses whenever an instruction retires that this core
+// cannot execute faithfully -- now only illegal instructions, Xkntt, and a CSR
+// access that writes a register (A9) -- and the testbench treats it as a
+// failure.  A guard beats a footnote: without it, A5's commit-log differ would
+// report a mismatch somewhere downstream of the real cause.
 //
 // MEMORY TIMING.  rvntt_ram registers each port's address, so its output
 // register serves as a pipeline register (see that file's header).  Port B's
@@ -92,11 +93,20 @@ module rvntt_core #(
   // ==========================================================================
   logic [31:0] pc_q;
   logic        stall;                      // driven by rvntt_hazard, in ID
+  logic        ex_redirect;                // a taken branch or a jump, in EX
+  logic [31:0] ex_target;
 
+  // A REDIRECT AND A STALL CANNOT COINCIDE.  Both are properties of the single
+  // instruction in EX: `stall` needs it to be a load, `ex_redirect` needs it to
+  // be a taken branch or a jump, and no instruction is both.  The priority is
+  // still written down rather than left to chance, because "these are mutually
+  // exclusive" is exactly the kind of reasoning that stops being true when a
+  // later step adds a third case -- A9's traps will redirect from MEM.
   always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n)     pc_q <= RESET_PC;
-    else if (stall) pc_q <= pc_q;          // A8 adds a redirect ahead of this
-    else            pc_q <= pc_q + 32'd4;
+    if (!rst_n)           pc_q <= RESET_PC;
+    else if (ex_redirect) pc_q <= ex_target;
+    else if (stall)       pc_q <= pc_q;
+    else                  pc_q <= pc_q + 32'd4;
   end
 
   assign imem_addr = pc_q;
@@ -131,10 +141,20 @@ module rvntt_core #(
     end
   end
 
+  // The flush kills BOTH younger slots.  A redirect resolved in EX has two
+  // instructions behind it -- one in ID, one whose fetch is in flight -- and
+  // squashing only ID/EX leaves the second one to execute from the wrong path.
+  // The directed test puts a taken branch immediately behind a taken branch for
+  // exactly that reason: with a one-slot flush the second one redirects too,
+  // and the program ends up somewhere it was never meant to go.
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       if_id_q.valid <= 1'b0;
       if_id_q.pc    <= RESET_PC;
+      if_id_q.insn  <= 32'h0;
+    end else if (ex_redirect) begin
+      if_id_q.valid <= 1'b0;
+      if_id_q.pc    <= pc_q;
       if_id_q.insn  <= 32'h0;
     end else if (!stall) begin
       if_id_q.valid <= 1'b1;
@@ -211,7 +231,7 @@ module rvntt_core #(
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       id_ex_q <= '0;
-    end else if (stall) begin
+    end else if (stall || ex_redirect) begin
       id_ex_q <= '0;
     end else begin
       id_ex_q.valid    <= if_id.valid;
@@ -335,6 +355,36 @@ module rvntt_core #(
 
   assign dmem_addr = ex_alu_y;
 
+  // ---- control transfer (A8) ----------------------------------------------
+  // The ALU has already computed the target for all three shapes: pc + imm for
+  // branches and JAL (SRCA_PC), rs1 + imm for JALR (SRCA_RS1).  So the only
+  // work left here is the condition and JALR's bit-0 rule.
+  //
+  // The comparator reads the FORWARDED operands, not id_ex_q.rs1_data.  A
+  // branch on a value computed by the instruction immediately ahead of it is
+  // ordinary code -- `sub` then `beqz` is how every compiler writes a
+  // comparison -- and reading the register file there takes the wrong direction
+  // silently.
+  logic ex_branch_taken;
+
+  rvntt_branch u_branch (
+      .funct3 (id_ex_q.insn[14:12]),
+      .a      (ex_rs1_fwd),
+      .b      (ex_rs2_fwd),
+      .taken  (ex_branch_taken)
+  );
+
+  assign ex_redirect = id_ex_q.valid &&
+                       ((id_ex_q.ctrl.branch && ex_branch_taken) ||
+                        id_ex_q.ctrl.jump);
+
+  // JALR clears bit 0 of the computed target; JAL and branches do not need it,
+  // because the B and J immediates encode bit 0 as zero and the pc is aligned.
+  // The rule is applied where the spec states it rather than folded into a
+  // blanket `& ~1`, so a target that is misaligned for some other reason stays
+  // misaligned and is visible instead of being quietly rounded down.
+  assign ex_target = id_ex_q.ctrl.jalr ? {ex_alu_y[31:1], 1'b0} : ex_alu_y;
+
   // ==========================================================================
   // EX/MEM
   // ==========================================================================
@@ -455,7 +505,6 @@ module rvntt_core #(
   assign dbg_unsupported =
       mem_wb_q.valid && !wb_ctrl.is_ecall &&
       (wb_ctrl.is_illegal || wb_ctrl.is_xkntt ||
-       wb_ctrl.branch     || wb_ctrl.jump     ||
        (wb_ctrl.is_csr && mem_wb_q.rd_addr != 5'd0));
 
 endmodule

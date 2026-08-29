@@ -16,12 +16,14 @@ was the whole reason C1 came before this.
 | `rvntt_decode.sv` | A3 | `cocotb_decode`, `formal_decode`, Vivado elaboration |
 | `rvntt_forward.sv` | A6 | `formal_forward`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
 | `rvntt_hazard.sv` | A7 | `formal_hazard`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
-| `rvntt_core.sv` | A4, A6, A7 | `core_a4_checksum`, `cosim_commit_log`, Vivado elaboration |
+| `rvntt_branch.sv` | A8 | `formal_branch`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
+| `rvntt_core.sv` | A4, A6–A8 | `core_a4_checksum`, `cosim_commit_log`, Vivado elaboration |
 | `../soc/rvntt_ram.sv`, `../soc/rvntt_core_sim_top.sv` | A4 | `core_a4_checksum` |
 | `tb/unit/rvntt_trace.sv` + `rvntt_trace_top.sv` | A5 | `cosim_commit_log` |
 | `tb/cosim/commit_diff.py`, `gen_random_prog.py` | A5 | `cosim_commit_log` |
 | `sw/tests/a6_forward.S` | A6 | `cosim_directed` |
 | `sw/tests/a7_loaduse.S` | A7 | `cosim_directed` |
+| `sw/tests/a8_control.S` | A8 | `cosim_directed` |
 | `tb/cosim/cycle_model.py` | A7 | `cosim_directed`, `cosim_commit_log` |
 | `tb/mutate/run_mutation.py` | A6 | run by hand; see below |
 
@@ -126,12 +128,14 @@ packed struct. It duplicates the field list by hand, so the fault-injection
 table carries **one mutation per `ctrl_t` field** — if a field were wired to the
 wrong port, its mutation would escape.
 
-### `rvntt_core.sv` — what the pipeline deliberately does *not* have yet
+### `rvntt_core.sv` — what the pipeline does *not* have yet
 
-Plan A4's bring-up strategy is to build the datapath with hazard handling
-absent, verify against NOP-padded code, then add each layer. So these are the
-design, not a to-do list: **no control flow at all** (A8 — the PC is `pc+4`,
-always). Forwarding (A6) and the load-use interlock (A7) are present.
+Plan A4's bring-up strategy was to build the datapath with hazard handling
+absent, verify against NOP-padded code, then add each layer. All three layers
+are in: forwarding (A6), the load-use interlock (A7) and control flow (A8).
+What is left is **A9** — CSRs, traps, `ECALL`/`EBREAK` — and the coprocessor
+interface. `dbg_unsupported` now flags only illegal instructions, Xkntt, and a
+CSR access that writes a register.
 
 That last one is dangerous, so it is not left to a comment. **`dbg_unsupported`
 pulses whenever an instruction retires that this core cannot execute
@@ -211,6 +215,56 @@ load is in WB and `FWD_WB` does. **The interlock and the `FWD_MEM` exclusion are
 two halves of one decision** — the exclusion without the interlock silently
 reads a stale register, and the interlock without the exclusion is a stall that
 buys nothing.
+
+### A8 — control hazards
+
+Branches resolve in EX, so a redirect always has **two** younger instructions in
+flight: one in ID and one whose fetch is in flight. Both must be squashed. The
+directed test puts a taken branch immediately behind a taken branch precisely
+because a one-slot flush lets the second one redirect too, and the program ends
+up somewhere it was never meant to go — a failure that looks nothing like
+"the flush is one slot short".
+
+**`funct3` for the branch condition comes from the instruction word, not from a
+decoder output.** That is a deliberate call, not an oversight. `ctrl_t` has no
+`funct3` field — `mem_op` carries it, but only for loads and stores — and
+widening the decoder's contract would mean changing `model/isa`'s frozen ctrl
+bundle to suit the RTL. The instruction word is already carried down the
+pipeline for the commit trace, so three bits from it cost nothing. What makes it
+safe is that the decoder has already **rejected** the reserved encodings (`010`
+and `011` are illegal for BRANCH) and `ctrl.branch` gates the comparator, so
+only the six blessed values can matter. `rvntt_branch` still drives the reserved
+values to *not taken* rather than leaving them a don't-care, and the proof checks
+it — defence in depth that nothing checks is decoration.
+
+**JALR's bit-0 rule is applied where the spec states it**, not folded into a
+blanket `& ~1` on every target. B and J immediates already encode bit 0 as zero.
+Note what a missing bit-0 clear looks like here: the *fetch* is unaffected,
+because `rvntt_ram` ignores the low address bits by design, so the core executes
+exactly the right instruction at a pc that is off by one. Only the commit log's
+pc column shows it.
+
+**A redirect and a stall cannot coincide** — both are properties of the single
+instruction in EX, and no instruction is both a load and a taken branch. The
+priority is written down anyway, because "these are mutually exclusive" is
+exactly the reasoning that stops holding when a later step adds a third case;
+A9's traps will redirect from MEM.
+
+**The link register is never forwarded, and cannot be.** A jump always flushes
+two slots, so the instruction at the target is three pipeline slots behind it —
+the register file's write-through, not the forwarding network. `ex_mem_fwd_data`
+still has its `RES_PC4` arm, and that arm is currently unreachable. It is kept
+because A9's `RES_CSR` needs the same mux and because the unreachability depends
+on the flush depth, which is not a property anything in the RTL asserts.
+
+### Mutation anchors go stale, and the harness says so
+
+Two A7 mutations turned into `NO-OP` the moment A8 edited the lines they
+anchored to. That is the harness working: an anchor that no longer matches is
+reported as a problem rather than silently skipped, so a mutation cannot quietly
+stop testing anything. When a step edits `rvntt_core.sv`, expect to re-anchor
+the previous step's mutations — and treat a `NO-OP` as a failure, never as
+noise.
 
 ### A commit-log diff cannot see timing
 

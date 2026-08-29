@@ -178,7 +178,16 @@ confirm it is satisfied.
 | M1 | `docs/isa-spec.md` frozen; every instruction hand-encoded | ✅ |
 | M2 | Python and C golden models agree bit-exactly, per-layer | ✅ 1261 polynomials |
 | M3 | Spike executes the extension; ML-KEM keygen passes on Spike | ✅ full 10000-vector KAT |
-| M4–M16 | — | not started |
+| M4 | Pipeline passes 1000 random programs in lockstep cosim vs. Spike | ✅ at max hazard density |
+| M5–M16 | — | not started |
+
+**M4 is the pipeline's functional milestone, not its architectural one.** The
+core forwards, interlocks and redirects correctly over 1000 random programs at
+maximum hazard density, but it has no CSR file, no traps and no `ECALL`
+semantics until A9 — so `rv32mi-p-*` and RISCOF (M5) are still out of reach, and
+there is no `minstret` to check. The cycle-accuracy half of M4 comes from
+`tb/cosim/cycle_model.py`, which predicts the retirement span independently;
+A9 replaces it with the counter the plan actually asks for.
 
 **C6 is only partially done**, which gates more than it appears to: there is no
 TIER2 backend, no RTL verification, and no `make KAT` target. Any milestone
