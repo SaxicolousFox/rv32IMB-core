@@ -15,11 +15,14 @@ was the whole reason C1 came before this.
 | `rvntt_immgen.sv` | A2 | `cocotb_immgen`, `formal_immgen`, Vivado elaboration |
 | `rvntt_decode.sv` | A3 | `cocotb_decode`, `formal_decode`, Vivado elaboration |
 | `rvntt_forward.sv` | A6 | `formal_forward`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
-| `rvntt_core.sv` | A4, A6 | `core_a4_checksum`, `cosim_commit_log`, Vivado elaboration |
+| `rvntt_hazard.sv` | A7 | `formal_hazard`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
+| `rvntt_core.sv` | A4, A6, A7 | `core_a4_checksum`, `cosim_commit_log`, Vivado elaboration |
 | `../soc/rvntt_ram.sv`, `../soc/rvntt_core_sim_top.sv` | A4 | `core_a4_checksum` |
 | `tb/unit/rvntt_trace.sv` + `rvntt_trace_top.sv` | A5 | `cosim_commit_log` |
 | `tb/cosim/commit_diff.py`, `gen_random_prog.py` | A5 | `cosim_commit_log` |
 | `sw/tests/a6_forward.S` | A6 | `cosim_directed` |
+| `sw/tests/a7_loaduse.S` | A7 | `cosim_directed` |
+| `tb/cosim/cycle_model.py` | A7 | `cosim_directed`, `cosim_commit_log` |
 | `tb/mutate/run_mutation.py` | A6 | run by hand; see below |
 
 ### `rv32i_pkg.sv`
@@ -127,8 +130,8 @@ wrong port, its mutation would escape.
 
 Plan A4's bring-up strategy is to build the datapath with hazard handling
 absent, verify against NOP-padded code, then add each layer. So these are the
-design, not a to-do list: **no load-use interlock** (A7), **no control flow at
-all** (A8 — the PC is `pc+4`, always). Forwarding (A6) is present.
+design, not a to-do list: **no control flow at all** (A8 — the PC is `pc+4`,
+always). Forwarding (A6) and the load-use interlock (A7) are present.
 
 That last one is dangerous, so it is not left to a comment. **`dbg_unsupported`
 pulses whenever an instruction retires that this core cannot execute
@@ -182,6 +185,70 @@ interface, with its own tests.
 `alu_result` and `pc_plus4` only. `mem_result` includes the load path, so using
 it would reintroduce the BRAM-to-ALU path through the back door while looking
 like a simplification.
+
+### A7 — the interlock, and the register nobody expects to need
+
+The interlock itself is four lines and matches the plan exactly. Two things
+around it are not obvious.
+
+**A stall needs an instruction holding register**, and the reason is specific to
+this pipeline. The IF/ID instruction word is *not* flopped in `rvntt_core` — it
+arrives from `rvntt_ram`'s own output register, which *is* the IF/ID insn
+register. So holding `pc_q` and `if_id_q` does not hold the instruction:
+the RAM's output register was already loaded, at the edge into the stalled
+cycle, with the word at whatever address was on `imem_addr`. On the next cycle
+ID would carry the *previous* pc alongside the *next* instruction word. The fix
+is a 32-bit hold register plus a mux, captured from `if_id.insn` (the already
+muxed value, so a multi-cycle stall keeps replaying it — A9's traps and the
+coprocessor's `kntt.wait` will need that). Rewinding `pc_q` instead would work
+and cost **two** cycles per stall, because the re-fetch takes a cycle of its
+own.
+
+**One stall cycle is enough here because of the memory timing, not because of
+the textbook.** Without the stall the consumer reaches EX while the load is in
+MEM, and `FWD_MEM` deliberately does not carry load data. With one stall the
+load is in WB and `FWD_WB` does. **The interlock and the `FWD_MEM` exclusion are
+two halves of one decision** — the exclusion without the interlock silently
+reads a stale register, and the interlock without the exclusion is a stall that
+buys nothing.
+
+### A commit-log diff cannot see timing
+
+This is the A7 lesson worth carrying forward. A **phantom stall** — a bubble
+inserted where none was needed — changes no architectural state whatsoever. The
+commit log is byte-identical. The program is simply slower, and the first
+symptom appears much later as an IPC number that disagrees with the LLVM
+`SchedMachineModel`, at a point where nothing points back at `rvntt_hazard.sv`.
+
+`tb/cosim/cycle_model.py` closes that. It predicts the **span** — the cycle
+distance from the first retirement to the last — as
+
+    span = (retired - 1) + stalls + 2 x redirects
+
+and the testbench reports the measured span. Using the span rather than a total
+cycle count means the model needs to know neither the reset length nor the
+pipeline fill depth; both cancel. Hazards are found by decoding the *dynamic*
+retired instruction stream with `model/rv32i_ref.py` — the frozen spec-derived
+model, not the RTL and not `rvntt_hazard`'s own predicate. Redirects are not
+decoded at all: an instruction redirected iff the next retired pc is not its
+own plus four, which is a property of the trace.
+
+Two of the A7 mutations are invisible to everything except this check:
+`lw x0, ...` becoming a stall source (nothing can read its result, and every
+`nop` is `addi x0, x0, 0`), and the interlock keying on the `rs1` *field*
+instead of on `uses_rs1`.
+
+### When a mutation escapes, look at the stimulus first
+
+Said at A5 about value entropy; A7 produced the same shape again. The mutation
+that ties `uses_rs1` high was caught by the directed test and escaped the random
+suite. The reason was reachability, not weakness: the shape needs a LUI or AUIPC
+whose immediate bits 7:3 — which land in `insn[19:15]` — happen to name the
+register a load just wrote, about 0.5% per load. The fix went into the
+*generator*: the immediate's non-source field is now filled with the most
+recently written register half the time. That is deliberately generic — nothing
+in it knows the interesting predecessor is a load — so it makes the whole class
+of non-source-field hazards reachable rather than this one mutation.
 
 ### Formal properties must not be written in terms of the code they check
 

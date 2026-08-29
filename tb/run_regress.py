@@ -178,6 +178,15 @@ def discover() -> list:
                    "--design", "rvntt_forward", "--depth", "2"],
                   requires=["sby", "yosys"], timeout=600))
 
+    # A7.  The interlock is combinational too.  Its two interesting properties
+    # are completeness (every real load-use hazard stalls -- the only one whose
+    # failure corrupts data) and soundness (nothing else does -- whose failures
+    # are phantom stalls, invisible to a commit-log diff).
+    t.append(Test("formal_hazard", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_hazard", "--depth", "2"],
+                  requires=["sby", "yosys"], timeout=600))
+
     # A4.  Builds sw/tests/a4_checksum.S, runs it on Spike for the reference,
     # then on the RTL.  Needs the RISC-V toolchain and Spike as well as
     # Verilator, so all three are listed -- a missing one must SKIP loudly
@@ -192,16 +201,22 @@ def discover() -> list:
     #
     # The densities track what the pipeline can execute.  --raw-density 1.0 is
     # A6: no padding at all between a producer and its consumer, so essentially
-    # every instruction reads a forwarded operand.  --load-use-density and
-    # --branch-density stay at zero until A7 and A8, because the pipeline
-    # cannot execute those hazards yet and dbg_unsupported says so rather than
+    # every instruction reads a forwarded operand.  --load-use-density 1.0 is
+    # A7: a load's result may be used by the very next instruction, which the
+    # interlock covers.  --branch-density stays at zero until A8, because the
+    # pipeline cannot redirect yet and dbg_unsupported says so rather than
     # producing a confusing diff.
+    #
+    # Each program is checked twice: the commit log against Spike, and the
+    # CYCLE SPAN against tb/cosim/cycle_model.py.  A phantom stall produces a
+    # byte-identical log, so the first check alone cannot see one.
     #
     # 100 programs here; the step's acceptance run is 1000, which takes about
     # two and a half minutes and is not something to pay for on every regress.
     t.append(Test("cosim_commit_log", "cosim",
                   [py, os.path.join(ROOT, "tb/cosim/test_cosim_a5.py"),
-                   "-n", "100", "--len", "300", "--raw-density", "1.0"],
+                   "-n", "100", "--len", "300",
+                   "--raw-density", "1.0", "--load-use-density", "1.0"],
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=1800))
 

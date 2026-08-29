@@ -8,12 +8,11 @@
 //
 //   * FORWARDING (A6) is present: EX/MEM -> EX and MEM/WB -> EX for both
 //     operands, the store-data operand included.  A RAW dependency at any
-//     distance now reads the right value -- EXCEPT a load's result at distance
-//     1, see below.
-//   * NO LOAD-USE INTERLOCK (A7).  A load's result is deliberately not a
-//     forwarding source from MEM (rvntt_forward.sv explains why), so until the
-//     interlock exists a load's result must not be used within 2 instructions.
-//     The random program generator pads that away with --load-use-density 0.
+//     distance now reads the right value.
+//   * THE LOAD-USE INTERLOCK (A7) is present: a load's result is deliberately
+//     not a forwarding source from MEM (rvntt_forward.sv explains why), so a
+//     consumer one slot behind a load stalls for one cycle and then takes the
+//     value from FWD_WB.
 //   * NO CONTROL FLOW (A8).  The PC is pc+4, always.  Branches and jumps do not
 //     redirect, so a program that needs them will silently compute nonsense.
 //
@@ -92,10 +91,12 @@ module rvntt_core #(
   // IF -- program counter
   // ==========================================================================
   logic [31:0] pc_q;
+  logic        stall;                      // driven by rvntt_hazard, in ID
 
   always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n) pc_q <= RESET_PC;
-    else        pc_q <= pc_q + 32'd4;      // A8 replaces this with a redirect
+    if (!rst_n)     pc_q <= RESET_PC;
+    else if (stall) pc_q <= pc_q;          // A8 adds a redirect ahead of this
+    else            pc_q <= pc_q + 32'd4;
   end
 
   assign imem_addr = pc_q;
@@ -106,12 +107,36 @@ module rvntt_core #(
   // The instruction itself is NOT flopped here: it arrives from the RAM's own
   // output register, which is the IF/ID insn register.  Flopping imem_rdata
   // again would add a stage.
+  //
+  // THAT IS WHY A STALL NEEDS A HOLDING REGISTER (A7).  Holding pc_q and
+  // if_id_q is not enough: the RAM's output register has already been loaded
+  // with the address that was on imem_addr during the stalled cycle, so on the
+  // next cycle imem_rdata is the instruction AFTER the one ID is still holding,
+  // and ID would carry a pc and an insn that do not belong together.  Rewinding
+  // pc_q instead would cost two cycles per stall, not one, because the re-fetch
+  // takes a cycle of its own.  So the word is captured on the way into the
+  // stall and replayed while it lasts.  Capturing if_id.insn -- the already
+  // muxed value -- rather than imem_rdata is what makes a multi-cycle stall
+  // work, which A9's traps and the coprocessor's kntt.wait will need.
+  logic [31:0] insn_hold_q;
+  logic        insn_held_q;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      insn_hold_q <= 32'h0;
+      insn_held_q <= 1'b0;
+    end else begin
+      insn_hold_q <= if_id.insn;
+      insn_held_q <= stall;
+    end
+  end
+
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       if_id_q.valid <= 1'b0;
       if_id_q.pc    <= RESET_PC;
       if_id_q.insn  <= 32'h0;
-    end else begin
+    end else if (!stall) begin
       if_id_q.valid <= 1'b1;
       if_id_q.pc    <= pc_q;
       if_id_q.insn  <= 32'h0;              // unused; insn comes from the RAM
@@ -120,7 +145,7 @@ module rvntt_core #(
 
   always_comb begin
     if_id       = if_id_q;
-    if_id.insn  = imem_rdata;
+    if_id.insn  = insn_held_q ? insn_hold_q : imem_rdata;
   end
 
   // ==========================================================================
@@ -159,11 +184,34 @@ module rvntt_core #(
       .we  (wb_we), .wa (wb_wa), .wd (wb_wd)
   );
 
+  // ---- the load-use interlock (A7) ----------------------------------------
+  // In ID, comparing the instruction being decoded against the one already in
+  // EX.  Its `stall` output holds IF and ID and turns the ID/EX register into a
+  // bubble, which is the whole of the mechanism.
+  rvntt_hazard u_hazard (
+      .id_valid    (if_id.valid),
+      .id_uses_rs1 (id_ctrl.uses_rs1),
+      .id_uses_rs2 (id_ctrl.uses_rs2),
+      .id_rs1_addr (id_rs1),
+      .id_rs2_addr (id_rs2),
+      .ex_valid    (id_ex_q.valid),
+      .ex_mem_read (id_ex_q.ctrl.mem_read),
+      .ex_rd_addr  (id_ex_q.rd_addr),
+      .stall       (stall)
+  );
+
   // ==========================================================================
   // ID/EX
   // ==========================================================================
+  // The bubble is a WHOLE-STRUCT clear, not just valid <= 0.  Clearing valid
+  // alone would leave mem_write set in ctrl, and the store path in EX is gated
+  // on `id_ex_q.valid && ctrl.mem_write` today -- one gate away from a bubble
+  // writing memory.  Zeroing the struct means the bubble cannot do anything at
+  // all whatever a later stage forgets to check.
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
+      id_ex_q <= '0;
+    end else if (stall) begin
       id_ex_q <= '0;
     end else begin
       id_ex_q.valid    <= if_id.valid;

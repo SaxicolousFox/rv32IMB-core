@@ -33,6 +33,7 @@ import test_core_verilator as t4    # noqa: E402
 # (name, source) -- name is what the mutation harness and the regression report.
 PROGRAMS = [
     ("a6_forward", os.path.join(ROOT, "sw/tests/a6_forward.S")),
+    ("a7_loaduse", os.path.join(ROOT, "sw/tests/a7_loaduse.S")),
 ]
 
 

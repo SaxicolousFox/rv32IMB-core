@@ -120,6 +120,65 @@ MUTATIONS = [
          edits=[(ALU, "rv32i_pkg::ALU_SRA:    y = $unsigned($signed(a) >>> shamt);",
                       "rv32i_pkg::ALU_SRA:    y = a >> shamt;")],
          caught=["formal:rvntt_alu", "random:raw"]),
+
+    # ---------------------------------------------------------------- A7 ----
+    dict(step="A7", name="interlock_wired_to_mem_write",
+         why="a port-wiring typo: the interlock watches mem_write instead of "
+             "mem_read, so loads stop stalling and stores start.  Both halves "
+             "are bugs and they are caught by different mechanisms -- the "
+             "missing stall by the commit log, the phantom one by the span",
+         edits=[(CORE, "      .ex_mem_read (id_ex_q.ctrl.mem_read),",
+                       "      .ex_mem_read (id_ex_q.ctrl.mem_write),")],
+         caught=["directed:a7_loaduse", "random:loaduse"]),
+
+    dict(step="A7", name="interlock_rs2_watches_rs1",
+         why="the rs2 comparison is wired to rs1, so a load feeding a STORE'S "
+             "DATA operand does not stall.  That operand never reaches the ALU, "
+             "which is why plan A7 names it specifically",
+         edits=[(CORE, "      .id_rs2_addr (id_rs2),",
+                       "      .id_rs2_addr (id_rs1),")],
+         caught=["directed:a7_loaduse", "random:loaduse"]),
+
+    dict(step="A7", name="interlock_x0_load_stalls",
+         why="`lw x0, ...` becomes a stall source.  Nothing can read its "
+             "result, so NO VALUE CHANGES ANYWHERE -- and every nop is "
+             "`addi x0, x0, 0`, so the pipeline stalls on a large fraction of "
+             "all code while remaining functionally perfect.  Only the cycle "
+             "model can see this",
+         edits=[(HAZ, "  wire ex_pending_load = ex_valid && ex_mem_read && (ex_rd_addr != 5'd0);",
+                      "  wire ex_pending_load = ex_valid && ex_mem_read;")],
+         caught=["formal:rvntt_hazard", "directed:a7_loaduse"]),
+
+    dict(step="A7", name="interlock_stalls_on_non_source_field",
+         why="the interlock keys on the rs1 FIELD rather than on whether the "
+             "instruction reads rs1, so LUI and AUIPC -- whose insn[19:15] is "
+             "part of an immediate -- stall behind an unrelated load.  Again no "
+             "value changes; this is the phantom stall the plan warns about",
+         edits=[(CORE, "      .id_uses_rs1 (id_ctrl.uses_rs1),",
+                       "      .id_uses_rs1 (1'b1),")],
+         caught=["directed:a7_loaduse", "random:loaduse"]),
+
+    dict(step="A7", name="stall_lets_the_pc_advance",
+         why="IF is not held, so the fetch stream runs on by one during the "
+             "bubble and an instruction is skipped entirely",
+         edits=[(CORE, "    else if (stall) pc_q <= pc_q;          // A8 adds a redirect ahead of this\n", "")],
+         caught=["directed:a7_loaduse", "random:loaduse"]),
+
+    dict(step="A7", name="stall_forgets_the_instruction_hold",
+         why="the held word is never replayed, so the stalled slot decodes the "
+             "NEXT instruction while carrying the previous pc.  This is the "
+             "failure mode that makes the hold register necessary at all: "
+             "holding pc_q and if_id_q is not enough, because the RAM's output "
+             "register has already moved on",
+         edits=[(CORE, "      insn_held_q <= stall;", "      insn_held_q <= 1'b0;")],
+         caught=["directed:a7_loaduse", "random:loaduse"]),
+
+    dict(step="A7", name="stall_injects_no_bubble",
+         why="ID/EX is not cleared, so the consumer is issued twice -- a "
+             "stalled cycle retires an instruction, which is exactly what plan "
+             "A7's done-when forbids",
+         edits=[(CORE, "    end else if (stall) begin\n      id_ex_q <= '0;\n", "    end else begin\n" if False else "    end else if (1'b0) begin\n      id_ex_q <= '0;\n")],
+         caught=["directed:a7_loaduse", "random:loaduse"]),
 ]
 
 # ------------------------------------------------------------------- the tests
