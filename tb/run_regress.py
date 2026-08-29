@@ -89,6 +89,18 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "tb/unit/test_insn_bridge.py")],
                   requires=["riscv-none-elf-gcc", "cc"], timeout=300))
 
+    t.append(Test("spike_xkntt", "cosim",
+                  [py, os.path.join(ROOT, "tb/cosim/test_spike_xkntt.py")],
+                  requires=["spike", "riscv-none-elf-gcc"], timeout=900))
+
+    # Set KYBER_KAT_FULL=1 in the environment for the full 10000 vectors on
+    # Spike (about an hour); the default is a short prefix plus two
+    # full-length native runs.
+    t.append(Test("kyber_kat_spike", "cosim",
+                  [py, os.path.join(ROOT, "tb/cosim/test_kyber_kat_spike.py")],
+                  requires=["spike", "riscv-none-elf-gcc", "cc", "make"],
+                  timeout=1800))
+
     t.append(Test("kyber_ref_kats", "model",
                   [py, os.path.join(ROOT, "model/run_kyber_kats.py")], timeout=900))
 
