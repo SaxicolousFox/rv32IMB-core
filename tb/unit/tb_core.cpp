@@ -28,14 +28,23 @@
 // not be compared against it -- and the shadow register file below would hide
 // the discrepancy by filtering x0 a second time.
 // ============================================================================
-#include "Vrvntt_core_sim_top.h"
+// The top module is a compile-time choice: rvntt_core_sim_top for the A4
+// checksum run, rvntt_trace_top (the same design plus rvntt_trace) for A5's
+// cosimulation.  Their port lists are identical, so one testbench serves both
+// and the two runs cannot drift apart.  Select with -CFLAGS -DVTOP=<name>.
+#ifndef VTOP
+#define VTOP Vrvntt_core_sim_top
+#endif
+#define VTOP_STR2(x) #x
+#define VTOP_STR(x) VTOP_STR2(x)
+#include VTOP_STR(VTOP.h)
 #include "verilated.h"
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 
-static Vrvntt_core_sim_top* dut;
+static VTOP* dut;
 
 static uint32_t xreg[32];       // shadow architectural registers
 static long     retired = 0;
@@ -55,6 +64,7 @@ int main(int argc, char** argv) {
     int      expect_reg = 9;               // s1
     long     max_cycles = 200000;
     long     expect_retired = -1;
+    bool     no_check = false;      // trace-only: A5's differ does the checking
     bool     have_expect = false;
     bool     trace = false;
 
@@ -67,13 +77,17 @@ int main(int argc, char** argv) {
             expect_retired = atol(argv[++i]);
         } else if (!strcmp(argv[i], "--max-cycles") && i + 1 < argc) {
             max_cycles = atol(argv[++i]);
+        } else if (!strcmp(argv[i], "--no-check")) {
+            no_check = true;
         } else if (!strcmp(argv[i], "--trace")) {
             trace = true;
         }
     }
-    if (!have_expect) { printf("CORE_TB_FAIL: no --expect given\n"); return 1; }
+    if (!have_expect && !no_check) {
+        printf("CORE_TB_FAIL: no --expect given\n"); return 1;
+    }
 
-    dut = new Vrvntt_core_sim_top;
+    dut = new VTOP;
     memset(xreg, 0, sizeof(xreg));
 
     // Reset: hold for a few cycles, then release.
@@ -116,6 +130,19 @@ int main(int argc, char** argv) {
         }
 
         dut->clk = 1; dut->eval();      // take the edge
+    }
+
+    // --no-check: A5 runs the simulator purely to produce a commit log, and
+    // tb/cosim/commit_diff.py is what decides whether it is right.  The
+    // structural checks below would need an expected value the differ has not
+    // computed, so they are skipped -- but dbg_unsupported and the x0 invariant
+    // above still apply, because those are properties of the core rather than
+    // of any particular program.
+    if (no_check) {
+        printf("CORE_TB_TRACE_OK  (%ld instructions retired, %ld cycles, "
+               "ecall=%d)\n", retired, cycle, (int)saw_ecall);
+        delete dut;
+        return saw_ecall ? 0 : 1;
     }
 
     int rc = 0;

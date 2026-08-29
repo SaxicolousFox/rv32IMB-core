@@ -16,6 +16,8 @@ was the whole reason C1 came before this.
 | `rvntt_decode.sv` | A3 | `cocotb_decode`, `formal_decode`, Vivado elaboration |
 | `rvntt_core.sv` | A4 | `core_a4_checksum`, Vivado elaboration |
 | `../soc/rvntt_ram.sv`, `../soc/rvntt_core_sim_top.sv` | A4 | `core_a4_checksum` |
+| `tb/unit/rvntt_trace.sv` + `rvntt_trace_top.sv` | A5 | `cosim_commit_log` |
+| `tb/cosim/commit_diff.py`, `gen_random_prog.py` | A5 | `cosim_commit_log` |
 
 ### `rv32i_pkg.sv`
 
@@ -140,6 +142,35 @@ Port B's address comes from the **combinational** ALU result in EX, not from
 the EX/MEM register — driving it from the registered result pushes load data
 into WB and adds a second load-use bubble the plan's timing does not have.
 
+### A5 — the cosimulation harness
+
+`tb/cosim/test_cosim_a5.py` runs the hand-written checksum plus generated random
+programs on both Spike and the RTL and diffs the commit logs line by line.
+**500 programs × 400 instructions have been run byte-identical**; the regression
+runs 100.
+
+**Equality is defined by one renderer.** Both sides are parsed to
+`(pc, insn, [(rd, value)])` and rendered back through `commit_diff.render()`, so
+"byte-identical" is literally true but cannot be defeated by a formatting
+difference, and there is one place to teach about a new annotation. The RTL's
+own log is *re-parsed* rather than trusted, which is what caught `rvntt_trace.sv`
+emitting a malformed line.
+
+**Spike's format, taken from real output, not from prose.** The register field
+is left-justified in three columns (`x5 `, `x11`). Verilator's `-` flag leaks
+from `%-3s` into the following `%08x`, rendering the value space-filled instead
+of zero-padded — so the field is padded explicitly in the monitor instead.
+
+**The generator's value entropy is load-bearing.** `--raw-density`,
+`--load-use-density` and `--branch-density` are all 0 at A5 and rise at A6/A7/A8.
+But the subtler property is that register values must not collapse: `slt`/`sltu`
+produce 0 or 1, and drawing x0 as a source too often compounds it. At 10% x0 the
+programs ended up shifting 0, 1 or all-ones almost everywhere, and a shift-amount
+bug (`b[5:0]` instead of `b[4:0]`) was invisible. x0 is now 5% and LUI/AUIPC are
+more frequent. Scratch memory is likewise pre-filled with a generated pattern
+rather than `.space` zeros, because an all-zero scratch makes a byte load that
+forgets to sign-extend indistinguishable from a correct one.
+
 ### The A4/A5 offsets between Spike and the RTL
 
 Two, and they compound. For the same program Spike reported 481 commits where
@@ -151,7 +182,13 @@ the RTL retired 477:
   ECALL traps, so it never appears — while the RTL retires it as its stop
   marker. Looking for the ECALL in Spike's trace finds nothing in a log where
   everything else is present, which is a confusing way to learn this.
-  `spike_asm.skipped_traps()` is built around the same behaviour.
+  `spike_asm.skipped_traps()` is built around the same behaviour. The
+  consequence for the differ: the ECALL must be **excluded** from the RTL side,
+  not included — otherwise every otherwise-identical program fails with a
+  one-line length difference at the very end.
+- **Spike also annotates `mem 0x<addr>` on loads, `mem 0x<addr> 0x<data>` on
+  stores, and `c<n>_<name> 0x<val>` on CSR writes.** None are part of the A5
+  format; `render()` drops them on both sides.
 
 ## Tool disagreements found the hard way
 
