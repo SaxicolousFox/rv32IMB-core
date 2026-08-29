@@ -12,6 +12,8 @@ Two passes, because they catch different things:
 import os, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(ROOT, "tb"))
+from rtl_deps import with_deps   # noqa: E402
 INC  = ["-I" + os.path.join(ROOT, d)
         for d in ("rtl/common", "rtl/core", "rtl/ntt", "rtl/soc", "fpga/generated")]
 
@@ -19,18 +21,6 @@ INC  = ["-I" + os.path.join(ROOT, d)
 # makes sense once elaborated (e.g. the generated bram_expected.svh).
 SKIP_STANDALONE = {"rvntt_blinky_top.sv"}
 
-# Narrowly-scoped per-file waivers for the STANDALONE pass only.  Each one needs
-# a reason; a bare skip would be worse, because it would silence every other
-# check on the file too.
-STANDALONE_WAIVERS = {
-    # A package is a library: by construction its members are consumed by OTHER
-    # files, so linting it alone reports every localparam as unused.  That is a
-    # property of linting a package in isolation, not a defect.  Every other
-    # -Wall check (widths, enums, syntax) stays enabled here, and the constants
-    # are covered for real by the elaborated-design pass below once a decoder
-    # consumes them.
-    "rv32i_pkg.sv": ["-Wno-UNUSEDPARAM"],
-}
 
 DESIGNS = [
     ("rvntt_blinky_top", [
@@ -60,8 +50,11 @@ def main() -> int:
     for f in sorted(sv):
         if os.path.basename(f) in SKIP_STANDALONE:
             continue
-        waiv = STANDALONE_WAIVERS.get(os.path.basename(f), [])
-        rc, out = run(["verilator", "--lint-only", "-Wall"] + waiv + INC + [f])
+        # with_deps() puts any imported package ahead of the file.  Verilator
+        # auto-finds packages from -I but appends them AFTER the importer, so a
+        # module whose port list uses a package type otherwise fails with
+        # "Reference to 'alu_op_e' before declaration".
+        rc, out = run(["verilator", "--lint-only", "-Wall"] + INC + with_deps(f))
         if rc != 0:
             fails.append(os.path.relpath(f, ROOT))
             print(out.rstrip()[-1500:])
