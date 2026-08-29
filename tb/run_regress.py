@@ -84,6 +84,11 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "tb/unit/test_isa_semantics.py")],
                   timeout=900))
 
+    # ---- Track C ----
+    t.append(Test("insn_bridge", "toolchain",
+                  [py, os.path.join(ROOT, "tb/unit/test_insn_bridge.py")],
+                  requires=["riscv-none-elf-gcc", "cc"], timeout=300))
+
     t.append(Test("kyber_ref_kats", "model",
                   [py, os.path.join(ROOT, "model/run_kyber_kats.py")], timeout=900))
 
