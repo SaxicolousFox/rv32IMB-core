@@ -169,6 +169,15 @@ def discover() -> list:
                    "--design", "rvntt_decode", "--depth", "2"],
                   requires=["sby", "yosys"], timeout=600))
 
+    # A6.  The forwarding unit is combinational, so depth 2 is already more than
+    # its properties need.  The properties that matter are priority (the younger
+    # producer wins) and completeness (a stale register is never read when a
+    # producer is in flight); the rest are soundness and the x0 rule.
+    t.append(Test("formal_forward", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_forward", "--depth", "2"],
+                  requires=["sby", "yosys"], timeout=600))
+
     # A4.  Builds sw/tests/a4_checksum.S, runs it on Spike for the reference,
     # then on the RTL.  Needs the RISC-V toolchain and Spike as well as
     # Verilator, so all three are listed -- a missing one must SKIP loudly
@@ -180,15 +189,30 @@ def discover() -> list:
 
     # A5.  Lockstep commit-log cosimulation against Spike: the hand-written
     # checksum program plus generated random ones, all diffed line by line.
-    # Densities stay at zero until A6/A7/A8 add forwarding, the load-use
-    # interlock and control flow -- the A4 core cannot execute a program with
-    # any of those hazards, and dbg_unsupported says so rather than producing
-    # a confusing diff.
+    #
+    # The densities track what the pipeline can execute.  --raw-density 1.0 is
+    # A6: no padding at all between a producer and its consumer, so essentially
+    # every instruction reads a forwarded operand.  --load-use-density and
+    # --branch-density stay at zero until A7 and A8, because the pipeline
+    # cannot execute those hazards yet and dbg_unsupported says so rather than
+    # producing a confusing diff.
+    #
+    # 100 programs here; the step's acceptance run is 1000, which takes about
+    # two and a half minutes and is not something to pay for on every regress.
     t.append(Test("cosim_commit_log", "cosim",
                   [py, os.path.join(ROOT, "tb/cosim/test_cosim_a5.py"),
-                   "-n", "100", "--len", "300"],
+                   "-n", "100", "--len", "300", "--raw-density", "1.0"],
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=1800))
+
+    # A6+.  Hand-written programs whose hazard distances are exact.  The random
+    # generator covers hazards by volume; these cover the ones that are too
+    # specific to appear by chance -- the priority case, the store-data operand,
+    # rd == x0 -- and are diffed against Spike by the same code path.
+    t.append(Test("cosim_directed", "cosim",
+                  [py, os.path.join(ROOT, "tb/cosim/test_cosim_directed.py")],
+                  requires=["verilator", "riscv-none-elf-gcc", "spike"],
+                  timeout=900))
 
     # ---- harness self-check: proves FAIL is actually detected (see P0.2) ----
     t.append(Test("harness_detects_failure", "meta",

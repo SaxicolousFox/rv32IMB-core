@@ -192,6 +192,24 @@ package rv32i_pkg;
     XK_NTT_STAT   = 4'd10
   } xkntt_op_e;
 
+  // ------------------------------------------------------- forwarding select
+  // Which of the three possible sources supplies an EX operand (A6).  The
+  // ordering is the PRIORITY order -- FWD_MEM is the younger producer and must
+  // win over FWD_WB when both match -- but nothing depends on the numeric
+  // values, so this is documentation rather than a trick.
+  //
+  // There is no fourth source for "the load currently in MEM".  Load data is
+  // valid during MEM, so forwarding it would be possible, but it would put the
+  // BRAM output register on the path BRAM -> sign-extend -> forward mux -> ALU
+  // -> BRAM address, which is the worst path in the design.  A7 stalls that
+  // case for one cycle instead and forwards from FWD_WB, which is a register
+  // output.  See rvntt_hazard.sv.
+  typedef enum logic [1:0] {
+    FWD_REG = 2'd0,   // the register file read port (distance >= 3, or none)
+    FWD_MEM = 2'd1,   // the EX/MEM stage result   (distance 1)
+    FWD_WB  = 2'd2    // the MEM/WB stage result   (distance 2)
+  } fwd_sel_e;
+
   // ------------------------------------------------------------ control set
   // The decoder's output bundle (A3).  `uses_rs1/2/3` are separate from the
   // register addresses on purpose: the forwarding unit (A6) and the load-use
