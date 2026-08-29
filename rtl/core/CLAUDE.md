@@ -14,6 +14,8 @@ was the whole reason C1 came before this.
 | `rvntt_alu.sv` | A2 | `cocotb_alu`, `formal_alu`, Vivado elaboration |
 | `rvntt_immgen.sv` | A2 | `cocotb_immgen`, `formal_immgen`, Vivado elaboration |
 | `rvntt_decode.sv` | A3 | `cocotb_decode`, `formal_decode`, Vivado elaboration |
+| `rvntt_core.sv` | A4 | `core_a4_checksum`, Vivado elaboration |
+| `../soc/rvntt_ram.sv`, `../soc/rvntt_core_sim_top.sv` | A4 | `core_a4_checksum` |
 
 ### `rv32i_pkg.sv`
 
@@ -115,6 +117,41 @@ to scalar ports, because the simulator gives cocotb no member access into a
 packed struct. It duplicates the field list by hand, so the fault-injection
 table carries **one mutation per `ctrl_t` field** — if a field were wired to the
 wrong port, its mutation would escape.
+
+### `rvntt_core.sv` — what A4 deliberately does *not* have
+
+Plan A4's bring-up strategy is to build the datapath with hazard handling
+absent, verify against NOP-padded code, then add each layer. So these are the
+design, not a to-do list: **no forwarding** (A6), **no load-use interlock**
+(A7), **no control flow at all** (A8 — the PC is `pc+4`, always).
+
+That last one is dangerous, so it is not left to a comment. **`dbg_unsupported`
+pulses whenever an instruction retires that this core cannot execute
+faithfully** — illegal, Xkntt, branch, jump, or a CSR access that writes a
+register — and the testbench treats it as failure. ECALL is excluded (it is the
+stop marker), and so is a CSR access with `rd == x0`: `csrw mtvec, t0` has no
+register-file effect, so the core and Spike agree on architectural state even
+with no CSR file, which is what lets the test program arm Spike's trap handler.
+
+**Memory timing is the load-bearing structural decision.** `rvntt_ram` registers
+each port's address, so its output register *is* a pipeline register. Port A's
+address comes from the PC register in IF, so the instruction arrives in ID.
+Port B's address comes from the **combinational** ALU result in EX, not from
+the EX/MEM register — driving it from the registered result pushes load data
+into WB and adds a second load-use bubble the plan's timing does not have.
+
+### The A4/A5 offsets between Spike and the RTL
+
+Two, and they compound. For the same program Spike reported 481 commits where
+the RTL retired 477:
+
+- **Spike's bootrom is 5 instructions at `0x1000`** before the jump to
+  `0x80000000`. Filter on `pc >= 0x80000000` rather than hardcoding 5.
+- **Spike's `--log-commits` prints no line at all for a trapping instruction.**
+  ECALL traps, so it never appears — while the RTL retires it as its stop
+  marker. Looking for the ECALL in Spike's trace finds nothing in a log where
+  everything else is present, which is a confusing way to learn this.
+  `spike_asm.skipped_traps()` is built around the same behaviour.
 
 ## Tool disagreements found the hard way
 

@@ -43,13 +43,43 @@ def find_package(name):
     return None
 
 
+def all_packages():
+    """Every `<name>.sv` in the RTL tree that declares `package <name>;`."""
+    found = []
+    for d in RTL_DIRS:
+        dp = os.path.join(ROOT, d)
+        if not os.path.isdir(dp):
+            continue
+        for f in sorted(os.listdir(dp)):
+            if not f.endswith(".sv"):
+                continue
+            p = os.path.join(dp, f)
+            name = f[:-3]
+            try:
+                if re.search(r"^\s*package\s+" + re.escape(name) + r"\s*;",
+                             open(p).read(), re.M):
+                    found.append(p)
+            except OSError:
+                pass
+    return found
+
+
 def package_deps(path):
     """
-    Return the package files `path` imports, in declaration-safe order.
+    Return the package files `path` needs, in declaration-safe order.
 
-    Only direct imports are followed.  That is enough today; if a package ever
-    imports another package this needs to become a transitive walk, and the
-    symptom will be the same 'before declaration' error, so it will be obvious.
+    A file's own text is not enough to decide this.  A top level that merely
+    INSTANTIATES rvntt_core references no package itself, but Verilator pulls
+    rvntt_core in from an include directory and then fails on it with
+    "Package/class for ':: reference' not found".  Following instantiations by
+    regex would be fragile, so every package in the tree is simply put first.
+
+    That is safe because a package is a library: reading one costs nothing but
+    parse time, and an unused one produces no warnings (the constants carry a
+    scoped lint_off, see rv32i_pkg.sv).  It stops being adequate only if two
+    packages ever depend on each other, at which point the ordering here needs
+    a real topological sort -- and the symptom will again be a
+    'before declaration' error, which is unmistakable.
     """
     try:
         text = open(path).read()
@@ -66,11 +96,13 @@ def package_deps(path):
     names = _IMPORT_RE.findall(code) + _QUALIFIED_RE.findall(code)
     for name in names:
         pkg = find_package(name)
-        # Skip a package that IS this file, so a package importing nothing does
-        # not list itself.
-        if pkg and os.path.abspath(pkg) != os.path.abspath(path) and pkg not in deps:
+        if pkg and pkg not in deps:
             deps.append(pkg)
-    return deps
+    for pkg in all_packages():
+        if pkg not in deps:
+            deps.append(pkg)
+    # A package must not list itself.
+    return [p for p in deps if os.path.abspath(p) != os.path.abspath(path)]
 
 
 def with_deps(path):
