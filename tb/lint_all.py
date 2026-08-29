@@ -19,6 +19,19 @@ INC  = ["-I" + os.path.join(ROOT, d)
 # makes sense once elaborated (e.g. the generated bram_expected.svh).
 SKIP_STANDALONE = {"rvntt_blinky_top.sv"}
 
+# Narrowly-scoped per-file waivers for the STANDALONE pass only.  Each one needs
+# a reason; a bare skip would be worse, because it would silence every other
+# check on the file too.
+STANDALONE_WAIVERS = {
+    # A package is a library: by construction its members are consumed by OTHER
+    # files, so linting it alone reports every localparam as unused.  That is a
+    # property of linting a package in isolation, not a defect.  Every other
+    # -Wall check (widths, enums, syntax) stays enabled here, and the constants
+    # are covered for real by the elaborated-design pass below once a decoder
+    # consumes them.
+    "rv32i_pkg.sv": ["-Wno-UNUSEDPARAM"],
+}
+
 DESIGNS = [
     ("rvntt_blinky_top", [
         "rtl/soc/rvntt_blinky_top.sv", "rtl/soc/rvntt_clkgen.sv",
@@ -47,7 +60,8 @@ def main() -> int:
     for f in sorted(sv):
         if os.path.basename(f) in SKIP_STANDALONE:
             continue
-        rc, out = run(["verilator", "--lint-only", "-Wall"] + INC + [f])
+        waiv = STANDALONE_WAIVERS.get(os.path.basename(f), [])
+        rc, out = run(["verilator", "--lint-only", "-Wall"] + waiv + INC + [f])
         if rc != 0:
             fails.append(os.path.relpath(f, ROOT))
             print(out.rstrip()[-1500:])
