@@ -10,6 +10,8 @@ result is surprising.
 import argparse, os, shutil, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.join(ROOT, "tb"))
+from rtl_deps import with_deps   # noqa: E402
 
 SEARCH = ["rtl/common", "rtl/core", "rtl/ntt", "rtl/soc"]
 
@@ -37,6 +39,12 @@ def main():
     shutil.rmtree(workdir, ignore_errors=True)
     sby = os.path.join(ROOT, "tb/formal", f"{a.design}.sby")
 
+    # Any package the design imports must be read BEFORE it -- Yosys, like
+    # Verilator, requires a package to be declared before it is referenced, and
+    # a module whose port list uses a package type otherwise fails to parse.
+    srcs = with_deps(rtl)
+    reads = "\n".join(f"read -formal {os.path.basename(s)}" for s in srcs)
+
     with open(sby, "w") as f:
         f.write(f"""[options]
 mode {a.mode}
@@ -47,11 +55,11 @@ smtbmc {a.solver}
 
 [script]
 read -define FORMAL
-read -formal {os.path.basename(rtl)}
+{reads}
 prep -top {a.design}
 
 [files]
-{rtl}
+{chr(10).join(srcs)}
 """)
     r = subprocess.run(["sby", "-f", sby], cwd=os.path.join(ROOT, "tb/formal"),
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

@@ -9,8 +9,10 @@ was the whole reason C1 came before this.
 
 | File | Step | Verified by |
 |---|---|---|
-| `rv32i_pkg.sv` | A1 | lint (waived `UNUSEDPARAM`), Vivado elaboration |
+| `rv32i_pkg.sv` | A1 | lint, Vivado elaboration |
 | `rvntt_regfile.sv` | A1 | `verilator_sim_regfile`, `formal_regfile`, Vivado elaboration |
+| `rvntt_alu.sv` | A2 | `cocotb_alu`, `formal_alu`, Vivado elaboration |
+| `rvntt_immgen.sv` | A2 | `cocotb_immgen`, `formal_immgen`, Vivado elaboration |
 
 ### `rv32i_pkg.sv`
 
@@ -47,9 +49,29 @@ re-verify every downstream case statement.
 - **Power-on zero instead of a reset.** Matches Spike's architectural state at
   reset so A5's cosim starts aligned, and does not block distributed-RAM
   inference the way a 31×32 synchronous reset would.
-- **Package-free and parameterised on purpose.** `tb/formal/run_formal.py`
-  passes exactly one source file to `sby`; staying self-contained means the
-  regfile can be proven without touching that script.
+- **Package-free and parameterised.** Nothing in it needs `rv32i_pkg`. (At A1
+  this was also a workaround: `run_formal.py` passed exactly one file to `sby`.
+  A2 taught it to resolve package dependencies via `tb/rtl_deps.py`, so that
+  constraint is gone — but the module is still simpler for not having one.)
+
+### `rvntt_alu.sv` / `rvntt_immgen.sv`
+
+Both purely combinational, both checked two ways: cocotb against
+`model/rv32i_ref.py` (written from the ISA spec, not transcribed from the RTL)
+and a formal proof that restates each result in a second, different idiom.
+
+- **Shifts use `b[4:0]`, never all of `b`.** A shift by 0x21 must equal a shift
+  by 1. An ALU that feeds the whole operand into the shifter passes every test
+  where `b < 32`; `test_alu_shift_amounts` is what fails it.
+- **`a >>> b` is not arithmetic on its own.** `>>>` on an unsigned `logic`
+  vector is a plain logical shift — the left operand has to be `$signed`.
+- **B and J immediates hardwire bit 0 to zero.** Taking it from the instruction
+  makes every branch go exactly twice as far, which reads as wild control-flow
+  corruption rather than an immediate bug.
+- **`model/rv32i_ref.py` duplicates `alu_op_e` and `imm_fmt_e` encodings**, so
+  it carries `check_pkg_agreement()`, which parses the package and compares.
+  Every cocotb test calls it first. Without it, renumbering an enum would leave
+  every test passing while testing the wrong operation.
 
 ## Tool disagreements found the hard way
 
@@ -65,10 +87,42 @@ These cost a cycle each; they will recur as more core RTL lands.
   and fails with `BADVLTPRAGMA` on ordinary prose. Keep that word out of the
   first position after `//`.
 - **A package linted standalone reports every localparam as `UNUSEDPARAM`.**
-  That is a property of linting a library in isolation, not a defect.
-  `tb/lint_all.py` has a narrowly-scoped `STANDALONE_WAIVERS` entry for it;
-  every other `-Wall` check stays on, and the constants get real coverage from
-  the elaborated-design pass once a decoder consumes them.
+  That is a property of linting a library in isolation, not a defect. The
+  suppression is a scoped `lint_off` around the constant block *inside*
+  `rv32i_pkg.sv`, not a command-line waiver: a waiver would have had to be
+  applied to every file that imports the package too, switching the check off
+  for those modules as well.
+- **Yosys rejects `import` entirely** — both `module foo import pkg::*; (...)`
+  and a module-body `import`, with `syntax error, unexpected TOK_IMPORT`. The
+  only form Verilator, Yosys and Vivado all accept is a **fully-qualified
+  package reference with no import at all**: `rv32i_pkg::alu_op_e` in the port
+  list and `rv32i_pkg::ALU_ADD` in the body. Write core RTL that way from the
+  start. `tb/rtl_deps.py` finds these dependencies (it matches qualified
+  references, not just `import` lines) and orders the package first for both
+  Verilator and Yosys, which need it declared before use.
+
+## What fault injection has actually caught
+
+Not hypothetical — these are defects the practice found in this directory:
+
+- **A hole in the immgen proof.** The `IMM_S` properties only checked sign
+  extension above bit 11, so replacing `insn[11:7]` with `insn[19:15]` — taking
+  a store offset's low bits from rs1's field instead of rd's — passed formal
+  cleanly. The cocotb comparison caught it, so the RTL was never at risk, but
+  the proof was weaker than it looked. Every source bit is now pinned, for the
+  unscrambled formats as well as B and J.
+- **A vacuous spec-drift regex.** `_parse_enum` used a non-greedy `.*?` with
+  `re.S`, which let the match start at the *first* enum in the package and run
+  to the requested one — reporting `opcode_e`'s width as `alu_op_e`'s.
+- **An elaboration wrapper that could only report failure.** `-log` after
+  `-tclargs` is swallowed as a script argument, so Vivado wrote to the default
+  log and the grep found nothing. Correct polarity, wrong argument order.
+
+The general lesson: fault-inject *each* checking mechanism separately, against
+the same mutation table. Of the 15 A2 mutations, 14 were caught by both cocotb
+and formal — and the one that was not is precisely the one that found a real
+hole. Running only the mechanism that happened to be stronger would have left
+the proof quietly incomplete.
 
 ## Formal depth
 
@@ -78,7 +132,9 @@ two cycles. Depth matters a lot here: each BMC step adds another symbolic write
 to a 32×32 memory and solve time blows up superlinearly — depth 8 proves in
 ~3 s, while depth 20 was still grinding on step 13 after eight minutes with
 nothing further to find. Apply the same reasoning to future core proofs: pick
-depth from the deepest property, not from the default.
+depth from the deepest property, not from the default. `formal_alu` and
+`formal_immgen` run at **depth 2** for the same reason — both are purely
+combinational, so there is no state to unroll at all.
 
 ## What already exists for you
 

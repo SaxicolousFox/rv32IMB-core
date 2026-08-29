@@ -62,7 +62,8 @@ def discover() -> list:
                   requires=["sby", "yosys"], timeout=600))
 
     t.append(Test("cocotb_sync_reset", "cocotb",
-                  [py, os.path.join(ROOT, "tb/cocotb/run_cocotb.py")],
+                  [py, os.path.join(ROOT, "tb/cocotb/run_cocotb.py"),
+                   "--design", "sync_reset"],
                   cwd=os.path.join(ROOT, "tb/cocotb"),
                   requires=["verilator"], timeout=600))
 
@@ -124,6 +125,34 @@ def discover() -> list:
     t.append(Test("formal_regfile", "formal",
                   [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
                    "--design", "rvntt_regfile", "--depth", "8"],
+                  requires=["sby", "yosys"], timeout=600))
+
+    # A2.  The ALU and immgen are purely combinational, so BMC depth 2 is
+    # already more than the properties need -- there is no state to unroll.
+    t.append(Test("cocotb_alu", "cocotb",
+                  [py, os.path.join(ROOT, "tb/cocotb/run_cocotb.py"),
+                   "--design", "alu"],
+                  cwd=os.path.join(ROOT, "tb/cocotb"),
+                  requires=["verilator"], timeout=900))
+
+    # Set IMMGEN_EXHAUSTIVE=1 for the additional 2^20 sweeps of the U and J
+    # immediate fields (about 25s); the default run covers those formats with
+    # walking-bits, which is complete for a wire permutation, plus 10^5 random
+    # words.
+    t.append(Test("cocotb_immgen", "cocotb",
+                  [py, os.path.join(ROOT, "tb/cocotb/run_cocotb.py"),
+                   "--design", "immgen"],
+                  cwd=os.path.join(ROOT, "tb/cocotb"),
+                  requires=["verilator"], timeout=900))
+
+    t.append(Test("formal_alu", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_alu", "--depth", "2"],
+                  requires=["sby", "yosys"], timeout=600))
+
+    t.append(Test("formal_immgen", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_immgen", "--depth", "2"],
                   requires=["sby", "yosys"], timeout=600))
 
     # ---- harness self-check: proves FAIL is actually detected (see P0.2) ----

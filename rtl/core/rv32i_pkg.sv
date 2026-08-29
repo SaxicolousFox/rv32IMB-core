@@ -31,6 +31,13 @@
 package rv32i_pkg;
 
   // ------------------------------------------------------------------ sizes
+  // A package is a library: these constants are consumed by OTHER files, so any
+  // single compilation reports the ones it does not happen to use as unused.
+  // That is a property of a library, not a defect -- and the alternative,
+  // waiving UNUSEDPARAM on the command line for every file that imports this
+  // package, would switch the check off for those modules too.  Scoped here
+  // instead, so UNUSEDPARAM stays live everywhere else.
+  /* verilator lint_off UNUSEDPARAM */
   localparam int XLEN    = 32;   // RV32
   localparam int REG_N   = 32;   // architectural registers
   localparam int REG_AW  = 5;    // register address width
@@ -115,6 +122,8 @@ package rv32i_pkg;
   localparam logic [11:0] F12_EBREAK = 12'h001;
   localparam logic [11:0] F12_MRET   = 12'h302;
   localparam logic [11:0] F12_WFI    = 12'h105;
+
+  /* verilator lint_on UNUSEDPARAM */
 
   // ------------------------------------------------------------ control ops
   // ALU operation.  ALU_PASS_B carries LUI's immediate straight through, which
