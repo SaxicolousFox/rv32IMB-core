@@ -69,11 +69,15 @@ and prints 32 bytes instead of 46 MB.
 |---|---|---|
 | native SW | 10000 | sha256 `b59ac4d2…` — the value in the reference's own `SHA256SUMS` |
 | native TIER1 | 10000 | same sha256 |
-| Spike SW | prefix | byte-identical to `tvecs768` |
-| Spike TIER1 | prefix | byte-identical to `tvecs768` |
+| Spike SW | 3 | byte-identical to `tvecs768` |
+| Spike TIER1 | 3 | byte-identical to `tvecs768` |
+| **Spike TIER1** | **10000** | **same sha256** — 96,420,000 bytes, 60000 lines, ~7 min |
 
 The first row is what makes the rest mean anything: it pins this driver to the
-published known-answer test rather than to itself.
+published known-answer test rather than to itself. The last row is plan step
+C1's acceptance test at full strength: the entire official ML-KEM-768 vector
+file, reproduced on an instruction-set simulator by an implementation that
+performs every butterfly with a custom instruction.
 
-`KYBER_KAT_FULL=1` runs the full 10000 records on Spike, which takes about an
-hour and is deliberately not part of the routine regression.
+The routine regression runs a 3-record prefix on Spike, which takes about a
+second. `KYBER_KAT_FULL=1` runs all 10000.
