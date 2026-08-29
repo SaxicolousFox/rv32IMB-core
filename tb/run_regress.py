@@ -169,6 +169,15 @@ def discover() -> list:
                    "--design", "rvntt_decode", "--depth", "2"],
                   requires=["sby", "yosys"], timeout=600))
 
+    # A4.  Builds sw/tests/a4_checksum.S, runs it on Spike for the reference,
+    # then on the RTL.  Needs the RISC-V toolchain and Spike as well as
+    # Verilator, so all three are listed -- a missing one must SKIP loudly
+    # rather than silently checking the RTL against nothing.
+    t.append(Test("core_a4_checksum", "rtl",
+                  [py, os.path.join(ROOT, "tb/unit/test_core_verilator.py")],
+                  requires=["verilator", "riscv-none-elf-gcc", "spike"],
+                  timeout=900))
+
     # ---- harness self-check: proves FAIL is actually detected (see P0.2) ----
     t.append(Test("harness_detects_failure", "meta",
                   [py, "-c", "import sys; sys.exit(3)"],
