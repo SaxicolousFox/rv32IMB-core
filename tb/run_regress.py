@@ -76,6 +76,14 @@ def discover() -> list:
     t.append(Test("patches_in_sync", "toolchain",
                   [py, os.path.join(ROOT, "tb/cosim/check_patches.py")], timeout=120))
 
+    t.append(Test("isa_encoding", "isa",
+                  [py, os.path.join(ROOT, "tb/unit/test_isa_encoding.py")],
+                  requires=["riscv-none-elf-gcc"], timeout=300))
+
+    t.append(Test("isa_semantics", "isa",
+                  [py, os.path.join(ROOT, "tb/unit/test_isa_semantics.py")],
+                  timeout=900))
+
     t.append(Test("kyber_ref_kats", "model",
                   [py, os.path.join(ROOT, "model/run_kyber_kats.py")], timeout=900))
 
