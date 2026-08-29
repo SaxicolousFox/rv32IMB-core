@@ -55,7 +55,3 @@ model/dumps/
 model/cref/ntt_dump
 toolchain/llvm-project/
 sw/kyber/build/
-
-# The development plan.  Lives in docs/ for convenience but is deliberately
-# NOT committed -- a fresh clone will not have it, so ask the user for a copy.
-docs/RISC-V_NTT.txt

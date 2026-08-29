@@ -1,0 +1,836 @@
+# RV32I Pipeline + NTT Coprocessor + Custom ISA Extension — Development Plan
+
+Target platform: Digilent Arty A7-100T (XC7A100T-1CSG324C). Budget you are working against: 63,400 LUTs, 126,800 FFs, 240 DSP48E1 slices, 135 × 36 Kb BRAM (4,860 Kb ≈ 607 KB), 100 MHz onboard oscillator. You will not run out of fabric. You will run out of timing margin and debugging patience, so the plan is organized around those.
+
+---
+
+## 0. The compiler decision, stated up front
+
+**Use LLVM. Build the extension as a vendor extension in the RISC-V backend (`Xkntt`), expose it through Clang builtins backed by LLVM intrinsics, and use `lld`.**
+
+Reasons, in order of how much they'll actually matter to you:
+
+1. **One codebase instead of two.** In GCC-land, adding an instruction means patching *binutils* (`include/opcode/riscv-opc.h`, `opcodes/riscv-opc.c`, `gas/config/tc-riscv.c`) so the assembler and `objdump` know about it, *and separately* patching GCC (`riscv.md`, `riscv-builtins.cc`, `riscv.cc`, `riscv-protos.h`). Two build systems, two test harnesses, two sets of conventions. LLVM's MC layer generates the assembler, disassembler, and encoder from the same TableGen records that instruction selection uses. You write the encoding once.
+
+2. **The idiom you need is intrinsics, and LLVM's intrinsic path is cleaner.** You are not going to pattern-match `(a*b) % 3329` out of generic C. Nobody does that in production. What you want is `__builtin_riscv_kntt_bfly(packed_ab, zeta)` lowering to one instruction. In LLVM that is a `.td` record in `IntrinsicsRISCV.td`, a Clang builtin entry, and a one-line `Pat<>`. In GCC it's `riscv-builtins.cc` plus an MD pattern plus RTL unspec plumbing, and the unspec route makes the instruction opaque to the optimizer in ways that are harder to tune.
+
+3. **Dozens of in-tree worked examples of exactly your task.** LLVM is where RISC-V vendor extensions land: `XVentanaCondOps`, the `XTHead*` family, `Xsf*` (SiFive), `XCV*` (CORE-V). You can `git log` a complete vendor-extension addition and copy its shape file-for-file. GCC has far fewer, and they're less uniform.
+
+4. **Testing infrastructure you get for free.** `llvm-lit` + `FileCheck` gives you `# CHECK-ENCODING: [0x0b,0x...]` assertions on the exact bit pattern. That test file becomes the contract that your RTL decoder and your ISS must both satisfy. This is genuinely the load-bearing artifact of the whole toolchain track.
+
+**What you give up, and the mitigations:**
+
+- **Build cost.** An LLVM+Clang build wants ~50–80 GB of disk and a lot of RAM at link time. Mitigation: build Release with assertions, `-DLLVM_TARGETS_TO_BUILD=RISCV;X86` (or your host arch), `-DLLVM_USE_LINKER=lld`, `-DLLVM_PARALLEL_LINK_JOBS=1`, and use `ninja`. Incremental rebuilds after a `.td` edit are a few minutes, not hours.
+- **You still need a libc and crt0.** Simplest path: install a prebuilt `riscv-gnu-toolchain` (newlib) and point Clang at its sysroot: `clang --target=riscv32-unknown-elf --sysroot=$RV/riscv32-unknown-elf --gcc-toolchain=$RV -march=rv32i_zicsr_xkntt0p1 -mabi=ilp32`. Alternative: `picolibc`, which is smaller and builds cleanly against Clang. Either way, only the *compiler* is LLVM; you are not obligated to rebuild the world.
+- **TableGen is its own language.** Budget real time for the first instruction. The second through tenth are copy-paste.
+
+Where GCC would have won: if your only goal were `.insn`-style assembler support with no C-level integration, the binutils patch alone is smaller than the LLVM ramp. But that isn't a "real compiler backend patch," which is what you asked for.
+
+**One thing to do regardless of choice:** you will want `.insn r`-style raw encodings available very early, before the LLVM work is finished, so the RTL bring-up isn't blocked on the toolchain. GNU `as` supports `.insn r opcode, func3, func7, rd, rs1, rs2` today with no patch, and LLVM's integrated assembler supports `.insn` too. Use that as your bridge (see step C0).
+
+---
+
+## 1. Architectural decisions to freeze before you write RTL
+
+These are the choices that, if you change them mid-project, cost you weeks. Decide now, write them down, and treat the document as the spec.
+
+### 1.1 Resolving "memory-mapped coprocessor" vs. "custom ISA extension"
+
+These sound contradictory. They aren't, and the resolution is the most important design decision in the project. Use **two tiers**:
+
+**Tier 1 — tightly coupled ALU-class instructions.** Fixed-latency, register-to-register, no memory access, results forwarded through the normal pipeline. These are the modular butterfly and modular multiply-accumulate primitives. They participate in hazard detection and forwarding exactly like `ADD`. This tier is what makes the pipeline work interesting: you are adding a multi-cycle functional unit to a 5-stage pipe and must handle its latency in the hazard unit.
+
+**Tier 2 — the block coprocessor.** A 256-coefficient local coefficient RAM (dual-port BRAM), aliased into the load/store address space so bulk data movement uses ordinary `lw`/`sw` (or DMA later), plus a control/status register file. Full 7-layer NTT/INTT and pointwise-multiply are *launched* by a custom instruction (not by a store to a CTRL register), run autonomously, and are waited on by a second custom instruction. So the *data plane* is memory-mapped and the *control plane* is the ISA extension. That's the honest reading of what you described, and it's how real accelerators (e.g. RoCC-style attachments) are structured.
+
+This split also gives you two independent speedup numbers to report: a fine-grained one (Tier 1 vs. software `montgomery_reduce`) and a coarse-grained one (Tier 2 vs. software `poly_ntt`).
+
+### 1.2 Coefficient packing
+
+Kyber coefficients are 16-bit signed. Pack **two per 32-bit register**: `rs1 = {coeff[i+len], coeff[i]}` as `{hi, lo}`. A Cooley–Tukey butterfly consumes two coefficients and produces two, which maps perfectly onto one 32-bit source and one 32-bit destination. This is why a single-`rd` R-type instruction is sufficient and you don't need a multi-write-port hack. Freeze this convention now; it propagates into the ISS, the compiler intrinsic signature, and the RTL.
+
+### 1.3 Reduction algorithm
+
+Use **Montgomery reduction with R = 2¹⁶**, matching the pq-crystals reference exactly:
+
+- `q = 3329`
+- `QINV = q⁻¹ mod 2¹⁶`; the reference writes it as `-3327`, i.e. `62209` unsigned. (Check: `3329 × 62209 = 207,093,761 = 3160 × 65536 + 1`.)
+- `montgomery_reduce(a)`: `t = (int16_t)(a * QINV); return (a - (int32_t)t * q) >> 16;` producing a result in `(-q, q)`.
+- Barrett constant `v = ((1<<26) + q/2)/q = 20159`, used as `t = ((int32_t)v*a + (1<<25)) >> 26; return a - t*q;`
+
+Match the reference bit-for-bit including the *unreduced representation*. The reference's NTT output is not fully reduced to `[0, q)`; it's in a lazy range. If your hardware normalizes and the reference doesn't, your comparisons fail for reasons that have nothing to do with a real bug, and you will lose days to it. Bit-exactness against the reference is the single most valuable property you can hold onto.
+
+Plantard reduction is measurably better than Montgomery for Kyber's small `q` and is a legitimate later optimization. Do not start there. Start bit-exact, then swap the reduction unit behind a verified interface and re-measure.
+
+### 1.4 Memory system
+
+**BRAM only. No DDR3, no MIG.** You have 607 KB of block RAM; a 64 KB instruction memory and 64 KB data memory is 128 KB and leaves you enormous headroom for the coprocessor. Dhrystone and full ML-KEM-768 both fit. Introducing the Xilinx MIG, a memory controller handshake, and cache design would roughly double the project and teaches you nothing about the thing you're actually building. Split I/D BRAM (Harvard-style, both from the same physical BRAM array via true dual-port) gives you single-cycle I-fetch and single-cycle D-access, which keeps the pipeline model clean.
+
+Note the consequence for your benchmark numbers: with no cache and single-cycle memory, your IPC will be *flattering* relative to a real SoC. Say so when you report it. Being explicit about that is a strength, not a weakness.
+
+### 1.5 Privileged subset
+
+RV32I + `Zicsr` + `Zicntr`, machine mode only. Concretely you need: `mstatus`, `mtvec`, `mepc`, `mcause`, `mie`, `mip`, `mcycle`/`mcycleh`, `minstret`/`minstreth`, plus `ECALL` and `EBREAK`. `mcycle` and `minstret` are not optional — they are how you measure IPC. Skip user mode, supervisor mode, PMP, and interrupts-from-external-sources initially; add a timer interrupt only if you want it.
+
+### 1.6 Branch strategy
+
+Resolve branches in **EX**, predict statically not-taken, flush 2 (IF/ID and ID/EX). Do not try to resolve in ID on the first pass; it requires forwarding into ID and a comparator on the critical path, and it will hurt your Fmax. Add a BTB + 2-bit bimodal predictor **later, as a measured improvement** — "IPC went from X to Y" is a much better story than "I built a predictor."
+
+### 1.7 Bus
+
+Define a small native synchronous request/response bus (valid/ready, 32-bit address, 32-bit data, byte enables) for the core's LSU. Add an **AXI4-Lite wrapper on the coprocessor as an optional deliverable** — it costs you a day, buys you Xilinx AXI VIP and a line on the résumé, and doesn't contaminate the core design.
+
+---
+
+## 2. Phase 0 — Infrastructure (blocking; nothing else starts until this is done)
+
+Everything downstream assumes these exist. Doing this properly is not overhead; a bad harness costs you more than a bad microarchitecture.
+
+### P0.1 Tool installation and verification
+
+- **Verilator** (5.x). Primary simulator. Fast enough to run Dhrystone and full ML-KEM-768 in RTL simulation, which you *will* need.
+- **Vivado** (2023.x or later). Synthesis, implementation, bitstream, and `xsim` as a secondary simulator for anything Verilator's SystemVerilog subset rejects.
+- **Yosys + SymbiYosys (sby)** with a solver (Boolector/Bitwuzla or Z3). For formal verification of the pipeline. This is a high-leverage tool for exactly your class of bug.
+- **cocotb** (+ `cocotb-test`). Python testbenches. The killer feature for you: your golden model for the NTT is Python, and cocotb lets it live in the same process as the DUT.
+- **Spike** (`riscv-isa-sim`), built from source, not a package. You are going to patch it.
+- **riscv-gnu-toolchain**, prebuilt, for the newlib sysroot.
+- **GTKWave** or Surfer for waveforms.
+
+### P0.2 Repository skeleton and regression runner
+
+```
+rtl/{core,ntt,soc,common}/       # SystemVerilog
+tb/{unit,cocotb,cosim}/          # testbenches
+model/                           # Python + C golden models
+sw/{tests,bench,mlkem}/          # target software
+toolchain/{llvm,spike}/          # patch series (see P0.4)
+fpga/{constraints,scripts}/      # XDC, Tcl
+docs/isa-spec.md                 # the contract
+```
+
+Write one `make regress` that runs every test you have and prints a pass/fail table. Do it now, when there are two tests. If you defer this you will end up running tests by hand and skipping them.
+
+**Done when:** `make regress` runs, reports, and returns a nonzero exit code on failure.
+
+### P0.3 Golden models
+
+- Clone `pq-crystals/kyber`. Build the reference `ML-KEM-768` (FIPS 203) implementation and confirm it passes its own KATs unmodified.
+- **Instrument it**: add `#ifdef DUMP_NTT` hooks that write, for each `poly_ntt` call, the input array, the array after *each of the 7 layers*, and the final output, as hex to a file. Layer-by-layer dumps are what turn "my NTT is wrong" into "layer 4 is wrong," and that difference is worth many hours.
+- Write an independent **Python model** of the NTT that computes it via straightforward big-integer polynomial arithmetic mod `(X²⁵⁶ + 1)` and mod `q`, with no Montgomery tricks. Confirm the Python model and the C reference agree after de-Montgomery-izing. Two independent models that agree is what "golden" means; one model is just a second copy of your assumptions.
+
+**FIPS 203 vs. Kyber round-3 caution:** the NTT, the zeta table, and `basemul` are *identical* between Kyber r3 and ML-KEM. The differences are at the KEM level (domain separation, the removal of the public-key hash from the encapsulation input, the `d`/`z` seed handling). So your coprocessor validation is unaffected by which you pick, but your top-level KAT files are not. Pick FIPS 203 ML-KEM-768 and be consistent. Use the pq-crystals standard-conformant sources and, if you want a second opinion, the NIST ACVP-Server test vectors.
+
+**Done when:** for 1000 random polynomials, `python_model.ntt(p) == c_reference.ntt(p)` bit-exactly, and per-layer dumps exist.
+
+### P0.4 Patch discipline
+
+Keep your Spike and LLVM changes as a `git` branch with clean, rebaseable commits, plus a `patches/` directory of `git format-patch` output. Upstream moves; you will rebase. Make that cheap now.
+
+### P0.5 De-risk the FPGA flow immediately
+
+Before the core exists, build and download a trivial bitstream: MMCM from the 100 MHz oscillator to your intended core clock, a blinking LED, a UART TX at 115200 that prints a string, and a BRAM instantiated and read back. This shakes out XDC syntax, the MMCM wizard, the USB-UART pinout, `openFPGALoader`/Vivado programming, and Tcl scripting while there is nothing else to blame.
+
+**Done when:** an LED blinks at a rate that proves the MMCM ratio is what you asked for, and `screen /dev/ttyUSB1 115200` shows your string.
+
+---
+
+## 3. Phase 1 — The ISA specification (the fork point)
+
+This is the single most important document in the project, and it must be written before Tracks A, B, and C can proceed independently. It is the shared contract between four artifacts that must agree: the **RTL decoder**, the **Spike model**, the **LLVM assembler/disassembler**, and the **test vectors**.
+
+Write `docs/isa-spec.md` containing, for every instruction: mnemonic, operand syntax, full 32-bit encoding with every field, exact semantics in pseudocode, latency, exception behaviour, and a worked encoding example.
+
+### Opcode space
+
+Use the RISC-V custom opcode space:
+- `custom-0` = `0b0001011` (0x0B)
+- `custom-1` = `0b0101011` (0x2B)
+- `custom-2` = `0b1011011` (0x5B) — reserved for RV128, avoid
+- `custom-3` = `0b1111011` (0x7B)
+
+Put Tier 1 in `custom-0`, Tier 2 in `custom-1`.
+
+### Proposed instruction set
+
+**Tier 1 (custom-0, R-type, single result, fully pipelined):**
+
+| Mnemonic | funct3 | funct7 | Semantics |
+|---|---|---|---|
+| `kmm rd, rs1, rs2` | 0 | 0x00 | Montgomery multiply. `rd = montgomery_reduce(sext16(rs1[15:0]) * sext16(rs2[15:0]))`, sign-extended to 32 bits. |
+| `kbfct rd, rs1, rs2` | 1 | 0x00 | Packed Cooley–Tukey butterfly. `a = sext(rs1[15:0])`, `b = sext(rs1[31:16])`, `z = sext(rs2[15:0])`; `t = montgomery_reduce(z*b)`; `rd = { (a - t)[15:0], (a + t)[15:0] }`. |
+| `kbfgs rd, rs1, rs2` | 2 | 0x00 | Packed Gentleman–Sande butterfly (inverse). `t = a`; `a' = barrett_reduce(b + t)`; `b' = montgomery_reduce(z * (t - b))`; `rd = {b'[15:0], a'[15:0]}`. |
+| `kbmul0 rd, rs1, rs2` | 3 | 0x00 | Base-case multiply, coefficient 0: with `rs1={a1,a0}`, `rs2={b1,b0}`, and zeta supplied by a CSR or a third form — see note. |
+| `kmac rd, rs1, rs2` | 4 | 0x00 | Modular multiply-accumulate: `rd = barrett_reduce(sext(rd_old) + montgomery_reduce(a*b))`. Note this reads `rd`, making it a 3-source instruction. |
+
+**Two design notes you must resolve, and my recommendations:**
+
+- `kbmul` genuinely needs three inputs (`a`, `b`, `zeta`). R-type gives you two. Options: (a) add a `kzeta` instruction that writes a dedicated zeta register in the coprocessor, and have `kbmul` read it implicitly; (b) use the R4-type format (`rs3` in bits 31:27), which RISC-V already reserves for FMA-class instructions; (c) split into two instructions. **Recommendation: R4-type.** It's the architecturally correct answer, it's already in the RISC-V encoding conventions, LLVM has `RVInstR4` ready to use, and it teaches you a real format. The cost is a third read port on the register file, which is a genuine microarchitectural decision worth making deliberately.
+
+- `kmac` reading `rd` makes it destructive. **Recommendation: use R4-type here too** (`rd = rs3 + a*b`), keeping all instructions non-destructive and avoiding a special case in your forwarding logic. One extra read port serves both.
+
+**Tier 2 (custom-1):**
+
+| Mnemonic | Type | Semantics |
+|---|---|---|
+| `kntt.cfg rs1, rs2` | S-like | Configure: `rs1` = base address / bank select, `rs2` = mode word (fwd/inv/basemul, buffer id). |
+| `kntt.start rd, rs1` | R | Launch operation described by `rs1`; writes a nonzero token to `rd` if accepted, 0 if the unit was busy. |
+| `kntt.wait rd` | R | Stall until the unit is idle; write final status to `rd`. |
+| `kntt.stat rd` | R | Non-blocking status read (busy, error, cycles-elapsed). |
+
+`kntt.wait` stalling the pipeline is the simple and correct first implementation. A later refinement is to make it a polling loop so the core can do useful work (e.g. Keccak) concurrently — that's a real codesign result worth measuring.
+
+### Extension naming
+
+`xkntt0p1` — vendor extension `Xkntt`, version 0.1. Full arch string: `rv32i_zicsr_zicntr_xkntt0p1`. Non-standard extensions start with `X`, and the `MpNn` version suffix is required by the ISA-string grammar that LLVM's parser enforces.
+
+**Done when:** `docs/isa-spec.md` contains a hand-computed 32-bit hex encoding for at least one instance of every instruction, and you can decode each of those hex words back to the mnemonic by hand without consulting the table you used to write it.
+
+---
+
+## 4. Dependency graph and parallelism
+
+```
+Phase 0 (infra) ──► Phase 1 (ISA spec) ──┬──► Track A: pipelined core
+                                          ├──► Track B: NTT coprocessor
+                                          └──► Track C: ISS + LLVM backend
+
+Track A ──┬──► A-FPGA: core-only bitstream + Fmax + Dhrystone  ─┐
+          │                                                     │
+Track C (ISS only) ──► needed by A's cosim harness              │
+                                                                ▼
+Track A + Track B + Track C ──► Phase 4: Integration ──► Phase 5: Full FPGA ──► Phase 6: Benchmarks
+```
+
+**Genuinely parallel after the ISA spec is frozen:**
+- Track B is fully independent of Track A. The coprocessor is a standalone block with its own testbench; it never needs the core to be verified.
+- Track C step C1 (Spike) is on the critical path for Track A, because A's best verification technique is lockstep cosimulation against Spike. Do C1 *early*, even before finishing A's datapath.
+- Track C steps C2 onward (LLVM) are independent of everything until integration.
+
+**Practical sequencing recommendation:** P0 → Phase 1 → C1 (Spike, including custom instructions) → A1–A8 (core to a working pipeline) → **A-FPGA** (get silicon early) → then B (coprocessor) and C2+ (LLVM) in whichever order suits your mood, since they don't collide → integration.
+
+Getting the core onto the board before the coprocessor exists is important. It converts "will this ever meet timing" from an unknown into a number, early, when you can still act on it.
+
+---
+
+## 5. Track A — The 5-stage pipelined RV32I core
+
+### Bring-up strategy
+
+Do **not** build a single-cycle core first and throw it away. Do **not** build the full pipeline with all hazard logic and then debug it. Build the 5-stage datapath with **hazard handling deliberately absent**, verify it against hand-scheduled NOP-padded code, then add forwarding, then stalls, then control hazards. Each layer is independently testable, and every bug you find has a small suspect list.
+
+---
+
+### A1 — Common infrastructure
+
+**Build:** parameter/typedef package (`rv32i_pkg.sv`) with opcode, funct3, funct7 enums and pipeline register struct definitions. Use `typedef struct packed` for the IF/ID, ID/EX, EX/MEM, MEM/WB registers. This is your SystemVerilog-over-Verilog win: the pipeline registers become one named type each rather than 30 loose signals, and adding a field later is a one-line change instead of a five-file change.
+
+**Also build:** the register file (32×32, x0 hardwired zero, 2 read ports — 3 if you took the R4-type recommendation — 1 write port, with write-through on same-cycle read/write, which removes a WB→ID forwarding case).
+
+**Verify:** directed testbench on the regfile covering x0 writes (must be discarded), same-cycle read/write on the same address, and simultaneous reads of the same register.
+
+**Done when:** regfile testbench passes, and the package compiles cleanly under both Verilator `--lint-only -Wall` and Vivado elaboration.
+
+---
+
+### A2 — ALU and immediate generation
+
+**Build:** ALU supporting ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND. Immediate generator producing I, S, B, U, J formats with correct sign extension and the B/J-format bit scrambling.
+
+**Verify:** this is the ideal first target for constrained-random with a golden model. Write a cocotb test that drives 10⁵ random `(a, b, op)` triples and compares against a Python model. The immediate generator deserves *exhaustive* testing across all 2³² possible instruction words? No — but do test it exhaustively over the immediate field bits with the rest random, which is cheap and catches every scrambling bug.
+
+**Done when:** 10⁵ random ALU vectors pass; immediate generator matches a Python decoder on 10⁵ random instruction words for all five formats.
+
+---
+
+### A3 — Instruction decoder
+
+**Build:** combinational decoder producing the control bundle (`reg_write`, `mem_read`, `mem_write`, `alu_op`, `alu_src`, `branch`, `jump`, `result_sel`, `is_illegal`, and your custom-extension flags).
+
+**Verify:** compare against a Python decoder over 10⁶ random 32-bit words, *including* checking that every word your decoder claims is legal is also legal per the spec (illegal-instruction detection is a real requirement once you add `mcause`).
+
+**Done when:** zero mismatches on 10⁶ random words, and the illegal-instruction flag is correct for all reserved opcodes.
+
+---
+
+### A4 — Pipeline skeleton, hazards ignored
+
+**Build:** the five stages wired together with pipeline registers, PC logic (PC+4 only), instruction BRAM, no forwarding, no stalls, no flushes.
+
+**Verify:** hand-write assembly test programs where every RAW dependency is separated by ≥3 NOPs, every branch is followed by 2 NOPs, and no load is followed by a dependent use within 2 instructions. Assemble with the GNU toolchain, load into BRAM via a `$readmemh` init file.
+
+**Done when:** a NOP-padded program that computes something nontrivial (a checksum over an array, say) produces the right value in a register, verified by a `$display` at `ECALL`.
+
+---
+
+### A5 — The commit-log tracer (do this before the hazard logic)
+
+This is the highest-return item in Track A. Build it before you need it.
+
+**Build:** a trace monitor in the WB stage that emits, for every retiring instruction, a line: `core 0: 3 0x<pc> (0x<insn>) x<rd> 0x<wdata>` in the exact format Spike's `--log-commits` produces. Then a Python differ that runs Spike and the RTL on the same ELF and reports the first divergent line with surrounding context.
+
+**Also build:** a random program generator. You do not need `riscv-dv` (a full UVM stack) for this. A 300-line Python script that emits valid RV32I with a controlled hazard density, a bounded register set, memory accesses clamped to a valid range, and forward-only branches will find more bugs per hour than anything else you do. Give it knobs: `--raw-density`, `--load-use-density`, `--branch-density`.
+
+**Verify the harness itself** by injecting a deliberate bug (e.g. break SRA) and confirming the differ localizes it.
+
+**Done when:** a NOP-padded program produces a byte-identical commit log between Spike and the RTL.
+
+---
+
+### A6 — Forwarding
+
+**Build:** forwarding unit resolving EX/MEM→EX and MEM/WB→EX for both operands, with correct priority (EX/MEM wins over MEM/WB when both match), and the `rd == x0` suppression.
+
+**Verify:** crank `--raw-density` to maximum in the random generator and run the cosim differ. Then write directed tests for the priority case specifically: `add x1,x2,x3; add x1,x4,x5; add x6,x1,x0` must forward from the *younger* producer.
+
+**Done when:** 1000 random programs at max RAW density pass cosim; the priority test passes.
+
+---
+
+### A7 — Load-use interlock
+
+**Build:** hazard detection in ID: if `EX.mem_read && (EX.rd == ID.rs1 || EX.rd == ID.rs2) && EX.rd != 0`, stall IF and ID for one cycle and inject a bubble into EX.
+
+**Verify:** `--load-use-density` maxed in the random generator; directed tests for `lw` followed immediately by a dependent `sw` (the store-data operand is a case people forget), by a dependent branch, and by a dependent load address.
+
+**Done when:** random and directed load-use tests pass cosim, and `minstret` counts are correct across stalls (a stalled cycle must not retire an instruction).
+
+---
+
+### A8 — Control hazards
+
+**Build:** branch comparator in EX; taken-branch flushes IF/ID and ID/EX; `JAL` and `JALR` handling (`JALR` must clear bit 0 of the target); correct link-register write for both.
+
+**Verify:** random generator with branches enabled; directed tests for a branch whose operands come from forwarding (branch-on-just-computed-value), `JALR` with a nonzero offset and an odd result, and a taken branch in the delay shadow of another taken branch.
+
+**Done when:** 1000 random branchy programs pass cosim.
+
+---
+
+### A9 — CSRs, traps, `ECALL`/`EBREAK`
+
+**Build:** `Zicsr` (CSRRW/S/C and immediate variants), the machine-mode CSR set from §1.5, `mcycle`/`minstret` 64-bit counters, trap entry (save PC to `mepc`, cause to `mcause`, vector to `mtvec`), `MRET`.
+
+**Verify:** the `rv32mi-p-*` tests from `riscv-tests`. Directed tests for CSRRS with `rs1 = x0` (must not write), CSRRW with `rd = x0` (must not read, which matters for side-effecting CSRs), and counter rollover from `mcycle` to `mcycleh`.
+
+**Done when:** the machine-mode `riscv-tests` pass, and `minstret` after a known program equals the instruction count Spike reports for the same program. That equality is your IPC measurement's foundation — if it's off, every number downstream is wrong.
+
+---
+
+### A10 — Architectural compliance
+
+**Build/run:** set up **RISCOF** with your core as the DUT and Sail (or Spike) as the reference model, and run the `riscv-arch-test` RV32I unprivileged suite plus the privileged tests you support.
+
+This is a different kind of testing from your random cosim: it's the official, externally-authored suite, and passing it is the claim you get to make on a résumé. It also requires you to write a proper plugin (model config, ISA YAML, compile/run/verify hooks), which is real, transferable work.
+
+**Done when:** RISCOF reports pass on the full RV32I suite, and you have the generated HTML report saved.
+
+---
+
+### A11 — Formal verification with riscv-formal
+
+Strongly recommended, and this is where the pipelined-core bugs that survive random testing actually die. `riscv-formal` bounded-model-checks your core against a formal ISA specification by attaching a monitor to a "RVFI" (RISC-V Formal Interface) port you expose from the WB stage.
+
+**Build:** the RVFI port (valid, order, insn, trap, rs1/rs2 addr+data, rd addr+data, pc_rdata/pc_wdata, mem addr/rmask/wmask/rdata/wdata). Wire it out of your existing commit tracer — the information is the same, in a standardized form. Then write the `checks.cfg` and run `sby`.
+
+**Why it's worth it:** BMC over ~20 cycles exhaustively covers every instruction sequence of that length, including hazard patterns your random generator would need billions of programs to stumble into. It also proves the absence of the register-file and PC bugs that are otherwise found only by luck.
+
+**Done when:** `riscv-formal`'s `insn_*`, `reg`, `pc_fwd`, `pc_bwd`, `liveness`, and `causal` checks all pass at your chosen depth.
+
+---
+
+### A12 — SoC assembly and FPGA bring-up (the "A-FPGA" milestone)
+
+**Build:**
+- Instruction BRAM (64 KB) initialized from a `.hex` via `$readmemh` and Vivado's `-force_mem_init`.
+- Data BRAM (64 KB).
+- Memory-mapped UART TX (and RX if you want interactivity), GPIO for LEDs and switches.
+- Address decoder.
+- MMCM generating the core clock; a reset synchronizer (this is a real source of nondeterministic bring-up failures — synchronize the release edge).
+- XDC with a `create_clock` on the 100 MHz oscillator, `create_generated_clock` handled by the MMCM, and proper `set_false_path`/`set_input_delay` on the asynchronous IO.
+
+**Fmax methodology** (do it the same way every time so numbers are comparable):
+1. Constrain the target period `T` in the XDC.
+2. Run synthesis + implementation to routed.
+3. Read WNS from the post-route timing report.
+4. Binary search `T` until WNS is barely non-negative.
+5. Report `Fmax = 1/T_min`, and *state the Vivado version, the implementation strategy, and the speed grade*. Do not report `1/(T - WNS)` from a passing run as if it were Fmax; that extrapolation is not valid because the router optimizes to the constraint.
+6. Note the critical path from the timing report and say what it is. On a design like yours it is usually the branch comparator path or the BRAM-to-ALU path through forwarding muxes.
+
+**Realistic expectation:** a clean 5-stage RV32I on a `-1` speed grade Artix-7 with BRAM memory typically lands somewhere in the 70–110 MHz range. If you're under 60, look at the forwarding mux depth and whether your branch target adder is on the same path as the comparator.
+
+**Done when:** the bitstream loads, a program in BRAM runs, and "Hello" arrives over UART from the actual FPGA.
+
+---
+
+### A13 — Dhrystone and IPC
+
+**Build:** port Dhrystone 2.1 (the version bundled in `riscv-tests/benchmarks` is already adapted and avoids the worst portability traps). You need `printf` via UART, a `_sbrk`, and a cycle-counting harness using `mcycle`/`minstret`.
+
+**Methodology, and be careful here because Dhrystone is trivially gameable:**
+- Compile `-O2`, and report the flags. Do not use `-O3` with LTO and full inlining and then report the number without saying so.
+- Report **DMIPS/MHz** = (Dhrystones/sec / 1757) / MHz.
+- Report **IPC** = `minstret / mcycle` over the timed region.
+- Report the **instruction count**, so anyone can sanity-check that the compiler didn't optimize away the benchmark.
+- Run **CoreMark** as well. It is much harder to game and it's the number a hardware engineer will actually trust. Dhrystone alone invites skepticism.
+
+**Realistic expectation:** IPC in the 0.75–0.95 range for a 5-stage with single-cycle memory and static not-taken branches. DMIPS/MHz somewhere around 0.8–1.2 depending on compiler and library.
+
+**Done when:** you have DMIPS/MHz, CoreMark/MHz, and IPC from hardware (not simulation), each reproducible across three runs.
+
+**Optional improvement loop (good measured result):** add a 2-bit bimodal predictor with a 64-entry BTB, re-measure IPC, and report the delta. This is a small, contained change with a quantifiable payoff.
+
+---
+
+## 6. Track B — The NTT coprocessor
+
+### B0 — Get the math exactly right on paper first
+
+Before RTL, write and verify (in Python) the exact algorithm you're implementing:
+
+- **q = 3329, n = 256.** ζ = 17 is a primitive 256th root of unity mod 3329. There is **no** primitive 512th root of unity mod 3329, which is why Kyber uses an *incomplete* NTT.
+- **7 layers, not 8.** The forward NTT runs `len = 128, 64, 32, 16, 8, 4, 2`. The output is 128 degree-1 polynomials, each in `Z_q[X]/(X² − ζ^(2·br7(i)+1))` where `br7` is 7-bit reversal.
+- **The zeta table** is 128 entries, in bit-reversed order, stored in the **Montgomery domain** (i.e. `ζ^k · R mod q` with `R = 2¹⁶`), as signed 16-bit values. Generate it in Python and confirm it matches the reference's `zetas[]` array element-for-element. Do not hand-copy it.
+- **`basemul`**: for `(a₀ + a₁X)(b₀ + b₁X) mod (X² − ζ)`: `c₀ = a₀b₀ + a₁b₁ζ`, `c₁ = a₀b₁ + a₁b₀`. Consecutive pairs use `+ζ` and `−ζ`.
+- **Inverse NTT**: 7 layers of Gentleman–Sande butterflies, then a final scaling by `f = 1441` (= `mont²/128`), applied via `montgomery_reduce(f * coeff)`.
+- **Range analysis.** Write out, for each layer, the worst-case magnitude of the intermediate values given the lazy reduction strategy. This determines your datapath widths. Getting this wrong produces a design that works on random inputs and fails on adversarial ones. The reference keeps values within roughly `±(q + something)` per layer with a Barrett reduction inserted where needed; replicate that placement exactly.
+
+**Done when:** your Python model, driven with the reference's zeta table, reproduces the C reference's per-layer dumps bit-exactly for 1000 random inputs, including sign and magnitude of unreduced values.
+
+---
+
+### B1 — Modular multiplier unit
+
+**Build:** a pipelined Montgomery multiplier. Structure:
+
+```
+stage 1: p    = a * b                      // 16×16 signed → 32-bit    (1 DSP48E1)
+stage 2: m    = p[15:0] * QINV             // low 16 bits only         (1 DSP48E1)
+stage 3: mq   = m[15:0] * q                //                          (1 DSP48E1)
+stage 4: r    = (p - mq) >> 16             // exact, low bits cancel
+```
+
+Three DSP48E1 slices, roughly 4 pipeline stages, II = 1. The DSP48E1 is 25×18, so a 16×16 signed multiply fits in one comfortably, and you can register the DSP's internal pipeline stages (`AREG`/`BREG`/`MREG`/`PREG`) to get the multiplier off your critical path entirely. Use the DSP's internal registers — inferring them is a matter of writing the right number of pipeline stages around the `*` and letting Vivado pack them, which you should verify by reading the synthesis report for `DSP48E1` inference, not by assuming.
+
+**Also build:** a Barrett reduction unit (1 DSP + 1 DSP: `t = (v*a + 2²⁵) >> 26` then `a - t*q`).
+
+**Verify:** exhaustive or near-exhaustive. The input space is `a, b ∈ [-3328, 3328]`, which is about 6657² ≈ 44 million pairs. That is *fully exhaustive in a few minutes* under Verilator. Do it. There is no excuse for a probabilistically-verified modular multiplier when the input space is this small. Compare against the C `montgomery_reduce` including sign.
+
+**Done when:** exhaustive test over all valid `(a,b)` pairs passes bit-exactly against the reference C function.
+
+---
+
+### B2 — Butterfly unit
+
+**Build:** CT butterfly = 1 modmul + 1 add + 1 sub, pipelined to depth `L` (≈ 5–6). GS butterfly = 1 sub + 1 Barrett-reduced add + 1 modmul. Make them one parameterized unit or two units, your call; two is clearer.
+
+**Verify:** exhaustive over `(a, b, z)` is 6657³ ≈ 3×10¹¹, too many. Use 10⁷ constrained-random vectors *plus* directed corner cases: `a = b = 0`, `z = 0`, `a` and `b` at range extremes, values that make `a+t` and `a−t` hit the widest magnitude your range analysis predicted.
+
+**Done when:** 10⁷ random + all directed corners pass against the Python model, and an SVA assertion that outputs never exceed the range from B0's analysis holds throughout.
+
+---
+
+### B3 — Memory organization and address generation
+
+**Build:**
+- **Coefficient RAM.** Start with **ping-pong**: two 256×16 buffers (or 128×32 with packed pairs), read from A, write to B, swap between layers. This costs 2× the BRAM (which you have in abundance) and completely eliminates read/write conflict reasoning. It is the correct first implementation.
+- **Address generator FSM.** The standard nested loop: `for len in {128,64,...,2}: for start in range(0, 256, 2*len): zeta = zetas[k++]; for j in range(start, start+len): butterfly(f[j], f[j+len], zeta)`. In hardware, a layer counter, a start counter, a `j` counter, and a zeta index counter.
+- **Zeta ROM.** 128 × 16 bit. Small enough for distributed RAM/LUTROM, but a BRAM is simpler and you have plenty. Initialize from a generated `.mem` file, never a hand-typed literal.
+
+**Later optimization (only after correctness):** single-buffer with two-bank conflict-free addressing. The even/odd bank split works because in a radix-2 CT NTT with `len ≥ 2`, `j` and `j+len` have the same parity when `len` is even — which it always is here — so a naive parity split does *not* work. The standard solution splits on a different bit or uses the `j`-index rotation scheme. Work this out on paper and prove it before implementing; it is a classic source of silent corruption. Skipping this optimization entirely is a legitimate choice.
+
+**Verify:** an SVA cover/assert set on the FSM — one-hot state encoding, address always in range, exactly 896 butterflies issued per full NTT (7 × 128), zeta index ends at exactly 127.
+
+**Done when:** a simulation counter confirms exactly 896 butterfly issues and 128 distinct zeta reads per forward NTT.
+
+---
+
+### B4 — Full forward NTT, single butterfly (P = 1)
+
+**Build:** wire B1+B2+B3 into a complete NTT engine with a start/busy/done handshake.
+
+**Verify:** cocotb testbench. Load a random polynomial, start, wait for done, read back, compare against the Python model **and** against the per-layer C dumps. Test with:
+- 1000 random polynomials.
+- All-zero input.
+- Single nonzero coefficient at each of the 256 positions (256 tests) — this isolates the butterfly network topology and catches index-permutation bugs that random testing masks.
+- Coefficients at range extremes.
+
+**Done when:** all of the above pass bit-exactly, and cycle count is within a few percent of the predicted `896 × (1/II) + pipeline fill + layer turnaround`.
+
+---
+
+### B5 — Inverse NTT and base multiplication
+
+**Build:** GS butterfly path, the `f = 1441` final scaling pass, and the `basemul` unit (which needs 4 modmuls plus adds per coefficient pair, or a sequenced reuse of one modmul).
+
+**Verify:** the property tests are the strongest tool here:
+- `INTT(NTT(x)) == x` for 10⁴ random `x`. (This catches an enormous class of bugs and requires no golden data.)
+- **Linearity**: `NTT(a + b) == NTT(a) + NTT(b)` (mod q, after normalization).
+- `INTT(basemul(NTT(a), NTT(b))) == a·b mod (X²⁵⁶+1)`, computed independently in Python with big integers. This is the *actual* thing the coprocessor exists to do, verified end-to-end against arithmetic that shares no code with your implementation.
+- Bit-exact against the C reference for all three operations.
+
+**Done when:** all four property classes pass over 10⁴ random trials.
+
+---
+
+### B6 — Scaling to P parallel butterflies
+
+**Build:** parameterize the engine on `P ∈ {1, 2, 4, 8}`. Each butterfly needs 2 reads and 2 writes per cycle, so `P` butterflies need `2P` read ports and `2P` write ports. With true-dual-port BRAM (2 ports each), you need `P` BRAM instances per buffer with the coefficients striped across them. The striping must be conflict-free for every layer, which for the ping-pong scheme is straightforward: reads from buffer A can be arranged by index, writes to buffer B likewise.
+
+**Cycle count:** ≈ `896/P + overhead`. At P=4 that's ~224 cycles + fill, versus a software NTT on your RV32I core of roughly 15,000–30,000 cycles depending on compiler quality. That's where the headline kernel speedup comes from.
+
+**Verify:** re-run the *entire* B4/B5 test suite at each value of `P`. Make `P` a parameter in your regression matrix so `make regress` sweeps it. A parallelization bug that only shows at P=8 is exactly the bug you'll otherwise ship.
+
+**Done when:** the full B4/B5 suite passes at P = 1, 2, 4, and 8, and measured cycle counts scale as predicted.
+
+---
+
+### B7 — Bus interface and register map
+
+**Build:** the memory-mapped slave. Register map, for example:
+
+| Offset | Name | Access | Meaning |
+|---|---|---|---|
+| 0x000 | `CTRL` | RW | start, mode[1:0], buffer select, reset |
+| 0x004 | `STATUS` | RO | busy, done, error |
+| 0x008 | `CYCLES` | RO | cycles for last operation (free benchmarking) |
+| 0x00C | `ZETA` | RW | zeta for basemul, if not using R4-type |
+| 0x400 | `BUF_A[0..127]` | RW | packed coefficient pairs |
+| 0x600 | `BUF_B[0..127]` | RW | packed coefficient pairs |
+
+Put a `CYCLES` counter in hardware. You will want it constantly and it costs almost nothing.
+
+**Verify:** protocol-level tests — back-to-back accesses, writes while busy (must be rejected or safely queued, and the spec must say which), reads of write-only registers, unaligned access behaviour. If you built the AXI4-Lite wrapper, run Xilinx's AXI VIP protocol checker against it.
+
+**Done when:** protocol tests pass and no assertion fires during a full randomized access sequence.
+
+---
+
+### B8 — Constant-time property
+
+**Build/verify:** an assertion that the cycle count of every operation is independent of the data. No early exits, no data-dependent branches in the FSM, no variable-latency multiplier. This is a genuine security requirement for a PQC accelerator and it is cheap to guarantee by construction and easy to prove: run 10⁴ random inputs and assert that `CYCLES` is bit-identical every time.
+
+Do note in your write-up that constant *time* is not constant *power*, and that side-channel resistance (DPA, EM) is explicitly out of scope. Claiming more than you tested is the kind of thing that gets noticed.
+
+**Done when:** `CYCLES` is identical across 10⁴ random inputs for each operation mode.
+
+---
+
+### B9 — Resource and timing characterization (standalone)
+
+**Build/run:** out-of-context synthesis of the coprocessor alone, at each `P`. Record LUTs, FFs, BRAMs, DSPs, and Fmax.
+
+**Expected shape:** ~3 DSPs per butterfly plus 2 for Barrett, so P=4 ≈ 14–20 DSPs out of 240. LUT usage in the low thousands. You have room to go to P=16 if timing allows, though the memory port structure gets harder faster than the arithmetic does.
+
+**Done when:** you have a table of (P, LUT, FF, BRAM, DSP, Fmax) that you can put in the write-up, and the coprocessor's standalone Fmax exceeds the core's Fmax (so the coprocessor is not what limits the system clock).
+
+---
+
+## 7. Track C — ISS and compiler backend
+
+### C0 — The `.insn` bridge (do this immediately after the ISA spec)
+
+Before any toolchain patching, confirm you can emit your instructions with stock tools:
+
+```c
+#define KBFCT(rd, rs1, rs2) asm volatile(".insn r 0x0B, 1, 0x00, %0, %1, %2" \
+                                         : "=r"(rd) : "r"(rs1), "r"(rs2))
+```
+
+`.insn r opcode, funct3, funct7, rd, rs1, rs2` works in stock GNU `as` and in LLVM's integrated assembler with no patches. This unblocks all RTL bring-up from the toolchain schedule. Verify the emitted encoding with `objdump -d` against the hand-computed hex in your ISA spec.
+
+**Done when:** every instruction in the spec can be emitted via `.insn` and the disassembled hex matches your hand-computed encoding exactly.
+
+---
+
+### C1 — Spike (the ISS) — **on the critical path**
+
+Do this before finishing the core, because the core's best verification technique depends on it.
+
+**Build:**
+- Add the extension to `riscv/encoding.h` (or the newer generated encoding header): `MATCH_KBFCT` / `MASK_KBFCT` for each instruction.
+- Create `riscv/insns/kbfct.h` etc., each containing the semantics as C++ operating on `RS1`, `RS2`, `WRITE_RD`.
+- Register in `riscv/riscv.mk.in`'s instruction list.
+- Add the extension to the ISA-string parser (`riscv/isa_parser.cc`) so `--isa=rv32i_zicsr_xkntt` is accepted.
+- For Tier 2, model the coprocessor's local RAM as an MMIO device (`riscv/devices.h`, `abstract_device_t`) so `kntt.start` operates on it and the timing model reports a plausible cycle count.
+
+**Verify:** for each instruction, a directed test that runs on Spike and compares against your Python model. Then run your entire NTT software path (see C6) on Spike and check it produces the same result as the pure-C reference.
+
+**Done when:** Spike executes an ML-KEM-768 keygen using the custom instructions and produces a KAT-matching public/secret key pair.
+
+**Why this ordering matters:** now you have a golden reference for the *extended* ISA, which means your RTL cosimulation harness (A5) continues to work after you add the coprocessor. Without this, integration verification has no reference and you're back to hand-checking.
+
+---
+
+### C2 — LLVM: assembler and disassembler (MC layer)
+
+This is the first LLVM milestone and it's self-contained.
+
+**Files to touch:**
+
+| File | Change |
+|---|---|
+| `llvm/lib/Target/RISCV/RISCVFeatures.td` | `def FeatureVendorXkntt : RISCVExtension<...>` and `def HasVendorXkntt : Predicate<"Subtarget->hasVendorXkntt()">` |
+| `llvm/lib/Target/RISCV/RISCVInstrInfoXkntt.td` | *(new)* instruction definitions |
+| `llvm/lib/Target/RISCV/RISCVInstrInfo.td` | `include "RISCVInstrInfoXkntt.td"` |
+| `llvm/lib/TargetParser/RISCVISAInfo.cpp` | extension name + version in the supported-extensions table |
+| `llvm/lib/Target/RISCV/RISCVSubtarget.h` | generated by TableGen; verify the accessor appears |
+| `llvm/lib/Target/RISCV/Disassembler/RISCVDisassembler.cpp` | add the decoder table, gated on the feature |
+
+A representative instruction definition:
+
+```tablegen
+let Predicates = [HasVendorXkntt], hasSideEffects = 0, mayLoad = 0, mayStore = 0 in {
+  def KBFCT : RVInstR<0b0000000, 0b001, OPC_CUSTOM_0,
+                      (outs GPR:$rd), (ins GPR:$rs1, GPR:$rs2),
+                      "kbfct", "$rd, $rs1, $rs2">;
+  def KMM   : RVInstR<0b0000000, 0b000, OPC_CUSTOM_0,
+                      (outs GPR:$rd), (ins GPR:$rs1, GPR:$rs2),
+                      "kmm", "$rd, $rs1, $rs2">;
+}
+```
+
+For the R4-type instructions, use `RVInstR4` with `$rs3` in bits 31:27 and `funct2` in 26:25.
+
+**Verify — and this is the artifact that makes the whole toolchain track real:**
+
+`llvm/test/MC/RISCV/xkntt-valid.s`:
+```
+# RUN: llvm-mc %s -triple=riscv32 -mattr=+xkntt -show-encoding | FileCheck %s
+# CHECK-INST: kbfct t0, t1, t2
+# CHECK-ENCODING: [0x8b,0x12,0x73,0x00]
+kbfct t0, t1, t2
+```
+
+`xkntt-invalid.s` checks that the instruction is *rejected* without `-mattr=+xkntt`, and that malformed operands produce sensible diagnostics.
+
+The `CHECK-ENCODING` line is the contract. It must equal the hex in your ISA spec, which must equal what your RTL decoder accepts, which must equal what Spike decodes. Four independent implementations agreeing on one hex string is the whole point.
+
+**Done when:** `ninja check-llvm-mc-riscv` passes with your new tests, `llvm-mc` round-trips assemble→disassemble for every instruction, and the encodings match the spec.
+
+---
+
+### C3 — LLVM: intrinsics and Clang builtins
+
+**Files to touch:**
+
+| File | Change |
+|---|---|
+| `llvm/include/llvm/IR/IntrinsicsRISCV.td` | `def int_riscv_kntt_bfct : Intrinsic<[llvm_i32_ty], [llvm_i32_ty, llvm_i32_ty], [IntrNoMem, IntrSpeculatable]>;` |
+| `llvm/lib/Target/RISCV/RISCVInstrInfoXkntt.td` | `def : Pat<(int_riscv_kntt_bfct GPR:$rs1, GPR:$rs2), (KBFCT GPR:$rs1, GPR:$rs2)>;` |
+| `clang/include/clang/Basic/BuiltinsRISCV.td` | builtin declaration with the `"xkntt"` feature requirement |
+| `clang/lib/CodeGen/TargetBuiltins/RISCV.cpp` | lowering from the builtin to the intrinsic call |
+| `clang/lib/Basic/Targets/RISCV.cpp` | `__riscv_xkntt` predefined macro |
+
+**Critical intrinsic-attribute decisions — these are correctness bugs waiting to happen:**
+
+- **Tier 1** ops are pure: `IntrNoMem, IntrSpeculatable, IntrWillReturn`. This lets LLVM CSE them, hoist them out of loops, and schedule them freely. That's what you want.
+- **Tier 2** ops touch the coprocessor's state, which LLVM cannot see. Mark them `IntrInaccessibleMemOnly` at minimum, and `IntrHasSideEffects` for `kntt.start`/`kntt.wait`. If you get this wrong, LLVM will happily hoist `kntt.start` out of a loop or delete a `kntt.wait` it believes is dead, and you will spend a very long time blaming the RTL.
+- **Coprocessor RAM access must be through `volatile` pointers** for the same reason. Write a small accessor header and use it everywhere; do not hand-write the volatility at each site.
+
+**Verify:**
+
+`llvm/test/CodeGen/RISCV/xkntt.ll`:
+```
+; RUN: llc -mtriple=riscv32 -mattr=+xkntt < %s | FileCheck %s
+define i32 @test_bfct(i32 %a, i32 %z) {
+; CHECK-LABEL: test_bfct:
+; CHECK: kbfct a0, a0, a1
+  %r = call i32 @llvm.riscv.kntt.bfct(i32 %a, i32 %z)
+  ret i32 %r
+}
+```
+
+Plus a Clang test confirming `__builtin_riscv_kntt_bfct` compiles, errors without `-march=...xkntt`, and produces the intrinsic in `-emit-llvm` output.
+
+**Done when:** `ninja check-llvm-codegen-riscv check-clang` passes; a C file using the builtin compiles to the expected assembly at `-O0` and `-O2`; and at `-O2` inside a loop the intrinsic is *not* incorrectly hoisted (for Tier 2) and *is* correctly CSE'd (for Tier 1). Test both directions explicitly.
+
+---
+
+### C4 — Scheduling model
+
+**Build:** define `SchedMachineModel` entries giving your instructions realistic latencies (e.g. `KMM` = 4 cycles, `KBFCT` = 5). Add a `WriteKntt`/`ReadKntt` SchedRW pair and an `InstRW` mapping in a small `RISCVSchedKnttCore.td`.
+
+**Why bother:** without it, the machine scheduler assumes latency 1 and will pack dependent custom instructions back-to-back, producing code that stalls on your real hardware. This is the difference between "the instruction works" and "the extension is fast," and it's the kind of detail that separates a toy backend from a credible one.
+
+**Verify:** compile the NTT inner loop at `-O2` with and without the model and diff the schedules. Then measure cycles on the RTL both ways. If the model is right, the scheduled version is measurably faster.
+
+**Done when:** you can show a cycle-count improvement on hardware attributable to the scheduling model.
+
+---
+
+### C5 — Register allocation and ABI sanity
+
+**Verify:** that your instructions play correctly with register allocation under pressure. Write a test that uses 12 live intrinsic results simultaneously to force spilling, and confirm the generated code is correct (run it on Spike). Confirm the intrinsics respect the calling convention (caller-saved vs. callee-saved) and that nothing assumes a fixed register.
+
+**Done when:** a high-register-pressure test compiles, spills, and produces correct results on Spike.
+
+---
+
+### C6 — The accelerated software stack
+
+**Build:** a version of the ML-KEM-768 reference with three interchangeable backends selected at compile time:
+
+1. `NTT_BACKEND=SW` — unmodified reference C.
+2. `NTT_BACKEND=TIER1` — `poly_ntt`, `poly_invntt`, `poly_basemul` rewritten to use the Tier-1 intrinsics, with coefficient packing.
+3. `NTT_BACKEND=TIER2` — `poly_ntt` etc. replaced by copy-in / `kntt.start` / `kntt.wait` / copy-out against the coprocessor RAM.
+
+Keeping all three behind one interface means every KAT run tests all three, and the speedup measurement is a build-flag change rather than a code fork.
+
+**Verify:** all three backends pass the ML-KEM-768 KATs, on Spike and then on RTL.
+
+**Done when:** `make KAT BACKEND={SW,TIER1,TIER2}` all pass.
+
+---
+
+### C7 — Stretch goal, clearly labelled as such: DAG pattern matching
+
+Matching `(a * b) % 3329` from plain C into `kmm` via `Pat<>` on the SelectionDAG is possible in narrow cases but genuinely hard in general, because the modular reduction gets canonicalized into a multiply-shift sequence by InstCombine before you ever see it, and because Montgomery form isn't semantically equal to `%`. **Intrinsics are the professional answer and you should say so.** If you want to attempt this, do it last, timebox it, and be prepared to report it as an explored-and-rejected alternative. That's a perfectly good outcome to write up.
+
+---
+
+## 8. Phase 4 — Integration
+
+### I1 — Tier 1 instructions into the pipeline
+
+**Build:**
+- Decoder recognizes `custom-0`; new control signals.
+- The modular multiplier/butterfly unit instantiated as an EX-stage functional unit with latency `L > 1`.
+- **The hazard question:** a multi-cycle EX unit in a 5-stage pipe. Two options:
+  - **(a) Stall.** When a custom instruction enters EX, stall IF/ID/EX for `L-1` cycles. Simple, obviously correct, costs throughput.
+  - **(b) Pipeline it and extend forwarding.** Let the unit be fully pipelined (II=1) and deepen the EX stage into `EX1..EXL`, with forwarding paths from each sub-stage. Much better throughput, significantly more hazard logic.
+  - **Recommendation: build (a) first, verify, then build (b) and measure the difference.** The delta is a result worth reporting, and (a) is your fallback if (b) doesn't close timing.
+- If you took the R4-type recommendation, add the third register-file read port now and re-check Fmax; a 3-read-port regfile in LUTRAM costs more than you might expect on Artix-7 (it's typically built as replicated banks).
+
+**Verify:** extend the random program generator to emit custom instructions with controlled hazard density, then cosim against your patched Spike. This is exactly why C1 came first.
+
+**Done when:** 1000 random programs containing custom instructions at high hazard density produce byte-identical commit logs against Spike, and `riscv-formal` still passes (you'll need to teach it about the new instructions, or exclude them and verify the base ISA is unperturbed).
+
+---
+
+### I2 — Coprocessor into the SoC
+
+**Build:** address decoder entry for the coprocessor, `kntt.*` dispatch from the EX stage, the busy/stall handshake for `kntt.wait`, and clock-domain handling (keep it single-clock; do not introduce a second clock domain unless B9 shows the coprocessor could run much faster, and even then, think hard about whether the CDC complexity is worth it).
+
+**Verify:**
+- Directed test: write a polynomial through `sw`, `kntt.start`, `kntt.wait`, read back through `lw`, compare to the model.
+- Adversarial: `kntt.start` while busy; `kntt.wait` when idle; load from coprocessor RAM while an NTT is in flight (the spec must define this — recommend: stall or return an error flag, and assert it never silently returns stale data); interrupt/trap during a `kntt.wait`.
+
+**Done when:** the full ML-KEM-768 KAT suite passes in RTL simulation using the TIER2 backend.
+
+---
+
+### I3 — Full-system KAT validation
+
+**Run:** ML-KEM-768 keygen, encapsulate, and decapsulate against the FIPS 203 known-answer tests, in RTL simulation (Verilator), for all three software backends. Then confirm the decapsulated shared secret matches the encapsulated one for 1000 random key pairs, including the implicit-rejection path (feed a deliberately corrupted ciphertext and confirm the pseudorandom rejection value matches the reference).
+
+The implicit-rejection path is easy to forget and it exercises code that the happy-path KATs don't.
+
+**Done when:** all KATs pass in RTL for all three backends, plus 1000 random round-trips including corrupted-ciphertext cases.
+
+---
+
+## 9. Phase 5 — Full-system FPGA bring-up
+
+### F1 — Timing closure with the coprocessor
+
+Re-run the Fmax binary search from A12 on the integrated design. Expect the coprocessor to *not* be the critical path if you pipelined the DSPs properly (B1). If Fmax drops materially from the core-only number, read the timing report and identify whether it's the wider register file, the custom-instruction decode fan-out, or the coprocessor's control handshake. Report the before and after honestly.
+
+**Techniques if you're short:** register the coprocessor's request/response interface (adds a cycle, usually free in throughput terms); use `MAX_FANOUT` attributes on control signals; check that Vivado inferred DSP internal registers rather than LUT logic; try 2–3 implementation strategies (`Performance_ExplorePostRoutePhysOpt`) and report which you used.
+
+**Done when:** the integrated bitstream meets timing at a stated frequency with WNS ≥ 0, and you have the utilization report.
+
+---
+
+### F2 — On-hardware validation
+
+Run the full KAT suite on the actual board, with results streamed over UART. Simulation passing and hardware passing are different claims; make the second one.
+
+**Done when:** KATs pass on hardware and the output is captured to a log file.
+
+---
+
+### F3 — Debug infrastructure (build this before you need it)
+
+Instantiate a Vivado ILA on the pipeline commit interface and the coprocessor handshake. Add a `MARK_DEBUG` attribute set you can toggle. When something works in simulation and fails on hardware — and something will — an ILA already in the build is the difference between an afternoon and a week.
+
+---
+
+## 10. Phase 6 — Benchmarking and the final numbers
+
+This is where you produce the figures that go in the placeholders. Treat it as a real experimental methodology section, not an afterthought.
+
+### M1 — Core performance
+
+- **Fmax**: from F1, with Vivado version, speed grade, and implementation strategy stated.
+- **Utilization**: LUT / FF / BRAM / DSP, split by module (core, coprocessor, SoC), as a percentage of the XC7A100T.
+- **IPC on Dhrystone**: `minstret / mcycle` on hardware.
+- **DMIPS/MHz** and **CoreMark/MHz**, with compiler flags stated.
+
+### M2 — Kernel-level NTT speedup
+
+Measure cycles for a single `poly_ntt` call:
+- SW backend, compiled `-O3` for RV32I. **The baseline must be a genuinely optimized software NTT.** If you benchmark against a naive `-O0` triple-loop, your speedup number is meaningless and anyone who knows the field will see it immediately. Use the reference C, `-O3`, and report the cycle count so it can be sanity-checked.
+- TIER1 backend.
+- TIER2 backend, at each `P`.
+
+Report the speedup for each, and **report the data-movement cost separately**. Copying 256 coefficients in and out over a 32-bit bus is 128 words each way, ~256+ cycles minimum. If the NTT itself takes 224 cycles at P=4, transfer is more than half your time. This is the single biggest threat to the headline number, and quantifying it is the most interesting thing in this section.
+
+**Mitigations worth measuring:** widen the bus; add a simple DMA engine so the core isn't executing 128 `lw`/`sw` pairs; or keep polynomials resident in coprocessor RAM across multiple operations (in ML-KEM, `poly_ntt` is usually followed immediately by `basemul`, so the data is already in the right place — exploiting this is a real codesign win and exactly the kind of thing this project should demonstrate).
+
+### M3 — Application-level speedup, and Amdahl
+
+Measure full ML-KEM-768 keygen / encaps / decaps cycle counts, SW vs. TIER2.
+
+**Expect the application-level speedup to be much smaller than the kernel speedup, and understand why before you measure it.** On a small RV32I core with no Keccak acceleration, the SHAKE128/SHAKE256/SHA3 work dominates ML-KEM: matrix expansion alone is 9 polynomials of rejection sampling from SHAKE128 for ML-KEM-768. Profile it. Report the breakdown: what fraction of cycles is NTT, what fraction is Keccak, what fraction is everything else, before and after.
+
+Presenting this honestly is *more* impressive than a big number, because it demonstrates you understand where accelerator effort actually pays. And it sets up the obvious next result:
+
+**Stretch goal with a large payoff:** a Keccak-f[1600] coprocessor. It's a well-bounded design (24 rounds, 5 step mappings, 1600-bit state), it's the actual bottleneck, and adding it would move the application-level number substantially. If you have appetite left after the NTT, this is the highest-value addition.
+
+### M4 — Comparison to published work
+
+Put your numbers next to published Kyber hardware accelerators on comparable FPGAs. You will not beat a research group's optimized design, and that is fine — the point is to show you know where you sit and why. Note the differences: they use higher `P`, better reduction (Plantard), tighter memory schemes, and often much larger devices.
+
+### M5 — The write-up
+
+Fill in the placeholders. The honest version of your target line looks like:
+
+> Designed a 5-stage pipelined RV32I core in SystemVerilog on a Xilinx Artix-7 (XC7A100T), achieving **[Fmax] MHz** post-route and **[IPC]** IPC on Dhrystone / **[CoreMark/MHz]**, verified against the RISC-V architectural compliance suite (RISCOF) and formally with riscv-formal. Implemented a custom vendor ISA extension (`Xkntt`) with a full LLVM backend patch — TableGen instruction definitions, MC layer, Clang builtins, LLVM intrinsics, and a scheduling model — driving a pipelined hardware NTT coprocessor for ML-KEM-768 polynomial multiplication. Validated bit-exactly against the NIST FIPS 203 reference implementation across the full KAT suite in RTL simulation and on hardware, achieving **[X]×** speedup on the NTT kernel and **[Y]×** end-to-end on ML-KEM-768 keygen, with the residual gap attributable to Keccak, quantified at **[Z]%** of remaining cycles.
+
+That last clause is what makes the rest credible.
+
+---
+
+## 11. Risk register
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| Data-movement cost eats the speedup | High — it's the headline number | Measure it early (M2), before optimizing anything else. Keep data resident across NTT→basemul. Consider DMA. |
+| Bit-exactness against the reference fails due to lazy reduction | High — days lost | Freeze the reduction strategy in B0. Compare per-layer, not end-to-end. Never normalize one side and not the other. |
+| Multi-cycle EX unit wrecks Fmax | Medium | Build the stall version first (I1a). It's the fallback. |
+| LLVM optimizes away or hoists Tier-2 intrinsics | High — silent wrong answers | Get intrinsic attributes right in C3 and write explicit tests for both hoisting and CSE behaviour. |
+| Bank-conflict-free addressing bug at P > 1 | Medium — silent corruption | Use ping-pong buffers first. Sweep `P` in the regression matrix. |
+| Upstream LLVM/Spike churn breaks your patches | Low but annoying | Pin versions. Keep patches as a rebaseable series (P0.4). |
+| Kyber r3 vs. ML-KEM KAT mismatch | Medium — confusing failures | Decide FIPS 203 in P0.3 and never mix sources. |
+| Vivado nondeterminism makes Fmax unreproducible | Low | Fix the seed and strategy; report both. Run three times and report the range. |
+
+---
+
+## 12. Consolidated milestone checklist
+
+- [ ] **M0** — `make regress` runs; blinky+UART bitstream on the board
+- [ ] **M1** — `docs/isa-spec.md` frozen; every instruction hand-encoded
+- [ ] **M2** — Python and C golden models agree bit-exactly, per-layer
+- [ ] **M3** — Spike executes the extension; ML-KEM keygen passes on Spike
+- [ ] **M4** — Pipeline passes 1000 random programs in lockstep cosim vs. Spike
+- [ ] **M5** — RISCOF RV32I compliance suite passes
+- [ ] **M6** — riscv-formal checks pass
+- [ ] **M7** — Core-only bitstream: Fmax measured, Dhrystone + CoreMark on hardware
+- [ ] **M8** — Montgomery multiplier passes exhaustive test over all valid inputs
+- [ ] **M9** — Forward NTT bit-exact vs. reference, including per-layer dumps
+- [ ] **M10** — `INTT(NTT(x)) == x` and full basemul round-trip pass at all `P`
+- [ ] **M11** — LLVM MC tests pass; encodings match the spec exactly
+- [ ] **M12** — Clang builtins + intrinsics generate correct code at `-O0` and `-O2`
+- [ ] **M13** — Tier-1 instructions integrated; random cosim with custom instructions passes
+- [ ] **M14** — Tier-2 coprocessor integrated; full ML-KEM-768 KATs pass in RTL
+- [ ] **M15** — Integrated bitstream meets timing; KATs pass on hardware
+- [ ] **M16** — All benchmark numbers measured, including the Amdahl breakdown

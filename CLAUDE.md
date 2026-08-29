@@ -35,17 +35,16 @@ Two environment constraints that will otherwise waste a cycle each:
 
 | Where | What |
 |---|---|
-| `docs/RISC-V_NTT.txt` | **The plan document.** Present locally but **gitignored** — see the note below. |
+| `docs/RISC-V_NTT.txt` | **The plan document** — the source of truth for scope, sequencing and milestones. Read §12 before claiming any milestone. |
 | `docs/isa-spec.md` | The frozen `Xkntt` contract: encodings, semantics, latency, exceptions. |
 | `docs/spike-xkntt.md` | The Spike fork. **Track A needs this** — Spike is the cosim reference. |
 | `docs/insn-bridge.md` | How to emit `Xkntt` instructions from C or a testbench. |
 | `docs/kyber-backends.md` | The ML-KEM-768 build with swappable NTT backends. |
 | `docs/patch-discipline.md`, `docs/fpga-bringup.md` | Toolchain forks; board bring-up. |
 
-> **The plan document is not in git.** It sits at `docs/RISC-V_NTT.txt` on this
-> machine, but `.gitignore` excludes it, so a fresh clone or a new worktree will
-> not have it. If it is missing, **ask the user for a copy** — do not proceed on
-> a reconstruction of it, and do not commit it if handed one.
+> The plan is committed, so every clone and worktree has it. It is the
+> authority on *what to build*; where it is factually wrong about *how*, the
+> corrections below win.
 
 ---
 
