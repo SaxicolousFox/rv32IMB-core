@@ -178,6 +178,18 @@ def discover() -> list:
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=900))
 
+    # A5.  Lockstep commit-log cosimulation against Spike: the hand-written
+    # checksum program plus generated random ones, all diffed line by line.
+    # Densities stay at zero until A6/A7/A8 add forwarding, the load-use
+    # interlock and control flow -- the A4 core cannot execute a program with
+    # any of those hazards, and dbg_unsupported says so rather than producing
+    # a confusing diff.
+    t.append(Test("cosim_commit_log", "cosim",
+                  [py, os.path.join(ROOT, "tb/cosim/test_cosim_a5.py"),
+                   "-n", "100", "--len", "300"],
+                  requires=["verilator", "riscv-none-elf-gcc", "spike"],
+                  timeout=1800))
+
     # ---- harness self-check: proves FAIL is actually detected (see P0.2) ----
     t.append(Test("harness_detects_failure", "meta",
                   [py, "-c", "import sys; sys.exit(3)"],
