@@ -54,6 +54,7 @@ from rtl_deps import with_deps      # noqa: E402
 CORE  = "rtl/core/rvntt_core.sv"
 FWD   = "rtl/core/rvntt_forward.sv"
 HAZ   = "rtl/core/rvntt_hazard.sv"
+BR    = "rtl/core/rvntt_branch.sv"
 ALU   = "rtl/core/rvntt_alu.sv"
 RF    = "rtl/core/rvntt_regfile.sv"
 
@@ -161,7 +162,7 @@ MUTATIONS = [
     dict(step="A7", name="stall_lets_the_pc_advance",
          why="IF is not held, so the fetch stream runs on by one during the "
              "bubble and an instruction is skipped entirely",
-         edits=[(CORE, "    else if (stall) pc_q <= pc_q;          // A8 adds a redirect ahead of this\n", "")],
+         edits=[(CORE, "    else if (stall)       pc_q <= pc_q;\n", "")],
          caught=["directed:a7_loaduse", "random:loaduse"]),
 
     dict(step="A7", name="stall_forgets_the_instruction_hold",
@@ -177,8 +178,95 @@ MUTATIONS = [
          why="ID/EX is not cleared, so the consumer is issued twice -- a "
              "stalled cycle retires an instruction, which is exactly what plan "
              "A7's done-when forbids",
-         edits=[(CORE, "    end else if (stall) begin\n      id_ex_q <= '0;\n", "    end else begin\n" if False else "    end else if (1'b0) begin\n      id_ex_q <= '0;\n")],
+         edits=[(CORE, "    end else if (stall || ex_redirect) begin",
+                       "    end else if (ex_redirect) begin")],
          caught=["directed:a7_loaduse", "random:loaduse"]),
+
+    # ---------------------------------------------------------------- A8 ----
+    dict(step="A8", name="flush_spares_if_id",
+         why="only ID/EX is squashed, so the instruction whose fetch was in "
+             "flight behind the branch executes from the wrong path.  This is "
+             "the one-slot-too-shallow flush, and a taken branch immediately "
+             "behind a taken branch is what makes it obvious",
+         edits=[(CORE,
+                 "    end else if (ex_redirect) begin\n"
+                 "      if_id_q.valid <= 1'b0;\n"
+                 "      if_id_q.pc    <= pc_q;\n"
+                 "      if_id_q.insn  <= 32'h0;\n", "")],
+         caught=["directed:a8_control", "random:branch"]),
+
+    dict(step="A8", name="flush_spares_id_ex",
+         why="only IF/ID is squashed, so the instruction already decoded behind "
+             "the branch reaches EX and executes",
+         edits=[(CORE, "    end else if (stall || ex_redirect) begin",
+                       "    end else if (stall) begin")],
+         caught=["directed:a8_control", "random:branch"]),
+
+    dict(step="A8", name="branch_reads_stale_rs1",
+         why="the comparator reads the register file instead of the forwarded "
+             "operand, so a branch on a value computed one instruction earlier "
+             "-- `sub` then `beqz`, which is how every compiler writes a "
+             "comparison -- takes the wrong direction",
+         edits=[(CORE, "      .a      (ex_rs1_fwd),", "      .a      (id_ex_q.rs1_data),")],
+         caught=["directed:a8_control", "random:branch"]),
+
+    dict(step="A8", name="branch_reads_stale_rs2",
+         why="the same slip on the other operand.  Two mutations rather than "
+             "one because a comparator wired to one forwarded and one stale "
+             "source is a real shape, and a test that only exercises rs1 would "
+             "call the module verified",
+         edits=[(CORE, "      .b      (ex_rs2_fwd),", "      .b      (id_ex_q.rs2_data),")],
+         caught=["directed:a8_control", "random:branch"]),
+
+    dict(step="A8", name="jalr_keeps_bit0",
+         why="JALR does not clear bit 0 of its target.  The FETCH is unaffected "
+             "-- rvntt_ram ignores the low address bits by design -- so the "
+             "core executes the right instruction at a pc that is off by one, "
+             "and only the commit log's pc column shows it",
+         edits=[(CORE, "{ex_alu_y[31:1], 1'b0}", "{ex_alu_y[31:1], ex_alu_y[0]}")],
+         caught=["directed:a8_control"]),
+
+    dict(step="A8", name="jump_does_not_redirect",
+         why="JAL and JALR fall through instead of jumping, while branches "
+             "still work",
+         edits=[(CORE,
+                 "                       ((id_ex_q.ctrl.branch && ex_branch_taken) ||\n"
+                 "                        id_ex_q.ctrl.jump);",
+                 "                       (id_ex_q.ctrl.branch && ex_branch_taken);")],
+         caught=["directed:a8_control", "random:branch"]),
+
+    dict(step="A8", name="jal_link_is_the_target",
+         why="the link register gets the branch target instead of pc+4.  The "
+             "control flow is perfect and only the writeback is wrong, which is "
+             "why JAL needs an rd != 0 somewhere in the test set",
+         edits=[(CORE, "      rv32i_pkg::RES_PC4: mem_result = ex_mem_q.pc_plus4;",
+                       "      rv32i_pkg::RES_PC4: mem_result = ex_mem_q.alu_result;")],
+         caught=["directed:a8_control", "random:branch"]),
+
+    dict(step="A8", name="blt_uses_unsigned_compare",
+         why="the signed/unsigned distinction collapses.  Every test built from "
+             "small positive numbers passes; it takes operands whose sign bits "
+             "differ to see it at all",
+         edits=[(BR, "      rv32i_pkg::F3_BLT:  taken =  lt;",
+                     "      rv32i_pkg::F3_BLT:  taken =  ltu;")],
+         caught=["formal:rvntt_branch", "directed:a8_control", "random:branch"]),
+
+    dict(step="A8", name="bge_is_not_the_complement_of_blt",
+         why="BGE returns the same answer as BLT rather than its negation -- an "
+             "inverted-polarity slip, which is the most common way a six-way "
+             "condition decoder goes wrong",
+         edits=[(BR, "      rv32i_pkg::F3_BGE:  taken = !lt;",
+                     "      rv32i_pkg::F3_BGE:  taken =  lt;")],
+         caught=["formal:rvntt_branch", "directed:a8_control", "random:branch"]),
+
+    dict(step="A8", name="branch_funct3_reserved_takes",
+         why="the reserved BRANCH encodings default to taken instead of not "
+             "taken.  The decoder already rejects them, so nothing reaches this "
+             "-- which is the point: only the proof can see it, and defence in "
+             "depth that nothing checks is decoration",
+         edits=[(BR, "      default:            taken = 1'b0;   // 010 and 011: reserved, and illegal",
+                     "      default:            taken = 1'b1;")],
+         caught=["formal:rvntt_branch"]),
 ]
 
 # ------------------------------------------------------------------- the tests

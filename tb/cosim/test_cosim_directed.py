@@ -34,6 +34,7 @@ import test_core_verilator as t4    # noqa: E402
 PROGRAMS = [
     ("a6_forward", os.path.join(ROOT, "sw/tests/a6_forward.S")),
     ("a7_loaduse", os.path.join(ROOT, "sw/tests/a7_loaduse.S")),
+    ("a8_control", os.path.join(ROOT, "sw/tests/a8_control.S")),
 ]
 
 

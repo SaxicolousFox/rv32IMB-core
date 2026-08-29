@@ -187,6 +187,16 @@ def discover() -> list:
                    "--design", "rvntt_hazard", "--depth", "2"],
                   requires=["sby", "yosys"], timeout=600))
 
+    # A8.  The branch comparator's whole content is the signed/unsigned
+    # distinction, and the proof attacks exactly that: BLT and BLTU on the same
+    # operands must disagree whenever the sign bits differ.  It also covers the
+    # two reserved BRANCH encodings, which the decoder rejects and no test can
+    # therefore reach -- defence in depth that nothing checks is decoration.
+    t.append(Test("formal_branch", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_branch", "--depth", "2"],
+                  requires=["sby", "yosys"], timeout=600))
+
     # A4.  Builds sw/tests/a4_checksum.S, runs it on Spike for the reference,
     # then on the RTL.  Needs the RISC-V toolchain and Spike as well as
     # Verilator, so all three are listed -- a missing one must SKIP loudly
@@ -203,9 +213,9 @@ def discover() -> list:
     # A6: no padding at all between a producer and its consumer, so essentially
     # every instruction reads a forwarded operand.  --load-use-density 1.0 is
     # A7: a load's result may be used by the very next instruction, which the
-    # interlock covers.  --branch-density stays at zero until A8, because the
-    # pipeline cannot redirect yet and dbg_unsupported says so rather than
-    # producing a confusing diff.
+    # interlock covers.  --branch-density is A8, and is the one knob NOT run at
+    # 1.0: a program made entirely of branches executes almost nothing, so 0.12
+    # is the setting that maximises what actually retires.
     #
     # Each program is checked twice: the commit log against Spike, and the
     # CYCLE SPAN against tb/cosim/cycle_model.py.  A phantom stall produces a
@@ -216,7 +226,8 @@ def discover() -> list:
     t.append(Test("cosim_commit_log", "cosim",
                   [py, os.path.join(ROOT, "tb/cosim/test_cosim_a5.py"),
                    "-n", "100", "--len", "300",
-                   "--raw-density", "1.0", "--load-use-density", "1.0"],
+                   "--raw-density", "1.0", "--load-use-density", "1.0",
+                   "--branch-density", "0.12"],
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=1800))
 
@@ -228,6 +239,20 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "tb/cosim/test_cosim_directed.py")],
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=900))
+
+    # Mutation testing (A6+).  ON by default, at about 2m10s -- it rebuilds the
+    # simulator once per mutation, so it is the most expensive thing here by a
+    # wide margin.  It is on anyway because it is the only test that checks the
+    # OTHER tests, and an unrun mutation manifest rots silently: A6's forwarding
+    # proof was checking itself, and A8's directed test never touched the
+    # comparator's rs2 port, and neither was visible any other way.  Set
+    # RVNTT_NO_MUTATE=1 to skip it during a tight edit loop.
+    if os.environ.get("RVNTT_NO_MUTATE") != "1":
+        t.append(Test("mutation_pipeline", "meta",
+                      [py, os.path.join(ROOT, "tb/mutate/run_mutation.py")],
+                      requires=["verilator", "riscv-none-elf-gcc", "spike",
+                                "sby", "yosys"],
+                      timeout=3600))
 
     # ---- harness self-check: proves FAIL is actually detected (see P0.2) ----
     t.append(Test("harness_detects_failure", "meta",

@@ -63,16 +63,26 @@ def analyse(records):
         nxt_pc, nxt_insn, _ = records[i + 1]
 
         ctrl, regs = rv32i_ref.decode(insn)
+
         if ctrl["mem_read"] and regs["rd"] != 0:
             nctrl, nregs = rv32i_ref.decode(nxt_insn)
             if ((nctrl["uses_rs1"] and nregs["rs1"] == regs["rd"]) or
                     (nctrl["uses_rs2"] and nregs["rs2"] == regs["rd"])):
                 stalls.append(pc)
 
-        # A redirect is visible in the trace itself: the next instruction to
-        # retire is not the one at pc+4.  No decoder is consulted, so a decoder
-        # that is wrong about which opcodes branch cannot hide a flush.
-        if nxt_pc != (pc + 4) & 0xFFFFFFFF:
+        # A redirect is normally visible in the trace itself: the next
+        # instruction to retire is not the one at pc+4.  That is deliberately
+        # decoder-free, so a decoder that is wrong about which opcodes branch
+        # cannot hide a flush.
+        #
+        # The one shape it misses is an unconditional jump whose target happens
+        # to BE pc+4.  The pipeline redirects and flushes for every jump without
+        # checking, so that costs two cycles while looking like straight-line
+        # flow -- hence the `jump` term.  A taken BRANCH to pc+4 has the same
+        # shape and is not covered; it is not emitted by the generator (targets
+        # are at least three instructions ahead) and would be a strange thing to
+        # write by hand.
+        if nxt_pc != (pc + 4) & 0xFFFFFFFF or ctrl["jump"]:
             flushes.append(pc)
 
     return {

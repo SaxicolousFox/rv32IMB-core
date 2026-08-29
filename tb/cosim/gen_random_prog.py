@@ -29,7 +29,9 @@ probability of ALLOWING a hazard rather than padding it away:
   --branch-density     0.0 emits no control flow at all, which A5 requires:
                        the A4 core's PC is pc+4 and rvntt_core's
                        dbg_unsupported fires on any branch or jump.  A8 raises
-                       it.
+                       it.  Unlike the other two this one is not run at 1.0:
+                       a program that is entirely branches executes almost
+                       nothing, so ~0.12 is the useful setting.
 
 At every density the program stays architecturally well-defined, so Spike is
 always the reference for what it should do.
@@ -219,15 +221,48 @@ class Gen:
             self._pad_for([BASE_REG, rs2])
             self._emit(f"{op:<6} x{rs2}, {off}(x{BASE_REG})")
 
+    # A branch between two independently random 32-bit values is almost never
+    # taken for beq and almost always taken for bne, and the fall-through and
+    # taken paths need each other's coverage.  Comparing a register WITH ITSELF
+    # a quarter of the time fixes both ends at once: beq/bge/bgeu become
+    # certainly taken and bne/blt/bltu certainly not, whatever the values are.
+    P_BRANCH_SAME_REG = 0.25
+
+    # A share of the control transfers are unconditional jumps.  JAL is worth
+    # having in the random mix and not only in the directed test, because it is
+    # the one instruction whose writeback is an ADDRESS rather than a datum --
+    # and because it always redirects, so it exercises the flush on every
+    # execution rather than on a data-dependent fraction of them.  Kept low: a
+    # jump skips everything up to its target, so a high rate would shrink the
+    # dynamic program to almost nothing.
+    P_JUMP = 0.15
+
     def branch(self):
-        op = self.rng.choice(BRANCHES)
-        rs1, rs2 = self._any_src(), self._any_src()
-        self._pad_for([rs1, rs2])
         self.label_n += 1
         lbl = f".Lb{self.label_n}"
         # Forward only, and far enough ahead that the target is still in front
         # of the branch after any padding the intervening instructions need.
-        self.pending_labels.append((self.idx + self.rng.randrange(3, 12), lbl))
+        #
+        # A taken branch changes the DYNAMIC distance between a producer and a
+        # consumer, and can shorten it: the generator's padding is computed on
+        # static indices.  That is deliberate and harmless from A8 onwards --
+        # the pipeline forwards and interlocks at every distance, so any dynamic
+        # sequence is legal -- but it does mean the density knobs stop being an
+        # exact statement about what the pipeline sees once branches are on.
+        target = self.idx + self.rng.randrange(3, 12)
+
+        if self.rng.random() < self.P_JUMP:
+            rd = self._r() if self.rng.random() < 0.7 else 0
+            self.pending_labels.append((target, lbl))
+            self._emit(f"jal    x{rd}, {lbl}")
+            self._wrote(rd)
+            return
+
+        op = self.rng.choice(BRANCHES)
+        rs1 = self._any_src()
+        rs2 = rs1 if self.rng.random() < self.P_BRANCH_SAME_REG else self._any_src()
+        self._pad_for([rs1, rs2])
+        self.pending_labels.append((target, lbl))
         self._emit(f"{op:<6} x{rs1}, x{rs2}, {lbl}")
 
     def generate(self):
