@@ -179,15 +179,22 @@ confirm it is satisfied.
 | M2 | Python and C golden models agree bit-exactly, per-layer | ✅ 1261 polynomials |
 | M3 | Spike executes the extension; ML-KEM keygen passes on Spike | ✅ full 10000-vector KAT |
 | M4 | Pipeline passes 1000 random programs in lockstep cosim vs. Spike | ✅ at max hazard density |
-| M5–M16 | — | not started |
+| M5 | RISCOF RV32I compliance suite passes | ✅ 38/38 `I`, plus hints and privilege |
+| M6–M16 | — | not started |
 
-**M4 is the pipeline's functional milestone, not its architectural one.** The
-core forwards, interlocks and redirects correctly over 1000 random programs at
-maximum hazard density, but it has no CSR file, no traps and no `ECALL`
-semantics until A9 — so `rv32mi-p-*` and RISCOF (M5) are still out of reach, and
-there is no `minstret` to check. The cycle-accuracy half of M4 comes from
-`tb/cosim/cycle_model.py`, which predicts the retirement span independently;
-A9 replaces it with the counter the plan actually asks for.
+**M5 is a compliance claim, and its boundaries are recorded rather than
+implied.** The RV32I `I` suite passes 38/38 and the report is committed at
+`docs/riscof-report.html`. The `pmp` tests are **excluded by name**, because
+plan §1.5 excludes PMP and riscof 1.25.3 ignores the `verify` clause those
+tests use to deselect themselves. RISCOF itself is deprecated upstream — the
+arch-test default branch has moved to ACT4, which needs Sail and a UDB config —
+so `toolchain/riscv-arch-test` is pinned to the maintained `old-framework-3.x`
+branch. See `rtl/core/CLAUDE.md` for the four corrections it took to get a
+report that means anything.
+
+**What is still missing at M5**: no `riscv-formal` (M6, plan A11), no
+synthesis or timing closure, no bitstream, and no Xkntt execution — the decoder
+recognises the extension but no stage runs it.
 
 **C6 is only partially done**, which gates more than it appears to: there is no
 TIER2 backend, no RTL verification, and no `make KAT` target. Any milestone

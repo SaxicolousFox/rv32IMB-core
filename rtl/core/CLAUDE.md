@@ -27,6 +27,7 @@ was the whole reason C1 came before this.
 | `sw/tests/a8_control.S` | A8 | `cosim_directed` |
 | `sw/tests/a9_csr.S`, `a9_minstret.S` | A9 | `csr_traps_minstret` |
 | `tb/cosim/test_riscv_tests.py` | A9 | `riscv_tests` |
+| `tb/riscof/` (plugins, env, runner) | A10 | `riscof_arch_test` |
 | `tb/cosim/cycle_model.py` | A7 | `cosim_directed`, `cosim_commit_log` |
 | `tb/mutate/run_mutation.py` | A6 | run by hand; see below |
 
@@ -316,6 +317,80 @@ and reporting it as an RTL failure sends the reader to the wrong place.
 The value of an externally authored suite is exactly that it does not share the
 design's blind spots. It found the `minstret` placement bug on the first run,
 and nothing written alongside the core had questioned it.
+
+### A10 — RISCOF, and four traps between here and a green report
+
+76 of 76 selected riscv-arch-test tests pass: **38/38 of the RV32I `I` suite**,
+22 `hints` and 16 `privilege` (which includes the misaligned load, store and
+JALR cases). The report is committed at `docs/riscof-report.html`.
+
+Getting there took four corrections, and each of them would have produced a
+plausible-looking wrong answer.
+
+**1. RISCOF's exit code is not the verdict.** `riscof run` returns 0 for a run
+in which tests failed. The first version of `run_riscof.py` printed `RISCOF_OK`
+over **50 real failures**. The verdict now comes from parsing the HTML report,
+and a run with zero passes is also a failure — an empty report is not a green
+one.
+
+**2. `-mno-relax` is required, and its absence looks like a branch bug.**
+`arch_test.h`'s `LA` macro wraps its `.align` in `.option rvc` so the padding can
+be two bytes, then switches back with `.option norvc`. With linker relaxation
+on, that alignment becomes an `R_RISCV_ALIGN` relocation the *linker* fills —
+with **compressed** NOPs, because the relocation was recorded while rvc was
+still enabled. The result is `c.nop` in the instruction stream of a test for a
+core with no C extension. Spike itself faults on the first one, vectors to the
+still-unset `mtvec` at address 0, and spins there forever. The symptom is "the
+reference model hangs", which points nowhere near the compile line.
+
+**3. The branch and jump tests need 2 MB of memory.** They walk the whole
+immediate range: `beq-01` links to `0x8003aa28` and `jal-01` — exercising JAL's
+±1 MB — to `0x801af18c`. Against this repo's usual 64 KB array the image is
+silently truncated and the core runs off into unwritten memory. Seven tests
+failed, all of them branches and `jal`, which reads exactly like a control-flow
+bug and is a memory-size one.
+
+**4. PMP has to be excluded by name.** Those tests carry
+`verify (PMP['implemented'])` in their selection clause — but **riscof 1.25.3
+does not implement `verify` at all**, filtering on the ISA regex alone, so they
+are selected for any RV32I core and fail 43 times. They are dropped from the
+test list explicitly, with the reason recorded next to the exclusion, in the
+same style as the `riscv_tests` SKIPPED table. An exclusion with a reason is a
+statement; a failure left in the report is noise.
+
+**The signature is reconstructed from the store bus**, not read out of the RAM.
+Peeking inside memory would mean marking `mem` public for Verilator — a
+simulator-specific annotation on synthesisable RTL, for the benefit of a test.
+Replaying the program's committed stores onto its own load image gives the same
+answer from what the core already exposes, and is sound for the same reason the
+tohost watch is: nothing past EX is squashed.
+
+**The compliance suite is not a superset of the local tests, and fault
+injection says so precisely.** Running RISCOF against deliberately broken RTL:
+
+| mutation | RISCOF | caught locally by |
+|---|---|---|
+| `break_sra` | **2 tests fail** | `formal_alu`, `cosim_commit_log` |
+| `break_bltu` (signed/unsigned) | **1 test fails** | `formal_branch`, `cosim_directed` |
+| JALR does not clear bit 0 | **escapes — 76/76 still pass** | `cosim_directed` (`a8_control.S`) |
+
+The RV32I `jalr-01` test never computes an odd target, and the two
+`privilege/misalign*-jalr` tests aim at 2-mod-4 addresses, which bit 0 does not
+affect. So an official compliance pass would have been perfectly green over a
+JALR that ignores its own bit-0 rule. **This is the argument for keeping the
+directed tests after the external suite arrives**, not before it — they cover
+different things, and neither one subsumes the other.
+
+**RISCOF itself is deprecated upstream.** riscv-arch-test's default branch has
+moved to the ACT4 framework, which replaces RISCOF and needs the Sail model plus
+a UDB configuration. `toolchain/riscv-arch-test` is pinned to the maintained
+`old-framework-3.x` branch. That is deliberate: plan A10 asks for RISCOF and its
+HTML report, and ACT4 produces neither. Moving to ACT4 is a real piece of work
+and belongs to whoever wants the current certification flow.
+
+The Python pins are their own small maze; `toolchain/test-suite-pins.txt` has
+the reasoning, and the short version is that riscof 1.25.3 must be installed
+with `--no-deps` because its `gitpython==3.1.17` pin predates Python 3.12.
 
 ### Two more ways a test can be accidentally blind
 

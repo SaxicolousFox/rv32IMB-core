@@ -95,6 +95,7 @@ int main(int argc, char** argv) {
     bool     no_check = false;      // trace-only: A5's differ does the checking
     bool     have_expect = false;
     bool     trace = false;
+    const char* store_log = nullptr;
     uint32_t stop_pc = 0;    bool have_stop_pc = false;
     uint32_t tohost  = 0;    bool have_tohost  = false;
     long     expect_tohost = -1;
@@ -120,6 +121,8 @@ int main(int argc, char** argv) {
             have_tohost = true;
         } else if (!strcmp(argv[i], "--expect-tohost") && i + 1 < argc) {
             expect_tohost = atol(argv[++i]);
+        } else if (!strcmp(argv[i], "--store-log") && i + 1 < argc) {
+            store_log = argv[++i];
         }
     }
     if (!have_expect && !no_check && expect_tohost < 0) {
@@ -128,6 +131,22 @@ int main(int argc, char** argv) {
     if (!have_stop_pc && !have_tohost) {
         printf("CORE_TB_FAIL: no stop condition (--stop-pc or --tohost)\n");
         return 1;
+    }
+
+    // --store-log records every architecturally committed store as
+    // "<addr> <be> <data>".  RISCOF needs the contents of the signature region
+    // after the run, and replaying the stores onto the program's own image
+    // reconstructs it without the testbench ever reaching inside the RAM --
+    // which would need a Verilator-only annotation on synthesisable RTL.  It is
+    // sound for the same reason the tohost watch is: a store is issued from EX
+    // and nothing past EX is squashed.
+    FILE* slog = nullptr;
+    if (store_log) {
+        slog = fopen(store_log, "w");
+        if (!slog) {
+            printf("CORE_TB_FAIL: cannot open store log %s\n", store_log);
+            return 1;
+        }
     }
 
     dut = new VTOP;
@@ -147,6 +166,10 @@ int main(int argc, char** argv) {
         // The tohost write is checked BEFORE the commit stream, so the store
         // that ends a riscv-tests program stops the run on the cycle it is
         // issued rather than three cycles later when its instruction retires.
+        if (slog && dut->dbg_store_be != 0)
+            fprintf(slog, "%08x %x %08x\n", dut->dbg_store_addr,
+                    dut->dbg_store_be, dut->dbg_store_data);
+
         if (have_tohost && dut->dbg_store_be != 0 &&
             (dut->dbg_store_addr & ~3u) == (tohost & ~3u)) {
             tohost_val = dut->dbg_store_data;
@@ -200,6 +223,8 @@ int main(int argc, char** argv) {
     // computed, so they are skipped -- but dbg_unsupported and the x0 invariant
     // above still apply, because those are properties of the core rather than
     // of any particular program.
+    if (slog) fclose(slog);
+
     if (no_check) {
         printf("CORE_TB_TRACE_OK  (%ld instructions retired, %ld cycles, "
                "stopped=%d, span=%ld)\n", retired, cycle, (int)stopped,
