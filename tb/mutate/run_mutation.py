@@ -60,6 +60,16 @@ BR    = "rtl/core/rvntt_branch.sv"
 ALU   = "rtl/core/rvntt_alu.sv"
 CSR   = "rtl/core/rvntt_csr.sv"
 RF    = "rtl/core/rvntt_regfile.sv"
+RVFI  = "rtl/core/rvntt_rvfi.sv"
+
+# Files that must be MIRRORED so they can be mutated, but which are not part of
+# the Verilator simulation build.  rvntt_rvfi.sv is instantiated only under
+# `RISCV_FORMAL, so t4.RTL -- which is the simulator's source list -- does not
+# name it, and without this a mutation to the RVFI port would be reported as
+# "not in the build's source list" rather than run.
+MIRROR_EXTRA = [RVFI]
+
+RVFI_RUNNER = os.path.join(ROOT, "tb/formal/run_riscv_formal.py")
 
 MUTATIONS = [
     # ---------------------------------------------------------------- A6 ----
@@ -228,7 +238,14 @@ MUTATIONS = [
              "core executes the right instruction at a pc that is off by one, "
              "and only the commit log's pc column shows it",
          edits=[(CORE, "{ex_alu_y[31:1], 1'b0}", "{ex_alu_y[31:1], ex_alu_y[0]}")],
-         caught=["directed:a8_control"]),
+         # A11 added the second catcher, and it is the interesting one: RISCOF
+         # passes 76/76 over this mutation (see the A10 table in CLAUDE.md),
+         # because no arch-test computes an odd JALR target.  riscv-formal's
+         # jalr model states the `& ~1` directly, so it cannot be missed.
+         # pc_fwd does NOT catch it -- the core is self-consistent, fetching
+         # from exactly the odd pc it reports -- which is why the catcher has to
+         # be the instruction model and not a consistency check.
+         caught=["directed:a8_control", "rvfi:insn_jalr_ch0"]),
 
     dict(step="A8", name="jump_does_not_redirect",
          why="JAL and JALR fall through instead of jumping, while branches "
@@ -375,6 +392,81 @@ MUTATIONS = [
          edits=[(CORE, "  wire ex_target_misaligned = ex_ctrl_xfer && ex_jump_target[1];",
                        "  wire ex_target_misaligned = ex_ctrl_xfer && ex_jump_target[0];")],
          caught=["riscv:rv32mi/ma_fetch"]),
+    # --------------------------------------------------------------- A11 ----
+    # These are mutations of the RVFI PORT rather than of the pipeline: a
+    # verification interface that misreports is exactly as dangerous as a broken
+    # datapath, because everything downstream believes it.  Each one names the
+    # single riscv-formal check that states the property directly.
+    dict(step="A11", name="rvfi_order_skips_traps",
+         why="rvfi_order stops counting trapped instructions -- which is what "
+             "it would do if it were derived from minstret, the trap plan A11 "
+             "warns about.  Two instructions then share an index, and every "
+             "check that identifies an instruction BY its order is quietly "
+             "looking at the wrong one",
+         edits=[(RVFI, "    else if (mw_q.valid) order_q <= order_q + 64'd1;",
+                       "    else if (mw_q.valid && !mw_q.trap) order_q <= order_q + 64'd1;")],
+         caught=["rvfi:unique_ch0"]),
+
+    dict(step="A11", name="rvfi_trap_not_reported",
+         why="the trapped instruction is dropped from RVFI instead of being "
+             "reported with rvfi_trap -- i.e. RVFI is wired straight out of the "
+             "commit tracer, which is what plan A11 says to do and what does "
+             "not work.  The stream then jumps from the instruction before the "
+             "fault to the handler's first instruction, and pc_fwd sees a "
+             "pc_rdata that does not follow the previous pc_wdata",
+         edits=[(RVFI, "    ex_pkt.valid    = ex_valid;",
+                       "    ex_pkt.valid    = ex_valid && !ex_trap;")],
+         caught=["rvfi:pc_fwd_ch0"]),
+
+    dict(step="A11", name="rvfi_rs1_not_forwarded",
+         why="RVFI reports the register file's own read port instead of the "
+             "forwarded operand.  The core computes correctly and LIES about "
+             "what it read, so the spec model is fed a stale value and predicts "
+             "a different result -- a whole class of bug that only exists "
+             "because RVFI has to report the architectural pre-state",
+         edits=[(CORE, "      .ex_rs1_fwd         (ex_rs1_fwd),",
+                       "      .ex_rs1_fwd         (id_ex_q.rs1_data),")],
+         caught=["rvfi:reg_ch0"]),
+
+    dict(step="A11", name="rvfi_rd_addr_from_the_decoder",
+         why="rvfi_rd_addr is taken from the instruction word rather than from "
+             "the register file's write enable, so an instruction that writes "
+             "no register still names one.  A store's rd field is part of its "
+             "immediate, which is why this shows up on sw and not on add",
+         edits=[(RVFI, "  assign rvfi_rd_addr   = wb_we ? wb_rd_addr : 5'd0;",
+                       "  assign rvfi_rd_addr   = wb_rd_addr;")],
+         caught=["rvfi:insn_sw_ch0"]),
+
+    dict(step="A11", name="rvfi_mem_addr_not_word_aligned",
+         why="the reported access address keeps its low two bits, against "
+             "RISCV_FORMAL_ALIGNED_MEM.  NOT caught by insn_lw: a word load "
+             "that does not trap is aligned already, so the mutation is "
+             "invisible there and only the sub-word accesses see it.  A "
+             "reminder that picking the widest test is not picking the "
+             "strongest one",
+         edits=[(RVFI, "    ex_pkt.mem_addr  = {ex_alu_y[31:2], 2'b00};",
+                       "    ex_pkt.mem_addr  = ex_alu_y;")],
+         caught=["rvfi:insn_lb_ch0"]),
+
+    dict(step="A11", name="rvfi_shadow_reports_one_cycle_early",
+         why="the shadow pipeline loses its MEM stage, so RVFI describes the "
+             "instruction in MEM while rd_wdata and mem_rdata still belong to "
+             "the one in WB.  This is the failure the module's own "
+             "a_shadow_pc/a_shadow_insn assertions exist to localise",
+         edits=[(RVFI, "      mw_q           <= em_q;",
+                       "      mw_q           <= ex_pkt;")],
+         caught=["rvfi:pc_fwd_ch0"]),
+
+    dict(step="A11", name="fwd_xkntt_disagrees_with_writeback",
+         why="RESTORES A REAL BUG that riscv-formal found on its first clean "
+             "run: the MEM forwarding mux sent every result_sel that is not "
+             "RES_PC4 to ex_result, while mem_result sends RES_XKNTT to zero. "
+             "A legal Xkntt instruction therefore forwarded its ALU output and "
+             "wrote zero to the register file.  No RV32I program can reach it, "
+             "which is why five suites and 35 mutations had not",
+         edits=[(CORE, "      default:            ex_mem_fwd_data = 32'h0;",
+                       "      default:            ex_mem_fwd_data = ex_mem_q.ex_result;")],
+         caught=["rvfi:reg_ch0"]),
 ]
 
 # ------------------------------------------------------------------- the tests
@@ -392,7 +484,7 @@ RANDOM_SUITES = {
 def mirror_rtl(work, name, edits):
     """Copy the RTL tree, apply `edits`, return (dir, ok)."""
     d = os.path.join(work, "rtl_" + name)
-    for p in t4.RTL:
+    for p in t4.RTL + [os.path.join(ROOT, x) for x in MIRROR_EXTRA]:
         dst = os.path.join(d, os.path.relpath(p, ROOT))
         os.makedirs(os.path.dirname(dst), exist_ok=True)
         shutil.copy(p, dst)
@@ -442,6 +534,28 @@ def run_formal(work, name, rtl_dir, design):
         % (reads, design, "\n".join(srcs)))
     r = subprocess.run(["sby", "-f", sby], cwd=wd,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return r.returncode == 0
+
+
+def run_rvfi(rtl_dir, check):
+    """Run ONE riscv-formal check against the mutated tree.  True if it PASSES.
+
+    One check per manifest entry rather than the whole set, for the same reason
+    the random suites here are eight programs and not a thousand: the entry is a
+    claim about WHICH check sees the bug, and running all 43 would let one broad
+    check be credited with everything.  It also keeps the cost sane -- the full
+    set is about 40s wall, a single check two to ten.
+    """
+    r = subprocess.run([sys.executable, RVFI_RUNNER, "--rtl-dir", rtl_dir,
+                        "--only", check, "-j", "1"],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    if r.returncode not in (0, 1):
+        # Exit 2 means the design would not elaborate or the solver gave up.
+        # rvntt_rvfi.sv is not in the simulator's source list, so build() cannot
+        # vet a mutation to it -- and a mutation that does not compile must not
+        # be counted as caught.  Loud, not silent.
+        raise RuntimeError("riscv-formal could not run %s:\n%s"
+                           % (check, r.stdout.decode("utf-8", "replace")[-2000:]))
     return r.returncode == 0
 
 
@@ -516,6 +630,8 @@ def run_test(kind, fx, exe, rtl_dir, work, mut_name, quiet=True):
 def _run_test(kind, fx, exe, rtl_dir, work, mut_name):
     if kind.startswith("formal:"):
         return run_formal(work, mut_name, rtl_dir, kind.split(":", 1)[1])
+    if kind.startswith("rvfi:"):
+        return run_rvfi(rtl_dir, kind.split(":", 1)[1])
     if kind.startswith("directed:"):
         prog = kind.split(":", 1)[1]
         return run_program_test(exe, fx.directed_elf(prog), work, fx.image, prog)

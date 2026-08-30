@@ -9,12 +9,20 @@
 
 riscv-tests	2ebecad997fa58cd9e5724340ba75aa4b59bd1d0	2026-08-14	master, --recurse-submodules (needs env/)
 riscv-arch-test	9bceaf5c02fa1131625bc6228b834e9e884c5801	2026-02-19	old-framework-3.x
+riscv-formal	c992aa61fdfe0846c5ed90324c596202a1c69b76	2026-07-16	main
 
 # How to reproduce:
 #   git clone --depth 1 --recurse-submodules \
 #       https://github.com/riscv-software-src/riscv-tests.git toolchain/riscv-tests
 #   git clone --depth 1 --branch old-framework-3.x \
 #       https://github.com/riscv-non-isa/riscv-arch-test.git toolchain/riscv-arch-test
+#   git clone https://github.com/YosysHQ/riscv-formal.git toolchain/riscv-formal
+#
+# riscv-formal needs NO Python packages and no pinned branch: it is a set of
+# SystemVerilog checks plus one generator script, and it runs on the sby and
+# yosys already in toolchain/opt/oss-cad-suite.  It is pinned by commit anyway,
+# because the instruction models in insns/ are the specification the core is
+# proved against -- moving them silently would change what M6 means.
 #
 # WHY old-framework-3.x AND NOT main.  Upstream deprecated RISCOF: the default
 # branch now carries the "ACT4" framework, which replaces it and needs the Sail

@@ -278,9 +278,25 @@ def discover() -> list:
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=3600))
 
-    # Mutation testing (A6+).  ON by default, at about 2m10s -- it rebuilds the
-    # simulator once per mutation, so it is the most expensive thing here by a
-    # wide margin.  It is on anyway because it is the only test that checks the
+    # A11.  riscv-formal: bounded model checking of the whole pipeline against a
+    # formal model of the ISA, through the RVFI port in rtl/core/rvntt_rvfi.sv.
+    # 43 checks -- 36 instruction models plus reg, pc_fwd, pc_bwd, causal,
+    # liveness and unique -- at depth 14, which is about 40s wall on 8 jobs and
+    # four minutes of solver time.  That is cheap enough to run every time, and
+    # it is the only mechanism here that covers EVERY instruction sequence of
+    # its length rather than the ones a generator happened to emit: it found a
+    # forwarding/writeback disagreement that no RV32I program can reach.
+    #
+    # SKIPs itself with a clone command if toolchain/riscv-formal is absent --
+    # it is a third-party checkout like riscv-tests and riscv-arch-test, and
+    # toolchain/test-suite-pins.txt reproduces it.
+    t.append(Test("riscv_formal", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_riscv_formal.py")],
+                  requires=["sby", "yosys"], timeout=1800))
+
+    # Mutation testing (A6+).  ON by default, at about 3m45s -- it rebuilds the
+    # simulator once per mutation, and A11's entries add a riscv-formal check
+    # each on top, so it is the most expensive thing here by a wide margin.  It is on anyway because it is the only test that checks the
     # OTHER tests, and an unrun mutation manifest rots silently: A6's forwarding
     # proof was checking itself, and A8's directed test never touched the
     # comparator's rs2 port, and neither was visible any other way.  Set
