@@ -267,6 +267,17 @@ def discover() -> list:
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=1800))
 
+    # A10.  RISCOF over riscv-arch-test: the official compliance suite, with
+    # Spike as the reference model.  SKIPs itself with instructions if either
+    # the checkout or the riscof package is missing -- both are third-party and
+    # neither is in the repository (toolchain/test-suite-pins.txt reproduces
+    # them).  Slow: it compiles and runs every test twice, once per model.
+    t.append(Test("riscof_arch_test", "cosim",
+                  [py, os.path.join(ROOT, "tb/riscof/run_riscof.py"),
+                   "--no-save-report"],
+                  requires=["verilator", "riscv-none-elf-gcc", "spike"],
+                  timeout=3600))
+
     # Mutation testing (A6+).  ON by default, at about 2m10s -- it rebuilds the
     # simulator once per mutation, so it is the most expensive thing here by a
     # wide margin.  It is on anyway because it is the only test that checks the
