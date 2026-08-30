@@ -180,7 +180,8 @@ confirm it is satisfied.
 | M3 | Spike executes the extension; ML-KEM keygen passes on Spike | ✅ full 10000-vector KAT |
 | M4 | Pipeline passes 1000 random programs in lockstep cosim vs. Spike | ✅ at max hazard density |
 | M5 | RISCOF RV32I compliance suite passes | ✅ 38/38 `I`, plus hints and privilege |
-| M6–M16 | — | not started |
+| M6 | riscv-formal checks pass | ✅ 43 checks at BMC depth 14 |
+| M7–M16 | — | not started |
 
 **M5 is a compliance claim, and its boundaries are recorded rather than
 implied.** The RV32I `I` suite passes 38/38 and the report is committed at
@@ -192,9 +193,20 @@ so `toolchain/riscv-arch-test` is pinned to the maintained `old-framework-3.x`
 branch. See `rtl/core/CLAUDE.md` for the four corrections it took to get a
 report that means anything.
 
-**What is still missing at M5**: no `riscv-formal` (M6, plan A11), no
-synthesis or timing closure, no bitstream, and no Xkntt execution — the decoder
-recognises the extension but no stage runs it.
+**M6's boundaries are recorded too.** The 36 RV32I instruction models plus
+`reg`, `pc_fwd`, `pc_bwd`, `causal`, `liveness` and `unique` all pass at depth
+14. What is **not** proved: memory consistency (`dmem` and the `bus_*` checks
+need a memory model in the wrapper, which would defeat the unconstrained
+`dmem_rdata` the rest of the proof depends on), anything about CSRs (`csrw`,
+`csr_ill` and `ill` have no model for Zicsr, ECALL, MRET or FENCE), and the
+Xkntt encodings. It found one real bug on its first honest run — a forwarding
+mux and a writeback mux disagreeing on `RES_XKNTT` — and its first *dishonest*
+run reported 43/43 over a broken adder, because sby exits 0 on a failed check
+by design. See `rtl/core/CLAUDE.md`.
+
+**What is still missing after M6**: no synthesis or timing closure, no
+bitstream, and no Xkntt execution — the decoder recognises the extension but no
+stage runs it.
 
 **C6 is only partially done**, which gates more than it appears to: there is no
 TIER2 backend, no RTL verification, and no `make KAT` target. Any milestone

@@ -22,6 +22,16 @@ INC  = ["-I" + os.path.join(ROOT, d)
 SKIP_STANDALONE = {"rvntt_blinky_top.sv"}
 
 
+# Code behind an `ifdef is code, and lint has to see it.  rvntt_core's RVFI port
+# and rvntt_rvfi.sv are only compiled when RISCV_FORMAL is set -- by
+# riscv-formal's generated .sby files, never by the simulation build -- so
+# without a pass that sets it, the one file whose whole job is verification
+# would be the one file nothing lints.  A5's own experience applies: an
+# unexercised checking mechanism rots silently.
+DEFINE_PASSES = [
+    ("RISCV_FORMAL", ["rtl/core/rvntt_rvfi.sv", "rtl/core/rvntt_core.sv"]),
+]
+
 DESIGNS = [
     ("rvntt_blinky_top", [
         "rtl/soc/rvntt_blinky_top.sv", "rtl/soc/rvntt_clkgen.sv",
@@ -59,6 +69,15 @@ def main() -> int:
             fails.append(os.path.relpath(f, ROOT))
             print(out.rstrip()[-1500:])
 
+    for define, files in DEFINE_PASSES:
+        for f in files:
+            rc, out = run(["verilator", "--lint-only", "-Wall",
+                           "+define+" + define] + INC
+                          + with_deps(os.path.join(ROOT, f)))
+            if rc != 0:
+                fails.append(f"{f} (+define+{define})")
+                print(out.rstrip()[-1500:])
+
     for top, files in DESIGNS:
         rc, out = run(["verilator", "--lint-only", "-Wall", "--top-module", top]
                       + INC + [os.path.join(ROOT, f) for f in files])
@@ -70,7 +89,9 @@ def main() -> int:
     if fails:
         print(f"LINT_FAIL: {', '.join(fails)}")
         return 1
-    print(f"LINT_OK ({n} file(s) standalone + {len(DESIGNS)} elaborated design(s))")
+    n_def = sum(len(files) for _, files in DEFINE_PASSES)
+    print(f"LINT_OK ({n} file(s) standalone + {n_def} with defines "
+          f"+ {len(DESIGNS)} elaborated design(s))")
     return 0
 
 

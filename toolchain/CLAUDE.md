@@ -36,10 +36,20 @@ which keeps rebasing cheap.
 
 ## Test-suite checkouts and their pins
 
-`riscv-tests` (A9) and `riscv-arch-test` (A10) are gitignored checkouts like
-`spike-src`, reproduced from **`toolchain/test-suite-pins.txt`** rather than
-committed. That file is deliberately separate from `upstream-pins.txt`, which
-`patches.sh` parses and which is only for the forks this project *patches*.
+`riscv-tests` (A9), `riscv-arch-test` (A10) and `riscv-formal` (A11) are
+gitignored checkouts like `spike-src`, reproduced from
+**`toolchain/test-suite-pins.txt`** rather than committed. That file is
+deliberately separate from `upstream-pins.txt`, which `patches.sh` parses and
+which is only for the forks this project *patches*.
+
+`riscv-formal` needs no Python packages and no pinned branch — it is a set of
+SystemVerilog checks plus one generator script, running on the `sby` and `yosys`
+already in `opt/oss-cad-suite`. It is pinned by **commit** anyway, because the
+instruction models in its `insns/` are the specification the core is proved
+against: moving them silently would change what M6 means. The generated check
+set lands in `toolchain/riscv-formal/cores/rvntt/`, which is a build artifact —
+`tb/formal/run_riscv_formal.py` writes the configuration there on every run, so
+nothing in that directory should ever be edited by hand.
 
 It also records the RISCOF Python pins, which are not obvious: riscof 1.25.3
 must be installed with `--no-deps`, because its `gitpython==3.1.17` pin predates

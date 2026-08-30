@@ -73,6 +73,37 @@ module rvntt_core #(
     // Pulses with commit_valid when the retiring instruction is one this core
     // cannot execute faithfully.  See the header.
     output logic        dbg_unsupported
+
+    // A11's RVFI port.  Behind an ifdef because it is a verification interface
+    // with no architectural function: nothing outside a riscv-formal check ever
+    // reads it, and 200-odd flops of shadow pipeline have no business in a
+    // bitstream.  The commit trace above stays exactly as it is -- RVFI is a
+    // second, parallel report, not a replacement (rvntt_rvfi.sv explains why the
+    // two cannot be the same signal).
+`ifdef RISCV_FORMAL
+    ,
+    output wire         rvfi_valid,
+    output wire [63:0]  rvfi_order,
+    output wire [31:0]  rvfi_insn,
+    output wire         rvfi_trap,
+    output wire         rvfi_halt,
+    output wire         rvfi_intr,
+    output wire [1:0]   rvfi_mode,
+    output wire [1:0]   rvfi_ixl,
+    output wire [4:0]   rvfi_rs1_addr,
+    output wire [4:0]   rvfi_rs2_addr,
+    output wire [31:0]  rvfi_rs1_rdata,
+    output wire [31:0]  rvfi_rs2_rdata,
+    output wire [4:0]   rvfi_rd_addr,
+    output wire [31:0]  rvfi_rd_wdata,
+    output wire [31:0]  rvfi_pc_rdata,
+    output wire [31:0]  rvfi_pc_wdata,
+    output wire [31:0]  rvfi_mem_addr,
+    output wire [3:0]   rvfi_mem_rmask,
+    output wire [3:0]   rvfi_mem_wmask,
+    output wire [31:0]  rvfi_mem_rdata,
+    output wire [31:0]  rvfi_mem_wdata
+`endif
 );
 
   // ==========================================================================
@@ -282,13 +313,31 @@ module rvntt_core #(
   logic [31:0] ex_rs1_fwd, ex_rs2_fwd;
 
   // The MEM stage's forwardable value.  NOT `mem_result`, which includes the
-  // load path: this mux is only over the two sources that are already
-  // registered, so the forwarding network can never put the BRAM output on the
-  // ALU's input path.  See rvntt_forward.sv.
+  // load path: this mux is only over sources that are already registered, so
+  // the forwarding network can never put the BRAM output on the ALU's input
+  // path.  See rvntt_forward.sv.
+  //
+  // BUT IT MUST AGREE WITH `mem_result` FOR EVERY result_sel FWD_MEM CAN
+  // SELECT, and the first version did not.  It was written as "pc_plus4 for
+  // RES_PC4, ex_result for everything else", while mem_result's own case sends
+  // RES_XKNTT to its `default: 32'h0` arm -- so a legal Xkntt instruction
+  // forwarded its ALU output to the next instruction while writing zero to the
+  // register file.  No RV32I test can reach it, because the only instruction
+  // class that disagrees is the one no stage executes; riscv-formal's `reg`
+  // check found it in seven seconds from an unconstrained instruction stream.
+  // The two case statements are now written the same way round so the next
+  // result_sel cannot be added to one and forgotten in the other.
   logic [31:0] ex_mem_fwd_data;
   always_comb begin
-    ex_mem_fwd_data = (ex_mem_q.result_sel == rv32i_pkg::RES_PC4)
-                      ? ex_mem_q.pc_plus4 : ex_mem_q.ex_result;
+    unique case (ex_mem_q.result_sel)
+      rv32i_pkg::RES_PC4: ex_mem_fwd_data = ex_mem_q.pc_plus4;
+      rv32i_pkg::RES_ALU,
+      rv32i_pkg::RES_CSR: ex_mem_fwd_data = ex_mem_q.ex_result;
+      // RES_XKNTT, the unassigned encodings, and RES_MEM -- which is
+      // unreachable here, because rvntt_forward excludes loads from FWD_MEM.
+      // Zero, because that is what mem_result writes back for all of them.
+      default:            ex_mem_fwd_data = 32'h0;
+    endcase
   end
 
   rvntt_forward u_forward (
@@ -665,6 +714,62 @@ module rvntt_core #(
   //     say so, instead of the program quietly computing with a decoded zero.
   assign dbg_unsupported =
       mem_wb_q.valid && (wb_ctrl.is_illegal || wb_ctrl.is_xkntt);
+
+  // ---- the RVFI port (A11) -------------------------------------------------
+`ifdef RISCV_FORMAL
+  rvntt_rvfi u_rvfi (
+      .clk                (clk),
+      .rst_n              (rst_n),
+
+      .ex_valid           (id_ex_q.valid),
+      .ex_trap            (ex_trap),
+      .ex_pc              (id_ex_q.pc),
+      .ex_insn            (id_ex_q.insn),
+      .ex_redirect        (ex_redirect),
+      .ex_redirect_target (ex_redirect_target),
+      .ex_uses_rs1        (id_ex_q.ctrl.uses_rs1),
+      .ex_uses_rs2        (id_ex_q.ctrl.uses_rs2),
+      .ex_rs1_addr        (id_ex_q.rs1_addr),
+      .ex_rs2_addr        (id_ex_q.rs2_addr),
+      .ex_rs1_fwd         (ex_rs1_fwd),
+      .ex_rs2_fwd         (ex_rs2_fwd),
+      .ex_mem_read        (id_ex_q.ctrl.mem_read),
+      .ex_alu_y           (ex_alu_y),
+      .ex_dmem_be         (dmem_be),
+      .ex_dmem_wdata      (dmem_wdata),
+
+      .mem_dmem_rdata     (dmem_rdata),
+
+      .wb_valid           (mem_wb_q.valid),
+      .wb_pc              (mem_wb_q.pc),
+      .wb_insn            (mem_wb_q.insn),
+      .wb_we              (wb_we),
+      .wb_rd_addr         (wb_wa),
+      .wb_rd_data         (wb_wd),
+
+      .rvfi_valid         (rvfi_valid),
+      .rvfi_order         (rvfi_order),
+      .rvfi_insn          (rvfi_insn),
+      .rvfi_trap          (rvfi_trap),
+      .rvfi_halt          (rvfi_halt),
+      .rvfi_intr          (rvfi_intr),
+      .rvfi_mode          (rvfi_mode),
+      .rvfi_ixl           (rvfi_ixl),
+      .rvfi_rs1_addr      (rvfi_rs1_addr),
+      .rvfi_rs2_addr      (rvfi_rs2_addr),
+      .rvfi_rs1_rdata     (rvfi_rs1_rdata),
+      .rvfi_rs2_rdata     (rvfi_rs2_rdata),
+      .rvfi_rd_addr       (rvfi_rd_addr),
+      .rvfi_rd_wdata      (rvfi_rd_wdata),
+      .rvfi_pc_rdata      (rvfi_pc_rdata),
+      .rvfi_pc_wdata      (rvfi_pc_wdata),
+      .rvfi_mem_addr      (rvfi_mem_addr),
+      .rvfi_mem_rmask     (rvfi_mem_rmask),
+      .rvfi_mem_wmask     (rvfi_mem_wmask),
+      .rvfi_mem_rdata     (rvfi_mem_rdata),
+      .rvfi_mem_wdata     (rvfi_mem_wdata)
+  );
+`endif
 
 endmodule
 

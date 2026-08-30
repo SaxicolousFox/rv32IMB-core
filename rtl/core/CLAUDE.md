@@ -18,7 +18,8 @@ was the whole reason C1 came before this.
 | `rvntt_hazard.sv` | A7 | `formal_hazard`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
 | `rvntt_branch.sv` | A8 | `formal_branch`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
 | `rvntt_csr.sv` | A9 | `formal_csr`, `riscv_tests`, `csr_traps_minstret`, Vivado elaboration |
-| `rvntt_core.sv` | A4, A6–A9 | `core_a4_checksum`, `cosim_commit_log`, `riscv_tests`, Vivado elaboration |
+| `rvntt_rvfi.sv` | A11 | `riscv_formal` (43 checks), Vivado elaboration |
+| `rvntt_core.sv` | A4, A6–A9, A11 | `core_a4_checksum`, `cosim_commit_log`, `riscv_tests`, `riscv_formal`, Vivado elaboration |
 | `../soc/rvntt_ram.sv`, `../soc/rvntt_core_sim_top.sv` | A4 | `core_a4_checksum` |
 | `tb/unit/rvntt_trace.sv` + `rvntt_trace_top.sv` | A5 | `cosim_commit_log` |
 | `tb/cosim/commit_diff.py`, `gen_random_prog.py` | A5 | `cosim_commit_log` |
@@ -28,6 +29,7 @@ was the whole reason C1 came before this.
 | `sw/tests/a9_csr.S`, `a9_minstret.S` | A9 | `csr_traps_minstret` |
 | `tb/cosim/test_riscv_tests.py` | A9 | `riscv_tests` |
 | `tb/riscof/` (plugins, env, runner) | A10 | `riscof_arch_test` |
+| `tb/formal/rvntt_rvfi_wrapper.sv`, `run_riscv_formal.py` | A11 | `riscv_formal` |
 | `tb/cosim/cycle_model.py` | A7 | `cosim_directed`, `cosim_commit_log` |
 | `tb/mutate/run_mutation.py` | A6 | run by hand; see below |
 
@@ -392,6 +394,182 @@ The Python pins are their own small maze; `toolchain/test-suite-pins.txt` has
 the reasoning, and the short version is that riscof 1.25.3 must be installed
 with `--no-deps` because its `gitpython==3.1.17` pin predates Python 3.12.
 
+### A11 — riscv-formal, and the bug five suites could not reach
+
+43 checks pass at **BMC depth 14**: the 36 RV32I instruction models plus `reg`,
+`pc_fwd`, `pc_bwd`, `causal`, `liveness` and `unique`. About 40 s wall on eight
+jobs, four minutes of solver time. `tb/formal/run_riscv_formal.py` generates the
+configuration, drives riscv-formal's own `genchecks.py`, and runs `sby`.
+
+**Depth is counted from the first retirement, not from zero.** riscv-formal's
+testbench constrains `reset` to step 0 only, and this pipeline is five stages
+deep, so the first instruction retires at cycle 5 and a check at cycle N sees at
+most N−4 instructions. The deepest thing a check must reach is a dependency at
+distance 3 — the boundary between the forwarding network (1 and 2) and the
+register file's write-through (3) — with a load-use stall and a two-cycle
+control-flow bubble also in the window. That is four instructions plus up to
+three bubbles, so 14 leaves margin and still solves in seconds. It is
+deliberately not larger; the *Formal depth* section below is why.
+
+#### The plan is wrong that the commit tracer is enough
+
+Plan A11 says to "wire it out of your existing commit tracer — the information
+is the same, in a standardized form". It is not. **riscv-formal requires a
+trapping instruction to be reported, with `rvfi_trap` set**, and A9's trap
+invariant squashes the faulting instruction in EX so it never reaches WB and
+never appears in the commit stream at all. That squash is load-bearing — it is
+what keeps the commit log line-for-line comparable with Spike, which prints
+nothing for a trapping instruction, and what makes `minstret` right without an
+in-flight correction — so `rvntt_rvfi.sv` adds a **second, parallel report
+path** instead of unpicking it.
+
+The trapped instruction fits in the hole it leaves behind: a trap at cycle T
+clears `ex_mem_q`, so `mem_wb_q` is a bubble at T+2, which is exactly the cycle
+that instruction would have retired. The shadow registers load on the same edges
+as `ex_mem_q` and `mem_wb_q`, so the trap report emerges in that empty slot and
+`NRET = 1` stays sound. The module asserts that rather than arguing it:
+`a_trap_not_retired`, `a_nontrap_retired` and `a_shadow_pc`/`a_shadow_insn` run
+inside every one of the 43 checks. They are not decoration — dropping the
+shadow's MEM stage makes all four fire by name at step 14, which is a far better
+diagnostic than the `pc_fwd` counterexample the same bug also produces.
+
+**`rvfi_order` is not `minstret`, and cannot be derived from it.** It must count
+trapped instructions; `minstret` deliberately does not. It is its own counter.
+
+**What comes from the real pipeline and what comes from the shadow.** Everything
+that still exists at WB is read from the registers the core actually uses — `pc`,
+`insn`, and the register file's own write port — so RVFI reports what the machine
+did rather than what a parallel copy predicted. Only what has no later copy is
+shadowed: the forwarded EX operands, the data-bus request, and the trap's
+`pc_wdata`. Taking `rvfi_rd_addr` from `wb_we` rather than from the decoded field
+also gets the RVFI rule ("zero for an instruction that writes no register") for
+free, and a trapped instruction needs no mux of its own because it was squashed.
+
+#### The bug it found
+
+`reg_ch0` failed on the first honest run, in seven seconds, from an
+unconstrained instruction stream:
+
+```
+ord=6  insn=0x01ba048b  (custom-0, kmm)  rd=x9 <- 0x00000000
+ord=7  insn=0x01948803  (lb)             rs1=x9 reads 0xe0008001
+```
+
+`ex_mem_fwd_data` was written as "`pc_plus4` for `RES_PC4`, `ex_result` for
+everything else", while `mem_result`'s case sends `RES_XKNTT` to its
+`default: 32'h0` arm. **A legal Xkntt instruction forwarded its ALU output to
+the next instruction and wrote zero to the register file.** Two case statements
+over the same enum, disagreeing on one arm.
+
+No RV32I program can reach it — the only instruction class that disagrees is the
+one no stage executes — which is why A5's 500 random programs, the directed
+tests, riscv-tests, RISCOF and 35 mutations had all missed it. The fix writes
+both case statements the same way round. `fwd_xkntt_disagrees_with_writeback`
+restores it permanently, so it cannot come back unnoticed.
+
+The general shape is worth keeping: **an unimplemented feature is not the same as
+an absent one.** The decoder accepts Xkntt and `dbg_unsupported` catches it
+*retiring in simulation*, but formal has no such stop condition, so it explored
+the datapath the decoder actually permits.
+
+#### sby's exit code is not the verdict either
+
+`genchecks` writes `expect pass,fail` into every generated `.sby`, which tells
+sby that a failing proof is an *acceptable outcome*: it prints
+`DONE (FAIL, rc=0)` and exits 0. The first version of the runner reported a green
+**43/43 over a core with a deliberately broken adder**. The verdict now comes
+from each check's `status` file, and a missing status is a failure.
+
+This is the second time this exact shape has appeared here — A10's RISCOF runner
+printed `RISCOF_OK` over 50 real failures — so it is now a rule rather than an
+anecdote: **for any third-party test driver, find out what it does on failure
+before believing a green run, and take the verdict from the artefact rather than
+from the process.** Only fault injection caught either of them.
+
+A related distinction the runner now makes: a check whose status is `ERROR` (the
+design would not elaborate, or the solver gave up) is **not** a caught bug, and
+`run_riscv_formal.py` exits 2 rather than 1 so the mutation harness refuses to
+credit it. That matters specifically because `rvntt_rvfi.sv` is not in the
+simulator's source list, so `build()` cannot vet a mutation to it.
+
+#### What riscv-formal adds, and what it does not
+
+Measured by running mutations against it, in the same style as A10's table:
+
+| mutation | riscv-formal | also caught by |
+|---|---|---|
+| Xkntt forward/writeback disagreement | `reg` **fails** | *nothing else in the tree* |
+| JALR does not clear bit 0 | `insn_jalr` **fails** | `cosim_directed` — **RISCOF passes 76/76** |
+| ALU `ADD` becomes `OR` | `insn_add`, `insn_addi`, `insn_lw`, `reg` all fail; `insn_xor` passes | `formal_alu`, `cosim_commit_log`, RISCOF |
+| load's rd stalls on `x0` (phantom stall) | **escapes** | `cycle_model` only |
+| `minstret` counted at WB | **escapes** | `csr:a9_minstret` only |
+
+The two escapes are the honest boundary. A phantom stall changes no
+architectural state, and RVFI carries none of the timing information that would
+show it — so `tb/cosim/cycle_model.py` remains the only thing that can see one.
+And there are no CSR checks here at all, so nothing about `mcycle`/`minstret`
+is proved.
+
+Note that `pc_fwd` does **not** catch the JALR mutation, even though the pc is
+wrong: the core is internally self-consistent, fetching from exactly the odd pc
+it reports. Only the instruction model, which states `& ~1` directly, sees it.
+The same shape appears in `rvfi_mem_addr_not_word_aligned`, which `insn_lw`
+misses — a word load that does not trap is aligned already — and only the
+sub-word models catch. **Picking the widest test is not picking the strongest
+one.**
+
+#### What is deliberately not checked
+
+Stated here rather than left to be discovered from a short check list:
+
+- **`dmem` and the `bus_*` family.** They verify that a load returns what an
+  earlier store wrote, which needs a memory model in the wrapper. This wrapper
+  leaves `dmem_rdata` unconstrained on purpose — that is what makes the proof
+  cover every possible memory response — so memory consistency is covered by
+  A5's cosimulation and riscv-tests against a real RAM instead.
+- **`ill`, `csrw`, `csr_ill`.** riscv-formal has no instruction model for Zicsr,
+  ECALL, EBREAK, MRET or FENCE, and its `ill` check asserts that anything
+  outside the model set *traps* — which would demand that this core trap on
+  `csrr` and on `fence`. The CSR file is covered by `formal_csr`, the `rv32mi-p`
+  tests and RISCOF's privilege suite.
+- **The Xkntt encodings themselves.** No stage executes them and there is no
+  model, so the proof says nothing about what custom-0 and custom-1 *should*
+  compute — only, as above, that the core does not contradict itself about what
+  it currently does. M13's work.
+
+#### Three things about the wrapper
+
+- **The memory interface is not a handshake, so there is nothing to constrain.**
+  `rvntt_ram` registers each port's address, and the core has no valid, no ready
+  and no way to stall on memory. The fixed timing is expressed by `imem_rdata`
+  and `dmem_rdata` simply being fresh symbolic values every cycle, which
+  over-approximates any one-cycle memory. Adding a `stall` input, as the NERV
+  wrapper has, would be modelling a signal this core does not have.
+- **`rvfi_mem_addr` reports the full computed address**, word-aligned for
+  `RISCV_FORMAL_ALIGNED_MEM` — not the address `rvntt_ram` used. The RAM drops
+  everything above its array and aliases rather than faulting; that is the
+  memory's behaviour, not the instruction's, and RVFI describes the instruction.
+- **Asynchronous reset needed one deliberate thought, not a workaround.** The
+  testbench constrains `reset == $initstate`, so reset is high for step 0 only.
+  An active-low async reset held through step 0 leaves every reset flop at its
+  reset value from step 1, which is what a synchronous reset of the same length
+  would give — but it does **not** constrain those flops *during* step 0, so
+  nothing in the core may assert about its own state on that first edge.
+  `f_started_q` carries a declaration initialiser as well as a reset for exactly
+  that reason, and the initialiser is the half that matters.
+
+#### The 64-bit counters turned out not to be the problem
+
+`rvntt_csr.sv` carries 64-bit `mcycle` and `minstret` with incrementers — 128
+bits of state that no check here reads, since no CSR is exposed on RVFI — and
+the obvious worry was that they would dominate solve time the way depth does for
+`formal_regfile`. **Measured instead of assumed: they do not.** At depth 14 the
+whole set is four minutes of solver time and the slowest single check is 11 s,
+so there is no blackboxing and no `cutpoint` here to explain later. Two 64-bit
+adders bit-blast cheaply; it is the *unrolling* of a 32×32 memory that blows up,
+not the width of an accumulator. If the depth is ever raised, re-measure before
+concluding anything.
+
 ### Two more ways a test can be accidentally blind
 
 Both found by mutation at A9, and both are about the *stimulus*, as at A5 and A7.
@@ -584,6 +762,19 @@ Not hypothetical — these are defects the practice found in this directory:
   that constrains a handful of specific encodings out of 2³² needs a directed
   sweep. Random testing covers the common case and never the rare constraint.
 
+- **A forwarding mux and a writeback mux disagreeing on one enum arm** (A11).
+  `ex_mem_fwd_data` sent everything that was not `RES_PC4` to `ex_result`;
+  `mem_result` sends `RES_XKNTT` to zero. Unreachable by any RV32I program, so
+  five suites and 35 mutations had missed it; riscv-formal's `reg` check found
+  it in seven seconds. **An unimplemented feature is not an absent one** — the
+  decoder accepts Xkntt, so the datapath has to be self-consistent about it even
+  before a stage executes it.
+- **A test runner that reported 43/43 over a broken adder** (A11). `sby` exits 0
+  on a failed check, because riscv-formal's generated `.sby` files carry
+  `expect pass,fail`. Identical in shape to A10's RISCOF exit code. The rule
+  that came out of it: **for any third-party test driver, find out what it does
+  on failure before believing a green run, and take the verdict from the
+  artefact rather than from the process.**
 - **Formal properties written in terms of the design's own intermediate
   signals** (A6). `rvntt_forward`'s priority, completeness and soundness
   properties all went through `mem_supplies` / `wb_supplies`, so a mutation
@@ -613,6 +804,11 @@ Two things about it are worth keeping:
   catcher that does not catch is a failure (`PARTIAL`), not a footnote.
   Requiring only that *something* catches each mutation lets a manifest decay
   until one broad test is credited with everything.
+- **The test kinds are `formal:`, `directed:`, `random:`, `riscv:`, `csr:`,
+  `rvfi:` and `a4`.** `rvfi:<check>` runs ONE riscv-formal check against the
+  mutated tree, for the same reason the random suites here are eight programs
+  and not a thousand: the manifest entry is a claim about *which* check sees the
+  bug, and running all 43 would let one broad check be credited with everything.
 - **A mutation that fails to build is an error, not a catch.** Deleting an
   expression's only use makes Verilator's `UNUSEDSIGNAL` the detector rather
   than the test. Two A4 mutations and two A6 ones had to be reformulated so
@@ -622,6 +818,11 @@ A baseline run against unmutated RTL comes first, so a stuck-at-fail test
 cannot appear to catch everything.
 
 ## Formal depth
+
+The `riscv_formal` check set is the exception that proves the rule: it runs at
+depth 14 over the whole pipeline, 64-bit counters included, in seconds. Width is
+cheap for a bit-blasting solver; **unrolling a memory is what is expensive**, and
+that is what the numbers below are about.
 
 `formal_regfile` runs at **depth 8, not the `run_formal.py` default of 20**.
 Every regfile property is combinational except storage-stability, which spans
