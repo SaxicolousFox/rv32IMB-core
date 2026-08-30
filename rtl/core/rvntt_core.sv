@@ -16,12 +16,22 @@
 //   * CONTROL FLOW (A8) is present: branches resolve in EX, and a taken branch
 //     or a jump redirects the PC and squashes the two younger instructions
 //     already in flight.  The penalty is therefore two cycles, always.
+//   * CSRs, TRAPS AND MRET (A9) are present.  See "the trap invariant" below.
 //
-// `dbg_unsupported` still pulses whenever an instruction retires that this core
-// cannot execute faithfully -- now only illegal instructions, Xkntt, and a CSR
-// access that writes a register (A9) -- and the testbench treats it as a
-// failure.  A guard beats a footnote: without it, A5's commit-log differ would
-// report a mismatch somewhere downstream of the real cause.
+// The only thing left unimplemented is the Xkntt coprocessor: the decoder
+// recognises the extension but no stage executes it, so `dbg_unsupported`
+// pulses if one ever retires and the testbench treats that as a failure.  It
+// also still watches for a retiring ILLEGAL instruction -- which A9 should make
+// impossible, since illegal instructions now trap, and which is therefore no
+// longer a footnote but a live check that trapping works.
+//
+// THE TRAP INVARIANT: EVERY TRAP RESOLVES IN EX, so an instruction that reaches
+// MEM is guaranteed to retire.  That is not an accident of the current
+// exception set -- the misaligned-address check had to be placed in EX, where
+// the address is computed, rather than in MEM where the access happens, to keep
+// it true.  Two things depend on it and would break silently without it: the
+// CSR file's in-flight `minstret` adjustment (rvntt_csr.sv), and the fact that
+// nothing older than EX ever has to be squashed.
 //
 // MEMORY TIMING.  rvntt_ram registers each port's address, so its output
 // register serves as a pipeline register (see that file's header).  Port B's
@@ -59,7 +69,6 @@ module rvntt_core #(
     output logic        commit_reg_write,
     output logic [4:0]  commit_rd,
     output logic [31:0] commit_wdata,
-    output logic        commit_is_ecall,
 
     // Pulses with commit_valid when the retiring instruction is one this core
     // cannot execute faithfully.  See the header.
@@ -93,18 +102,24 @@ module rvntt_core #(
   // ==========================================================================
   logic [31:0] pc_q;
   logic        stall;                      // driven by rvntt_hazard, in ID
-  logic        ex_redirect;                // a taken branch or a jump, in EX
-  logic [31:0] ex_target;
+  logic        ex_redirect;                // a control transfer, MRET or a trap
+  logic [31:0] ex_redirect_target;
+  logic [31:0] ex_jump_target;             // branch/JAL/JALR only
+  logic        ex_trap;                    // the instruction in EX faults
+  logic [4:0]  ex_trap_cause;
+  logic [31:0] ex_trap_val;
+  logic        ex_mret;
 
   // A REDIRECT AND A STALL CANNOT COINCIDE.  Both are properties of the single
   // instruction in EX: `stall` needs it to be a load, `ex_redirect` needs it to
-  // be a taken branch or a jump, and no instruction is both.  The priority is
-  // still written down rather than left to chance, because "these are mutually
-  // exclusive" is exactly the kind of reasoning that stops being true when a
-  // later step adds a third case -- A9's traps will redirect from MEM.
+  // be a taken branch, a jump, an MRET or a faulting instruction, and no
+  // instruction is more than one of those.  The priority is still written down
+  // rather than left to chance, because "these are mutually exclusive" is
+  // exactly the kind of reasoning that stops being true when a later step adds
+  // another case.
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n)           pc_q <= RESET_PC;
-    else if (ex_redirect) pc_q <= ex_target;
+    else if (ex_redirect) pc_q <= ex_redirect_target;
     else if (stall)       pc_q <= pc_q;
     else                  pc_q <= pc_q + 32'd4;
   end
@@ -137,7 +152,11 @@ module rvntt_core #(
       insn_held_q <= 1'b0;
     end else begin
       insn_hold_q <= if_id.insn;
-      insn_held_q <= stall;
+      // Not replayed across a redirect: the held word belongs to the path that
+      // is being discarded.  A stall and a redirect cannot actually coincide
+      // (see the PC mux), so this AND is defence rather than function -- but it
+      // is one gate against having to re-derive that argument later.
+      insn_held_q <= stall && !ex_redirect;
     end
   end
 
@@ -269,7 +288,7 @@ module rvntt_core #(
   logic [31:0] ex_mem_fwd_data;
   always_comb begin
     ex_mem_fwd_data = (ex_mem_q.result_sel == rv32i_pkg::RES_PC4)
-                      ? ex_mem_q.pc_plus4 : ex_mem_q.alu_result;
+                      ? ex_mem_q.pc_plus4 : ex_mem_q.ex_result;
   end
 
   rvntt_forward u_forward (
@@ -333,7 +352,11 @@ module rvntt_core #(
   always_comb begin
     dmem_wdata = ex_rs2_fwd;
     dmem_be    = 4'b0000;
-    if (id_ex_q.valid && id_ex_q.ctrl.mem_write) begin
+    // `!ex_trap` is what makes a misaligned store harmless: the check runs on
+    // the address the ALU produced THIS cycle, so the write is suppressed
+    // before the RAM's address register ever latches it.  A trap detected in
+    // MEM instead would be a cycle too late.
+    if (id_ex_q.valid && id_ex_q.ctrl.mem_write && !ex_trap) begin
       unique case (id_ex_q.ctrl.mem_op)
         rv32i_pkg::F3_LB: begin                       // SB
           dmem_wdata = {4{ex_rs2_fwd[7:0]}};
@@ -374,22 +397,148 @@ module rvntt_core #(
       .taken  (ex_branch_taken)
   );
 
-  assign ex_redirect = id_ex_q.valid &&
-                       ((id_ex_q.ctrl.branch && ex_branch_taken) ||
-                        id_ex_q.ctrl.jump);
+  wire ex_ctrl_xfer = id_ex_q.valid &&
+                      ((id_ex_q.ctrl.branch && ex_branch_taken) ||
+                       id_ex_q.ctrl.jump);
 
   // JALR clears bit 0 of the computed target; JAL and branches do not need it,
   // because the B and J immediates encode bit 0 as zero and the pc is aligned.
   // The rule is applied where the spec states it rather than folded into a
   // blanket `& ~1`, so a target that is misaligned for some other reason stays
-  // misaligned and is visible instead of being quietly rounded down.
-  assign ex_target = id_ex_q.ctrl.jalr ? {ex_alu_y[31:1], 1'b0} : ex_alu_y;
+  // misaligned -- which is exactly what the A9 misaligned-fetch trap below has
+  // to be able to see.
+  assign ex_jump_target = id_ex_q.ctrl.jalr ? {ex_alu_y[31:1], 1'b0} : ex_alu_y;
+
+  // ---- Zicsr access (A9) ---------------------------------------------------
+  // funct3 comes from the instruction word, as it does for the branch
+  // comparator and for the same reason (rvntt_branch.sv's header).  Its two low
+  // bits select the operation and its top bit selects the immediate form:
+  //   01 = CSRRW/CSRRWI   10 = CSRRS/CSRRSI   11 = CSRRC/CSRRCI
+  wire [1:0]  ex_csr_op  = id_ex_q.insn[13:12];
+  wire        ex_csr_imm = id_ex_q.insn[14];
+
+  // The immediate form's uimm arrives through the immediate generator as IMM_Z
+  // rather than being re-sliced out of the instruction here: immgen is already
+  // proved, and one source for a field is one place to be wrong.
+  wire [31:0] ex_csr_src = ex_csr_imm ? id_ex_q.imm : ex_rs1_fwd;
+
+  // "Does this instruction WRITE the CSR" is not the same question as "is it a
+  // CSR instruction", and the difference is the whole of plan A9's directed
+  // test: CSRRS/CSRRC with a zero source must not write at all, which is what
+  // makes `csrr rd, <read-only csr>` legal.  CSRRW always writes, even with a
+  // zero source.
+  wire ex_csr_src_nz = ex_csr_imm ? (id_ex_q.imm[4:0] != 5'd0)
+                                  : (id_ex_q.rs1_addr != 5'd0);
+  wire ex_csr_wen = id_ex_q.valid && id_ex_q.ctrl.is_csr &&
+                    ((ex_csr_op == 2'b01) || ex_csr_src_nz);
+
+  logic [31:0] ex_csr_rdata, ex_csr_wdata;
+  logic        ex_csr_illegal;
+  logic [31:0] csr_mtvec, csr_mepc;
+
+  always_comb begin
+    unique case (ex_csr_op)
+      2'b01:   ex_csr_wdata =  ex_csr_src;                   // CSRRW  / CSRRWI
+      2'b10:   ex_csr_wdata =  ex_csr_rdata |  ex_csr_src;    // CSRRS  / CSRRSI
+      2'b11:   ex_csr_wdata =  ex_csr_rdata & ~ex_csr_src;    // CSRRC  / CSRRCI
+      default: ex_csr_wdata =  ex_csr_src;
+    endcase
+  end
+
+  rvntt_csr u_csr (
+      .clk              (clk),
+      .rst_n            (rst_n),
+      .addr             (id_ex_q.insn[31:20]),
+      .wen              (ex_csr_wen),
+      .wdata            (ex_csr_wdata),
+      .rdata            (ex_csr_rdata),
+      .illegal          (ex_csr_illegal),
+      // minstret counts instructions that PASS EX, not ones that reach WB.
+      // The two are the same set -- every trap resolves in EX -- and counting
+      // here is what lets a `csrr minstret` in the very next instruction read a
+      // complete value.  See rvntt_csr.sv's header for what goes wrong
+      // otherwise; riscv-tests' instret_overflow found it.
+      .instret_bump     (id_ex_q.valid && !ex_trap),
+      .trap_en          (ex_trap),
+      .trap_pc          (id_ex_q.pc),
+      .trap_cause       (ex_trap_cause),
+      .trap_val         (ex_trap_val),
+      .mret_en          (ex_mret),
+      .mtvec_o          (csr_mtvec),
+      .mepc_o           (csr_mepc)
+  );
+
+  // The EX-stage result.  A Zicsr access produces the OLD CSR value here, which
+  // is why the pipeline register field is named ex_result rather than
+  // alu_result -- and why a CSR read is forwarded to the next instruction for
+  // free, through exactly the same path an ALU result takes.
+  logic [31:0] ex_result;
+  assign ex_result = id_ex_q.ctrl.is_csr ? ex_csr_rdata : ex_alu_y;
+
+  // ---- traps (A9) ----------------------------------------------------------
+  // ALL OF THEM RESOLVE HERE.  The misaligned-address check in particular is
+  // done on the address the ALU just computed rather than in MEM where the
+  // access lands, so that the faulting store can be suppressed before the RAM
+  // ever sees it and so that nothing older than EX is ever squashed.
+  logic ex_addr_misaligned;
+  always_comb begin
+    unique case (id_ex_q.ctrl.mem_op)
+      rv32i_pkg::F3_LH, rv32i_pkg::F3_LHU: ex_addr_misaligned = ex_alu_y[0];
+      rv32i_pkg::F3_LW:                    ex_addr_misaligned = |ex_alu_y[1:0];
+      default:                             ex_addr_misaligned = 1'b0;  // byte
+    endcase
+  end
+
+  // A misaligned target is reported ON THE BRANCH OR JUMP, with mepc pointing
+  // at it and mtval at the target -- which is what the privileged spec asks for
+  // and, conveniently, the only thing a machine that resolves branches in EX
+  // can do.  Bit 0 is already cleared for JALR and is zero by encoding for B
+  // and J, so bit 1 is the only one that can be set.
+  wire ex_target_misaligned = ex_ctrl_xfer && ex_jump_target[1];
+
+  assign ex_mret = id_ex_q.valid && id_ex_q.ctrl.is_mret;
+
+  always_comb begin
+    ex_trap       = 1'b0;
+    ex_trap_cause = 5'd0;
+    ex_trap_val   = 32'h0;
+    if (id_ex_q.valid) begin
+      if (id_ex_q.ctrl.is_illegal ||
+          (id_ex_q.ctrl.is_csr && ex_csr_illegal)) begin
+        ex_trap = 1'b1; ex_trap_cause = 5'd2;  ex_trap_val = id_ex_q.insn;
+      end else if (id_ex_q.ctrl.is_ecall) begin
+        ex_trap = 1'b1; ex_trap_cause = 5'd11; ex_trap_val = 32'h0;
+      end else if (id_ex_q.ctrl.is_ebreak) begin
+        ex_trap = 1'b1; ex_trap_cause = 5'd3;  ex_trap_val = id_ex_q.pc;
+      end else if (ex_target_misaligned) begin
+        ex_trap = 1'b1; ex_trap_cause = 5'd0;  ex_trap_val = ex_jump_target;
+      end else if (id_ex_q.ctrl.mem_read && ex_addr_misaligned) begin
+        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = ex_alu_y;
+      end else if (id_ex_q.ctrl.mem_write && ex_addr_misaligned) begin
+        ex_trap = 1'b1; ex_trap_cause = 5'd6;  ex_trap_val = ex_alu_y;
+      end
+    end
+  end
+
+  assign ex_redirect = ex_trap || ex_mret || ex_ctrl_xfer;
+
+  always_comb begin
+    if      (ex_trap) ex_redirect_target = csr_mtvec;
+    else if (ex_mret) ex_redirect_target = csr_mepc;
+    else              ex_redirect_target = ex_jump_target;
+  end
 
   // ==========================================================================
   // EX/MEM
   // ==========================================================================
+  // A FAULTING INSTRUCTION NEVER RETIRES.  Squashing it here rather than
+  // letting it through with a "trapped" flag is what keeps the commit log
+  // comparable with Spike, which prints no line at all for an instruction that
+  // traps -- and it is what keeps minstret right for free.
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
+      ex_mem_q <= '0;
+    end else if (ex_trap) begin
       ex_mem_q <= '0;
     end else begin
       ex_mem_q.valid      <= id_ex_q.valid;
@@ -401,7 +550,7 @@ module rvntt_core #(
       ex_mem_q.mem_op     <= id_ex_q.ctrl.mem_op;
       ex_mem_q.result_sel <= id_ex_q.ctrl.result_sel;
       ex_mem_q.rd_addr    <= id_ex_q.rd_addr;
-      ex_mem_q.alu_result <= ex_alu_y;
+      ex_mem_q.ex_result  <= ex_result;
       ex_mem_q.store_data <= ex_rs2_fwd;
       ex_mem_q.pc_plus4   <= id_ex_q.pc + 32'd4;
     end
@@ -415,7 +564,7 @@ module rvntt_core #(
   logic [15:0] mem_half;
   logic [31:0] mem_load_data;
 
-  assign mem_byte_off = ex_mem_q.alu_result[1:0];
+  assign mem_byte_off = ex_mem_q.ex_result[1:0];
   assign mem_byte     = dmem_rdata[8*mem_byte_off +: 8];
   assign mem_half     = mem_byte_off[1] ? dmem_rdata[31:16] : dmem_rdata[15:0];
 
@@ -433,11 +582,16 @@ module rvntt_core #(
   logic [31:0] mem_result;
   always_comb begin
     unique case (ex_mem_q.result_sel)
-      rv32i_pkg::RES_ALU: mem_result = ex_mem_q.alu_result;
+      rv32i_pkg::RES_ALU: mem_result = ex_mem_q.ex_result;
       rv32i_pkg::RES_MEM: mem_result = mem_load_data;
       rv32i_pkg::RES_PC4: mem_result = ex_mem_q.pc_plus4;
-      // RES_CSR is A9's and RES_XKNTT is the coprocessor's; neither exists
-      // yet, and dbg_unsupported fires if one ever retires here.
+      // A Zicsr access carries the OLD CSR value down in ex_result, so this
+      // arm and RES_ALU select the same field.  Both are listed anyway: they
+      // are different claims about where the value came from, and collapsing
+      // them would make the next producer of ex_result harder to add.
+      rv32i_pkg::RES_CSR: mem_result = ex_mem_q.ex_result;
+      // RES_XKNTT is the coprocessor's and does not exist yet;
+      // dbg_unsupported fires if one ever retires here.
       default:            mem_result = 32'h0;
     endcase
   end
@@ -475,6 +629,12 @@ module rvntt_core #(
   assign commit_wdata     = mem_wb_q.wb_data;
 
   // ---- the capability guard ------------------------------------------------
+  // There is no commit_is_ecall port any more.  Before A9 the ECALL was the
+  // testbench's stop marker, retiring like any other instruction; now it TRAPS
+  // and is squashed in EX, so the signal could never assert again.  The
+  // testbench stops on a store to `tohost`, or on reaching a nominated pc --
+  // both of which are what riscv-tests uses and what Spike's own trace shows.
+  //
   // Decoded again at WB rather than piped down: this is diagnostic-only logic,
   // and re-decoding the retiring word costs nothing in simulation while keeping
   // three more fields out of every pipeline register.
@@ -495,17 +655,16 @@ module rvntt_core #(
       .rs3_addr (wb_rs3_unused)
   );
 
-  assign commit_is_ecall = mem_wb_q.valid && wb_ctrl.is_ecall;
-
-  // ECALL is excluded: it is the testbench's stop marker, not an instruction
-  // this core pretends to execute.  A CSR access with rd == x0 is also
-  // excluded -- `csrw mtvec, t0` has no register-file effect, so the core and
-  // Spike agree on architectural state even though no CSR file exists yet, and
-  // that is exactly what the A4 test program needs to arm Spike's trap handler.
+  // Two things, and only one of them is a capability statement any more.
+  //
+  //   is_xkntt -- the decoder recognises the extension, no stage executes it.
+  //   is_illegal -- A9 makes this UNREACHABLE, because an illegal instruction
+  //     traps in EX and is squashed before MEM.  It stays because that makes it
+  //     a live check on the trap path rather than a leftover: if the illegal
+  //     trap were ever lost, an illegal instruction would retire and this would
+  //     say so, instead of the program quietly computing with a decoded zero.
   assign dbg_unsupported =
-      mem_wb_q.valid && !wb_ctrl.is_ecall &&
-      (wb_ctrl.is_illegal || wb_ctrl.is_xkntt ||
-       (wb_ctrl.is_csr && mem_wb_q.rd_addr != 5'd0));
+      mem_wb_q.valid && (wb_ctrl.is_illegal || wb_ctrl.is_xkntt);
 
 endmodule
 

@@ -48,6 +48,8 @@ import gen_random_prog              # noqa: E402
 import test_cosim_a5 as a5          # noqa: E402
 import test_cosim_directed as dr    # noqa: E402
 import test_core_verilator as t4    # noqa: E402
+import test_riscv_tests as rvt      # noqa: E402
+import test_csr_traps as ct         # noqa: E402
 from rtl_deps import with_deps      # noqa: E402
 
 # ---------------------------------------------------------------- the manifest
@@ -56,6 +58,7 @@ FWD   = "rtl/core/rvntt_forward.sv"
 HAZ   = "rtl/core/rvntt_hazard.sv"
 BR    = "rtl/core/rvntt_branch.sv"
 ALU   = "rtl/core/rvntt_alu.sv"
+CSR   = "rtl/core/rvntt_csr.sv"
 RF    = "rtl/core/rvntt_regfile.sv"
 
 MUTATIONS = [
@@ -171,7 +174,8 @@ MUTATIONS = [
              "failure mode that makes the hold register necessary at all: "
              "holding pc_q and if_id_q is not enough, because the RAM's output "
              "register has already moved on",
-         edits=[(CORE, "      insn_held_q <= stall;", "      insn_held_q <= 1'b0;")],
+         edits=[(CORE, "      insn_held_q <= stall && !ex_redirect;",
+                       "      insn_held_q <= 1'b0;")],
          caught=["directed:a7_loaduse", "random:loaduse"]),
 
     dict(step="A7", name="stall_injects_no_bubble",
@@ -230,9 +234,9 @@ MUTATIONS = [
          why="JAL and JALR fall through instead of jumping, while branches "
              "still work",
          edits=[(CORE,
-                 "                       ((id_ex_q.ctrl.branch && ex_branch_taken) ||\n"
-                 "                        id_ex_q.ctrl.jump);",
-                 "                       (id_ex_q.ctrl.branch && ex_branch_taken);")],
+                 "                      ((id_ex_q.ctrl.branch && ex_branch_taken) ||\n"
+                 "                       id_ex_q.ctrl.jump);",
+                 "                      (id_ex_q.ctrl.branch && ex_branch_taken);")],
          caught=["directed:a8_control", "random:branch"]),
 
     dict(step="A8", name="jal_link_is_the_target",
@@ -240,7 +244,7 @@ MUTATIONS = [
              "control flow is perfect and only the writeback is wrong, which is "
              "why JAL needs an rd != 0 somewhere in the test set",
          edits=[(CORE, "      rv32i_pkg::RES_PC4: mem_result = ex_mem_q.pc_plus4;",
-                       "      rv32i_pkg::RES_PC4: mem_result = ex_mem_q.alu_result;")],
+                       "      rv32i_pkg::RES_PC4: mem_result = ex_mem_q.ex_result;")],
          caught=["directed:a8_control", "random:branch"]),
 
     dict(step="A8", name="blt_uses_unsigned_compare",
@@ -267,6 +271,110 @@ MUTATIONS = [
          edits=[(BR, "      default:            taken = 1'b0;   // 010 and 011: reserved, and illegal",
                      "      default:            taken = 1'b1;")],
          caught=["formal:rvntt_branch"]),
+
+    # ---------------------------------------------------------------- A9 ----
+    dict(step="A9", name="minstret_counted_at_wb",
+         why="the counter moves back to the WB stage, where two older "
+             "instructions are still uncounted when a CSR read executes.  "
+             "riscv-tests does not notice -- its own check happens to survive "
+             "the off-by-two -- and the comparison against Spike's instruction "
+             "count does",
+         edits=[(CORE, "      .instret_bump     (id_ex_q.valid && !ex_trap),",
+                       "      .instret_bump     (mem_wb_q.valid),")],
+         caught=["csr:a9_minstret"]),
+
+    dict(step="A9", name="minstret_write_not_suppressed",
+         why="a write to minstret no longer suppresses the writing "
+             "instruction's own increment, so `csrwi minstret, 0` followed by a "
+             "read gives 1.  Only riscv-tests' instret_overflow states this",
+         edits=[(CSR, "  wire minstret_written = do_write &&\n"
+                      "                          (addr == CSR_MINSTRET || addr == CSR_MINSTRETH);",
+                      "  wire minstret_written = do_write && (addr == CSR_MCYCLE);")],
+         caught=["riscv:rv32mi/instret_overflow", "formal:rvntt_csr"]),
+
+    dict(step="A9", name="illegal_instruction_does_not_trap",
+         why="an illegal instruction retires instead of trapping.  It is the "
+             "one case rvntt_core's dbg_unsupported still watches for, which is "
+             "why that guard was kept when A9 made it unreachable",
+         edits=[(CORE, "      if (id_ex_q.ctrl.is_illegal ||\n"
+                       "          (id_ex_q.ctrl.is_csr && ex_csr_illegal)) begin",
+                       "      if (1'b0 && (id_ex_q.ctrl.is_illegal ||\n"
+                       "          (id_ex_q.ctrl.is_csr && ex_csr_illegal))) begin")],
+         caught=["riscv:rv32mi/illegal", "riscv:rv32mi/shamt"]),
+
+    dict(step="A9", name="misaligned_load_does_not_trap",
+         why="a misaligned load aliases onto the containing word instead of "
+             "faulting -- which is what this core did before A9, and which no "
+             "test written alongside it would have questioned",
+         edits=[(CORE, "      end else if (id_ex_q.ctrl.mem_read && ex_addr_misaligned) begin\n"
+                       "        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = ex_alu_y;\n", "")],
+         caught=["riscv:rv32mi/lw-misaligned", "riscv:rv32mi/ma_addr"]),
+
+    dict(step="A9", name="faulting_store_still_writes_memory",
+         why="the misaligned store traps AND lands.  The trap is reported "
+             "correctly, so every check that looks at mcause passes; only a "
+             "test that reads the memory back afterwards can see it",
+         edits=[(CORE, "    if (id_ex_q.valid && id_ex_q.ctrl.mem_write && !ex_trap) begin",
+                       "    if (id_ex_q.valid && id_ex_q.ctrl.mem_write) begin")],
+         caught=["csr:a9_csr"]),
+
+    dict(step="A9", name="trap_does_not_squash_the_instruction",
+         why="the faulting instruction carries on to WB and retires.  That "
+             "breaks three things at once: minstret counts it, the commit log "
+             "gains a line Spike does not have, and the register write it was "
+             "supposed to abandon happens",
+         edits=[(CORE, "    end else if (ex_trap) begin\n      ex_mem_q <= '0;\n", "")],
+         # NOT a9_minstret: that program never traps, so its counter is
+         # unaffected.  A squashed-instruction bug shows up where instructions
+         # actually fault -- and in every random program, whose closing ECALL
+         # would then retire and appear in a log Spike has no line for.
+         caught=["riscv:rv32mi/illegal", "random:branch"]),
+
+    dict(step="A9", name="csrrs_with_x0_writes_anyway",
+         why="CSRRS/CSRRC stop checking their source for zero, so `csrr rd, "
+             "csr` becomes a write.  On a read-only CSR that turns a legal "
+             "read into an illegal-instruction trap, which is how riscv-tests' "
+             "zicntr sees it; a9_csr sees the write itself",
+         edits=[(CORE, "  wire ex_csr_src_nz = ex_csr_imm ? (id_ex_q.imm[4:0] != 5'd0)\n"
+                       "                                  : (id_ex_q.rs1_addr != 5'd0);",
+                       "  wire ex_csr_src_nz = ex_csr_imm ? (id_ex_q.imm[4:0] != 5'd0)\n"
+                       "                                  : 1'b1;")],
+         caught=["riscv:rv32mi/zicntr", "csr:a9_csr"]),
+
+    dict(step="A9", name="read_only_csr_accepts_a_write",
+         why="writing a counter shadow silently does nothing instead of "
+             "trapping.  Nothing observes the lost write; the missing trap is "
+             "the whole of the failure",
+         edits=[(CSR, "  assign illegal = !known || (wen && read_only);",
+                      "  assign illegal = !known;")],
+         caught=["formal:rvntt_csr", "csr:a9_csr"]),
+
+    dict(step="A9", name="mret_does_not_restore_mie",
+         why="MRET leaves MIE where the trap left it.  There are no interrupts "
+             "yet, so nothing in the machine behaves differently -- this is "
+             "invisible until the first one, which is a long way from here",
+         edits=[(CSR, "        mstatus_mie_q  <= mstatus_mpie_q;\n"
+                      "        mstatus_mpie_q <= 1'b1;",
+                      "        mstatus_mpie_q <= 1'b1;")],
+         caught=["formal:rvntt_csr", "csr:a9_csr"]),
+
+    dict(step="A9", name="mtval_not_set_on_a_misaligned_access",
+         why="the trap is taken with the right cause and the wrong mtval, so a "
+             "handler that tries to emulate the access works on the wrong "
+             "address",
+         edits=[(CORE, "        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = ex_alu_y;",
+                       "        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = 32'h0;")],
+         # ma_addr checks the CAUSE and the handler's ability to resume; it
+         # does not read mtval back, so only the directed test sees this.
+         caught=["csr:a9_csr"]),
+
+    dict(step="A9", name="misaligned_jump_target_does_not_trap",
+         why="a jump to a 2-mod-4 address is taken instead of faulting.  The "
+             "fetch then aliases, because rvntt_ram ignores the low address "
+             "bits, so the core runs the right instruction at the wrong pc",
+         edits=[(CORE, "  wire ex_target_misaligned = ex_ctrl_xfer && ex_jump_target[1];",
+                       "  wire ex_target_misaligned = ex_ctrl_xfer && ex_jump_target[0];")],
+         caught=["riscv:rv32mi/ma_fetch"]),
 ]
 
 # ------------------------------------------------------------------- the tests
@@ -361,6 +469,22 @@ class Fixture:
             self.elfs["a4"] = t4.build_elf(self.work)
         return self.elfs["a4"]
 
+    def riscv_elf(self, suite, name):
+        key = "rv_%s_%s" % (suite, name)
+        if key not in self.elfs:
+            elf, err = rvt.compile_test(suite, name, self.work)
+            if elf is None:
+                raise RuntimeError("compiling %s failed: %s" % (key, err))
+            self.elfs[key] = elf
+        return self.elfs[key]
+
+    def csr_elf(self, name):
+        key = "csr_" + name
+        if key not in self.elfs:
+            self.elfs[key] = ct.compile_s(
+                os.path.join(ROOT, "sw/tests", name + ".S"), self.work, key)
+        return self.elfs[key]
+
     def random_elfs(self, suite):
         key = "r_" + suite
         if key not in self.elfs:
@@ -395,6 +519,23 @@ def _run_test(kind, fx, exe, rtl_dir, work, mut_name):
     if kind.startswith("directed:"):
         prog = kind.split(":", 1)[1]
         return run_program_test(exe, fx.directed_elf(prog), work, fx.image, prog)
+    if kind.startswith("riscv:"):
+        suite, name = kind.split(":", 1)[1].split("/")
+        ok, _out = rvt.run_rtl(exe, fx.riscv_elf(suite, name), work, fx.image)
+        return ok
+    if kind.startswith("csr:"):
+        name = kind.split(":", 1)[1]
+        elf = fx.csr_elf(name)
+        extra = []
+        if name == "a9_minstret":
+            # The expected value comes from Spike and is a property of the
+            # PROGRAM, so it is computed once against unmutated behaviour and
+            # reused: a mutation must not be allowed to move the goalposts.
+            if "a9_minstret_expect" not in fx.elfs:
+                fx.elfs["a9_minstret_expect"] = ct.spike_commits_before(elf, "probe")
+            extra = ["--expect", str(fx.elfs["a9_minstret_expect"]), "--reg", "9"]
+        ok, _out = ct.run(exe, elf, work, fx.image, extra)
+        return ok
     if kind == "a4":
         return run_program_test(exe, fx.a4_elf(), work, fx.image, "a4")
     if kind.startswith("random:"):

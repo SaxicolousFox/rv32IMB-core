@@ -24,13 +24,25 @@ module rvntt_core_sim_top #(
     output logic        commit_reg_write,
     output logic [4:0]  commit_rd,
     output logic [31:0] commit_wdata,
-    output logic        commit_is_ecall,
-    output logic        dbg_unsupported
+    output logic        dbg_unsupported,
+
+    // The data-store bus, brought out so a testbench can watch for the write
+    // to `tohost` that ends a riscv-tests program.  A store is issued from EX
+    // and nothing past EX is ever squashed (rvntt_core's trap invariant), so a
+    // write seen here is a write that architecturally happened -- which is what
+    // makes this usable as a stop condition rather than a hint.
+    output logic [31:0] dbg_store_addr,
+    output logic [31:0] dbg_store_data,
+    output logic [3:0]  dbg_store_be
 );
 
   logic [31:0] imem_addr, imem_rdata;
   logic [31:0] dmem_addr, dmem_wdata, dmem_rdata;
   logic [3:0]  dmem_be;
+
+  assign dbg_store_addr = dmem_addr;
+  assign dbg_store_data = dmem_wdata;
+  assign dbg_store_be   = dmem_be;
 
   rvntt_core #(.RESET_PC(RESET_PC)) u_core (
       .clk (clk), .rst_n (rst_n),
@@ -40,7 +52,6 @@ module rvntt_core_sim_top #(
       .commit_valid (commit_valid), .commit_pc (commit_pc),
       .commit_insn (commit_insn),   .commit_reg_write (commit_reg_write),
       .commit_rd (commit_rd),       .commit_wdata (commit_wdata),
-      .commit_is_ecall (commit_is_ecall),
       .dbg_unsupported (dbg_unsupported)
   );
 

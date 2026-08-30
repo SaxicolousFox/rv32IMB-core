@@ -1,18 +1,31 @@
 // ============================================================================
 // A4 testbench: run a program image on rvntt_core_sim_top and check the result.
 //
-// The core exposes a retirement trace (the same port A5's commit-log differ will
-// use), so this testbench never reaches into the register file.  It maintains a
-// shadow copy of the architectural registers from the commit stream, stops when
-// an ECALL retires, and compares one register against a value supplied on the
-// command line -- computed independently by test_core_verilator.py from the
-// program's own data literals, and cross-checked against Spike.
+// The core exposes a retirement trace (the same port A5's commit-log differ
+// uses), so this testbench never reaches into the register file.  It maintains a
+// shadow copy of the architectural registers from the commit stream and compares
+// one register against a value supplied on the command line -- computed
+// independently by test_core_verilator.py from the program's own data literals,
+// and cross-checked against Spike.
 //
-// Three ways this run can fail, and all three are checked:
+// HOW IT STOPS, and why that changed at A9.  Until A9 the ECALL retired like
+// any other instruction and was the stop marker.  Now it TRAPS: it is squashed
+// in EX and never reaches WB, so the old condition can never fire.  There are
+// two replacements, and between them they cover everything:
+//
+//   --stop-pc <addr>  stop at the first commit at <addr>, WITHOUT counting it.
+//                     Used with the trap handler's address, which is exactly
+//                     where Spike's own trace is truncated -- so the two sides
+//                     count the same instructions with no offset to remember.
+//   --tohost <addr>   stop on a STORE to <addr>, and report the value written.
+//                     This is the riscv-tests protocol, and it works because a
+//                     store is issued from EX and nothing past EX is squashed.
+//
+// Four ways this run can fail, and all four are checked:
 //   1. the answer is wrong;
-//   2. an instruction retires that the A4 core cannot execute faithfully
+//   2. an instruction retires that this core cannot execute faithfully
 //      (dbg_unsupported -- see rvntt_core.sv);
-//   3. no ECALL ever retires, i.e. the program ran off into nothing;
+//   3. the program never stops, i.e. it ran off into nothing;
 //   4. the RETIRED INSTRUCTION COUNT differs from Spike's.
 // A testbench that only checked (1) would report "wrong answer" for all four.
 //
@@ -82,6 +95,9 @@ int main(int argc, char** argv) {
     bool     no_check = false;      // trace-only: A5's differ does the checking
     bool     have_expect = false;
     bool     trace = false;
+    uint32_t stop_pc = 0;    bool have_stop_pc = false;
+    uint32_t tohost  = 0;    bool have_tohost  = false;
+    long     expect_tohost = -1;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--expect") && i + 1 < argc) {
@@ -96,10 +112,22 @@ int main(int argc, char** argv) {
             no_check = true;
         } else if (!strcmp(argv[i], "--trace")) {
             trace = true;
+        } else if (!strcmp(argv[i], "--stop-pc") && i + 1 < argc) {
+            stop_pc = (uint32_t)strtoul(argv[++i], nullptr, 0);
+            have_stop_pc = true;
+        } else if (!strcmp(argv[i], "--tohost") && i + 1 < argc) {
+            tohost = (uint32_t)strtoul(argv[++i], nullptr, 0);
+            have_tohost = true;
+        } else if (!strcmp(argv[i], "--expect-tohost") && i + 1 < argc) {
+            expect_tohost = atol(argv[++i]);
         }
     }
-    if (!have_expect && !no_check) {
-        printf("CORE_TB_FAIL: no --expect given\n"); return 1;
+    if (!have_expect && !no_check && expect_tohost < 0) {
+        printf("CORE_TB_FAIL: no --expect or --expect-tohost given\n"); return 1;
+    }
+    if (!have_stop_pc && !have_tohost) {
+        printf("CORE_TB_FAIL: no stop condition (--stop-pc or --tohost)\n");
+        return 1;
     }
 
     dut = new VTOP;
@@ -110,12 +138,30 @@ int main(int argc, char** argv) {
     for (int i = 0; i < 5; i++) tick();
     dut->rst_n = 1;
 
-    bool saw_ecall = false;
+    bool     stopped = false;
+    uint32_t tohost_val = 0;
     long cycle = 0;
-    for (; cycle < max_cycles && !saw_ecall; cycle++) {
+    for (; cycle < max_cycles && !stopped; cycle++) {
         dut->clk = 0; dut->eval();      // settle combinational outputs
 
+        // The tohost write is checked BEFORE the commit stream, so the store
+        // that ends a riscv-tests program stops the run on the cycle it is
+        // issued rather than three cycles later when its instruction retires.
+        if (have_tohost && dut->dbg_store_be != 0 &&
+            (dut->dbg_store_addr & ~3u) == (tohost & ~3u)) {
+            tohost_val = dut->dbg_store_data;
+            stopped = true;
+        }
+
         if (dut->commit_valid) {
+            // --stop-pc is exclusive: the marker instruction is not counted,
+            // so `retired` and the span match a Spike trace truncated at the
+            // same address with no offset to remember on either side.
+            if (have_stop_pc && dut->commit_pc == stop_pc) {
+                stopped = true;
+                dut->clk = 1; dut->eval();
+                break;
+            }
             if (dut->dbg_unsupported) {
                 printf("CORE_TB_FAIL: unsupported instruction retired at "
                        "pc=0x%08x insn=0x%08x (cycle %ld)\n"
@@ -143,7 +189,6 @@ int main(int argc, char** argv) {
                        dut->commit_reg_write ? "" : "  (no write)");
             if (dut->commit_reg_write && dut->commit_rd != 0)
                 xreg[dut->commit_rd] = dut->commit_wdata;
-            if (dut->commit_is_ecall) saw_ecall = true;
         }
 
         dut->clk = 1; dut->eval();      // take the edge
@@ -157,16 +202,25 @@ int main(int argc, char** argv) {
     // of any particular program.
     if (no_check) {
         printf("CORE_TB_TRACE_OK  (%ld instructions retired, %ld cycles, "
-               "ecall=%d, span=%ld)\n", retired, cycle, (int)saw_ecall,
+               "stopped=%d, span=%ld)\n", retired, cycle, (int)stopped,
                (first_commit < 0) ? -1 : last_commit - first_commit);
         delete dut;
-        return saw_ecall ? 0 : 1;
+        return stopped ? 0 : 1;
     }
 
     int rc = 0;
-    if (!saw_ecall) {
-        printf("CORE_TB_FAIL: no ECALL retired within %ld cycles "
+    if (!stopped) {
+        printf("CORE_TB_FAIL: the program did not stop within %ld cycles "
                "(%ld instructions retired)\n", max_cycles, retired);
+        rc = 1;
+    } else if (expect_tohost >= 0 && (long)tohost_val != expect_tohost) {
+        // riscv-tests encodes its result here: 1 is pass, and any other odd
+        // value is (failing_test_number << 1) | 1.
+        printf("CORE_TB_FAIL: tohost = %u, expected %ld", tohost_val,
+               expect_tohost);
+        if (tohost_val & 1u)
+            printf("  (riscv-tests: test case %u failed)", tohost_val >> 1);
+        printf("\n");
         rc = 1;
     } else if (expect_retired >= 0 && retired != expect_retired) {
         printf("CORE_TB_FAIL: retired %ld instructions, Spike retired %ld\n"
@@ -174,7 +228,7 @@ int main(int argc, char** argv) {
                "  shifted or truncated can land on the same value by accident.\n",
                retired, expect_retired);
         rc = 1;
-    } else if (xreg[expect_reg] != expect) {
+    } else if (have_expect && xreg[expect_reg] != expect) {
         printf("CORE_TB_FAIL: x%d = 0x%08x, expected 0x%08x  (xor 0x%08x)\n",
                expect_reg, xreg[expect_reg], expect,
                xreg[expect_reg] ^ expect);
@@ -182,9 +236,9 @@ int main(int argc, char** argv) {
     }
 
     if (rc == 0)
-        printf("CORE_TB_OK  x%d = 0x%08x  (%ld instructions retired, "
-               "%ld cycles, span=%ld)\n", expect_reg, xreg[expect_reg],
-               retired, cycle,
+        printf("CORE_TB_OK  x%d = 0x%08x  tohost=%u  (%ld instructions "
+               "retired, %ld cycles, span=%ld)\n", expect_reg,
+               xreg[expect_reg], tohost_val, retired, cycle,
                (first_commit < 0) ? -1 : last_commit - first_commit);
 
     delete dut;

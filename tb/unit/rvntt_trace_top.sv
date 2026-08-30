@@ -23,8 +23,10 @@ module rvntt_trace_top #(
     output logic        commit_reg_write,
     output logic [4:0]  commit_rd,
     output logic [31:0] commit_wdata,
-    output logic        commit_is_ecall,
-    output logic        dbg_unsupported
+    output logic        dbg_unsupported,
+    output logic [31:0] dbg_store_addr,
+    output logic [31:0] dbg_store_data,
+    output logic [3:0]  dbg_store_be
 );
 
   rvntt_core_sim_top #(
@@ -34,8 +36,9 @@ module rvntt_trace_top #(
       .commit_valid (commit_valid), .commit_pc (commit_pc),
       .commit_insn (commit_insn),   .commit_reg_write (commit_reg_write),
       .commit_rd (commit_rd),       .commit_wdata (commit_wdata),
-      .commit_is_ecall (commit_is_ecall),
-      .dbg_unsupported (dbg_unsupported)
+      .dbg_unsupported (dbg_unsupported),
+      .dbg_store_addr (dbg_store_addr), .dbg_store_data (dbg_store_data),
+      .dbg_store_be (dbg_store_be)
   );
 
   rvntt_trace u_trace (
