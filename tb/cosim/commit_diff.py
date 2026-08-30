@@ -22,12 +22,11 @@ either mask bugs or produce a spurious mismatch on line one:
      the alignment.
 
   2. TRAPPING INSTRUCTIONS ARE NOT LOGGED.  Spike prints no commit line at all
-     for an instruction that traps.  The ECALL that ends every test program is
-     therefore absent from Spike's log while the RTL retires it.  Both sides are
-     truncated at the program's stop point, and the ECALL itself is EXCLUDED
-     from the RTL side -- it is the stop marker, not a compared instruction.
-     Including it makes every otherwise-identical program fail with a
-     one-line length difference at the very end.
+     for an instruction that traps -- and since A9 neither does this core,
+     which squashes a faulting instruction in EX.  Both sides are truncated at
+     the TRAP HANDLER's first instruction, so the ECALL that ends every test
+     program is absent from both and there is no offset to remember.  Before
+     A9 the RTL retired the ECALL and the asymmetry had to be corrected here.
 
   3. `mem` AND CSR ANNOTATIONS.  Spike appends `mem 0x<addr>` to loads,
      `mem 0x<addr> 0x<data>` to stores, and `c<n>_<name> 0x<val>` to CSR writes.
@@ -47,7 +46,6 @@ sys.path.insert(0, os.path.join(ROOT, "tb/cosim"))
 import spike_asm   # noqa: E402
 
 BASE = 0x80000000
-ECALL_WORD = 0x00000073
 
 # The RTL monitor's own output, re-parsed rather than trusted: this proves
 # rvntt_trace.sv really is emitting Spike's format, instead of the differ
@@ -93,18 +91,19 @@ def spike_records(elf, isa=None):
     return out
 
 
-def rtl_records(path, stop_at_ecall=True):
+def rtl_records(path, stop_pc=None):
     """
-    Parse the RTL monitor's log, truncated BEFORE the ECALL it retires.
+    Parse the RTL monitor's log, truncated BEFORE the commit at `stop_pc`.
 
-    Exclusive, not inclusive: Spike prints no commit line for a trapping
-    instruction, so its log ends one entry earlier.  The ECALL is the stop
-    marker, not part of the program under comparison.
+    `stop_pc` is the trap handler's address -- the same place `spike_records`
+    truncates -- so both sides end on the same instruction with no offset to
+    remember.
 
-    `stop_at_ecall=False` keeps it, which the cycle model needs: the ECALL is
-    the last instruction the RTL retires, so it is the one whose cycle ends the
-    measured span.  Dropping it there would make the prediction short by one on
-    every program.
+    Before A9 this truncated at the ECALL instead, because the ECALL retired on
+    the RTL side and Spike logs no commit line for a trapping instruction. A9
+    made the ECALL trap on both sides, which removed the asymmetry rather than
+    moving it: the ECALL now appears in neither log, and the handler is the
+    natural stop marker for both.
     """
     out = []
     with open(path) as f:
@@ -120,7 +119,7 @@ def rtl_records(path, stop_at_ecall=True):
                     "  rvntt_trace.sv and commit_diff.render() have diverged.")
             pc = int(m.group(1), 16)
             insn = int(m.group(2), 16)
-            if stop_at_ecall and insn == ECALL_WORD:
+            if stop_pc is not None and pc == stop_pc:
                 break
             writes = []
             if m.group(3) is not None:

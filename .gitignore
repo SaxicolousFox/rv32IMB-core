@@ -4,6 +4,7 @@ toolchain/opt/
 toolchain/spike-src/
 toolchain/spike-build/
 toolchain/kyber/
+toolchain/riscv-tests/
 toolchain/install/
 .venv/
 

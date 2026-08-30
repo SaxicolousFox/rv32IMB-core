@@ -17,13 +17,16 @@ was the whole reason C1 came before this.
 | `rvntt_forward.sv` | A6 | `formal_forward`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
 | `rvntt_hazard.sv` | A7 | `formal_hazard`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
 | `rvntt_branch.sv` | A8 | `formal_branch`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
-| `rvntt_core.sv` | A4, A6–A8 | `core_a4_checksum`, `cosim_commit_log`, Vivado elaboration |
+| `rvntt_csr.sv` | A9 | `formal_csr`, `riscv_tests`, `csr_traps_minstret`, Vivado elaboration |
+| `rvntt_core.sv` | A4, A6–A9 | `core_a4_checksum`, `cosim_commit_log`, `riscv_tests`, Vivado elaboration |
 | `../soc/rvntt_ram.sv`, `../soc/rvntt_core_sim_top.sv` | A4 | `core_a4_checksum` |
 | `tb/unit/rvntt_trace.sv` + `rvntt_trace_top.sv` | A5 | `cosim_commit_log` |
 | `tb/cosim/commit_diff.py`, `gen_random_prog.py` | A5 | `cosim_commit_log` |
 | `sw/tests/a6_forward.S` | A6 | `cosim_directed` |
 | `sw/tests/a7_loaduse.S` | A7 | `cosim_directed` |
 | `sw/tests/a8_control.S` | A8 | `cosim_directed` |
+| `sw/tests/a9_csr.S`, `a9_minstret.S` | A9 | `csr_traps_minstret` |
+| `tb/cosim/test_riscv_tests.py` | A9 | `riscv_tests` |
 | `tb/cosim/cycle_model.py` | A7 | `cosim_directed`, `cosim_commit_log` |
 | `tb/mutate/run_mutation.py` | A6 | run by hand; see below |
 
@@ -131,11 +134,12 @@ wrong port, its mutation would escape.
 ### `rvntt_core.sv` — what the pipeline does *not* have yet
 
 Plan A4's bring-up strategy was to build the datapath with hazard handling
-absent, verify against NOP-padded code, then add each layer. All three layers
-are in: forwarding (A6), the load-use interlock (A7) and control flow (A8).
-What is left is **A9** — CSRs, traps, `ECALL`/`EBREAK` — and the coprocessor
-interface. `dbg_unsupported` now flags only illegal instructions, Xkntt, and a
-CSR access that writes a register.
+absent, verify against NOP-padded code, then add each layer. All of them are in:
+forwarding (A6), the load-use interlock (A7), control flow (A8), and CSRs, traps
+and `MRET` (A9). What is left is the **Xkntt coprocessor**. `dbg_unsupported`
+flags an Xkntt instruction retiring — and still flags an *illegal* one, which A9
+should make impossible, so that guard is now a live check on the trap path
+rather than a leftover.
 
 That last one is dangerous, so it is not left to a comment. **`dbg_unsupported`
 pulses whenever an instruction retires that this core cannot execute
@@ -256,6 +260,90 @@ the register file's write-through, not the forwarding network. `ex_mem_fwd_data`
 still has its `RES_PC4` arm, and that arm is currently unreachable. It is kept
 because A9's `RES_CSR` needs the same mux and because the unreachability depends
 on the flush depth, which is not a property anything in the RTL asserts.
+
+### A9 — the trap invariant, and where `minstret` is counted
+
+**Every trap resolves in EX.** That is not an accident of the current exception
+set: the misaligned-address check had to be placed in EX, where the address is
+computed, rather than in MEM where the access lands, to keep it true. Two things
+depend on it and would break quietly without it — nothing older than EX ever has
+to be squashed, and a faulting store is suppressed before `rvntt_ram`'s address
+register ever latches it. A faulting instruction is squashed into a bubble on
+its way to MEM, so it never retires, which is also what keeps the commit log
+comparable with Spike (which prints no line for a trapping instruction).
+
+**`minstret` is incremented in EX, not in WB, and this is the least obvious
+decision in the step.** A CSR access executes in EX and must report the number
+of instructions retired *before* it; counting at WB leaves its two immediate
+predecessors uncounted at that moment. Adding them back from the pipeline
+registers works — the trap invariant makes it exact — and is *wrong the first
+time software writes the counter*, because the write already accounts for
+everything ahead of it and the correction then double-counts.
+**riscv-tests' `instret_overflow` said so in one line**: `csrwi minstret, 0;
+csrr a0, minstret` must read 0, and the in-flight version reads 2. Counting in
+EX has neither problem, and a write to either half of `minstret` suppresses the
+writing instruction's own increment.
+
+**What is deliberately not implemented**: `satp`, `pmpaddr*`, `pmpcfg*`,
+`medeleg`, `mideleg`, `mnstatus`. Accessing one is an illegal-instruction trap,
+and that is *the case riscv-tests' p-environment is written for* — each of its
+`INIT_` macros points `mtvec` at the label immediately after itself before
+touching an optional CSR, so the trap lands on the next line and the test carries
+on. Two are load-bearing exceptions and **must** exist: `mie` is written before
+`DELEGATE_NO_TRAPS` re-points `mtvec`, so a trap there jumps backwards into an
+infinite loop; and `mhartid` is read before `mtvec` is set at all, so a trap
+there vectors to address 0.
+
+**`ECALL` now traps, which changed every test harness in the tree.** It is
+squashed in EX and never retires, so the old "stop when an ECALL retires"
+condition can never fire again. There are two replacements and the first one is
+better than what it replaced: `--stop-pc <trap handler>` is *exclusive*, and it
+is exactly where Spike's own trace is truncated — so both sides now count the
+same instructions with no offset to remember. `--tohost <addr>` watches the
+store bus for riscv-tests' result protocol, which works because a store is
+issued from EX and nothing past EX is squashed.
+
+### riscv-tests: the first suite this project did not write
+
+54 of 54 pass — the full `rv32ui-p-*` set and `rv32mi-p-*` — with four skipped
+for reasons that are features, not gaps: `fence_i` (Zifencei is not in the
+target ISA), `ma_data` (requires misaligned access to *succeed*; this core traps,
+which the `rv32mi *-misaligned` tests check instead), `breakpoint` (debug
+triggers) and `pmpaddr` (PMP). Every test is run on **Spike first**: a test that
+does not pass on the reference model is a broken build or a wrong ISA string,
+and reporting it as an RTL failure sends the reader to the wrong place.
+
+The value of an externally authored suite is exactly that it does not share the
+design's blind spots. It found the `minstret` placement bug on the first run,
+and nothing written alongside the core had questioned it.
+
+### Two more ways a test can be accidentally blind
+
+Both found by mutation at A9, and both are about the *stimulus*, as at A5 and A7.
+
+- **A probe placed just after a taken branch sits in a pipeline bubble.** The
+  `minstret` program read the counter immediately after a taken branch, so MEM
+  and WB held bubbles and the EX-counted and WB-counted schemes gave the *same*
+  answer. Two ordinary instructions before the probe refill the pipeline and the
+  difference appears. A test that cannot reach the state it is checking passes
+  for a reason that has nothing to do with the design.
+- **Setting both bits of a swap makes a broken swap look right.** The MRET case
+  originally set `MIE` and `MPIE` both to 1 before the return, so an MRET that
+  forgot to restore `MIE` still produced `0x88`. Clearing `MIE` first gives the
+  swap somewhere to move a value *from*.
+
+### `$past` inside `always_ff` costs a cycle to learn
+
+Two things, both of which produced a confusing counterexample first:
+
+- An assertion inside `always_ff` sees the values of the cycle that is *ending*,
+  not the ones the edge produces. So `assert (!mstatus_mie_q)` guarded by
+  `$past(trap_en)` compares cycle T's state against cycle T-1's input, which is
+  the relationship wanted — but it is not what it looks like.
+- **`$past` is a register, and in BMC its content at the first step is
+  unconstrained** — not the input's initial value. Without an `f_past_valid`
+  guard the solver simply invents a trap that never happened, and hands back a
+  counterexample in which the input was plainly zero the whole time.
 
 ### Mutation anchors go stale, and the harness says so
 

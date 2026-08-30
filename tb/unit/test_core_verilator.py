@@ -33,6 +33,7 @@ RTL = [
     os.path.join(ROOT, "rtl/core/rvntt_forward.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_hazard.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_branch.sv"),
+    os.path.join(ROOT, "rtl/core/rvntt_csr.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_core.sv"),
     os.path.join(ROOT, "rtl/soc/rvntt_ram.sv"),
     os.path.join(ROOT, "rtl/soc/rvntt_core_sim_top.sv"),
@@ -155,13 +156,13 @@ def spike_final_reg(elf, reg):
     n_prog = 0
     for pc, _word, writes in trace:
         if pc == handler:
-            # +1 for the ECALL itself: it traps, and Spike logs no commit line
-            # for a trapping instruction, while the RTL retires it as its stop
-            # marker.  Commits below the load address are Spike's bootrom (it
-            # executes 5 instructions at 0x1000 before jumping to 0x80000000),
-            # which the RTL never runs.  Both offsets are exactly what A5's
-            # differ will have to handle.
-            return val, n_prog + 1
+            # No +1 any more.  Before A9 the ECALL retired on the RTL side and
+            # was absent from Spike's, so the counts differed by one; now it
+            # traps on both and the testbench's --stop-pc is exclusive, so the
+            # two sides count exactly the same instructions.  Commits below the
+            # load address are Spike's bootrom -- it executes 5 instructions at
+            # 0x1000 before jumping to 0x80000000 -- which the RTL never runs.
+            return val, n_prog
         if pc >= BASE:
             n_prog += 1
         for rd, v in writes:
@@ -178,6 +179,7 @@ def main():
 
         elf = build_elf(tmp)
         spike_val, n_retired = spike_final_reg(elf, 9)     # x9 = s1
+        handler = spike_asm.symbol(elf, "trap_handler")
 
         print(f"data words parsed from {os.path.relpath(ASM, ROOT)}: {len(words)}")
         print(f"python model : 0x{expect:08x}")
@@ -207,7 +209,8 @@ def main():
 
         exe = os.path.join(build, "Vrvntt_core_sim_top")
         r = subprocess.run([exe, "--expect", "0x%08x" % expect, "--reg", "9",
-                            "--expect-retired", str(n_retired)],
+                            "--expect-retired", str(n_retired),
+                            "--stop-pc", "0x%08x" % handler],
                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         out = r.stdout.decode("utf-8", "replace")
         print(out.strip())

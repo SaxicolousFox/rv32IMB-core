@@ -197,6 +197,16 @@ def discover() -> list:
                    "--design", "rvntt_branch", "--depth", "2"],
                   requires=["sby", "yosys"], timeout=600))
 
+    # A9.  The CSR file's proof is about ACCESS RULES rather than storage --
+    # read-only enforcement, mepc/mtvec alignment, MPP being fixed, and the
+    # mstatus swap on trap and MRET.  Storage is what riscv-tests covers, far
+    # better than a property could.  Depth 6 because the trap/MRET properties
+    # span two cycles and $past needs a valid history before them.
+    t.append(Test("formal_csr", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_csr", "--depth", "6"],
+                  requires=["sby", "yosys"], timeout=600))
+
     # A4.  Builds sw/tests/a4_checksum.S, runs it on Spike for the reference,
     # then on the RTL.  Needs the RISC-V toolchain and Spike as well as
     # Verilator, so all three are listed -- a missing one must SKIP loudly
@@ -239,6 +249,23 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "tb/cosim/test_cosim_directed.py")],
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=900))
+
+    # A9.  Directed CSR and trap cases, and plan A9's own done-when: minstret
+    # after a known program equals the instruction count Spike reports for it.
+    t.append(Test("csr_traps_minstret", "cosim",
+                  [py, os.path.join(ROOT, "tb/cosim/test_csr_traps.py")],
+                  requires=["verilator", "riscv-none-elf-gcc", "spike"],
+                  timeout=900))
+
+    # A9.  The first externally authored suite the core has faced: everything
+    # before it was written alongside the design and shares its blind spots.
+    # SKIPs itself with an explanatory message if toolchain/riscv-tests is not
+    # checked out, rather than failing -- it is a third-party checkout, like
+    # spike-src, and is not in the repository.
+    t.append(Test("riscv_tests", "cosim",
+                  [py, os.path.join(ROOT, "tb/cosim/test_riscv_tests.py")],
+                  requires=["verilator", "riscv-none-elf-gcc", "spike"],
+                  timeout=1800))
 
     # Mutation testing (A6+).  ON by default, at about 2m10s -- it rebuilds the
     # simulator once per mutation, so it is the most expensive thing here by a

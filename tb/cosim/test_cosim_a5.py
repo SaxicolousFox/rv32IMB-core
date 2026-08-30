@@ -90,7 +90,9 @@ def run_one(exe, elf, tmp, image_path, name, context=6, verbose=False,
     trace = os.path.join(tmp, "rtl_trace.log")
     if os.path.exists(trace):
         os.remove(trace)
+    handler_pc = spike_asm.symbol(elf, "trap_handler")
     r = subprocess.run([exe, "--no-check", "+trace_file=" + trace,
+                        "--stop-pc", "0x%08x" % handler_pc,
                         "--max-cycles", "2000000"],
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = r.stdout.decode("utf-8", "replace").strip()
@@ -98,8 +100,9 @@ def run_one(exe, elf, tmp, image_path, name, context=6, verbose=False,
         print(f"  {name}: RTL run failed\n    " + out.replace("\n", "\n    "))
         return False
 
+    handler = spike_asm.symbol(elf, "trap_handler")
     sp = commit_diff.spike_records(elf)
-    rt = commit_diff.rtl_records(trace)
+    rt = commit_diff.rtl_records(trace, stop_pc=handler)
     report = commit_diff.diff(sp, rt, context)
     if report is not None:
         print(f"\n=== {name}: COMMIT LOGS DIVERGE ===")
@@ -112,8 +115,7 @@ def run_one(exe, elf, tmp, image_path, name, context=6, verbose=False,
             print(f"\n=== {name}: no span reported ===\n    " + out)
             return False
         actual = int(m.group(1))
-        pred = cycle_model.analyse(
-            commit_diff.rtl_records(trace, stop_at_ecall=False))
+        pred = cycle_model.analyse(rt)
         if pred["span"] != actual:
             print(f"\n=== {name}: CYCLE COUNT DISAGREES ===")
             print("  The commit logs are byte-identical, so this is a timing "

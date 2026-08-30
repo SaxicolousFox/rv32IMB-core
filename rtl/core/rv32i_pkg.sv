@@ -274,7 +274,12 @@ package rv32i_pkg;
     logic [2:0]  mem_op;
     result_sel_e result_sel;
     logic [4:0]  rd_addr;
-    logic [31:0] alu_result;
+    // The EX stage's result, whatever produced it: the ALU for arithmetic, the
+    // effective address for a load or store, and the OLD CSR VALUE for a Zicsr
+    // access.  Named for the stage rather than for the ALU because A9 gave it a
+    // second producer, and `alu_result` holding a CSR value is the kind of
+    // half-truth that costs someone an hour.
+    logic [31:0] ex_result;
     logic [31:0] store_data;
     logic [31:0] pc_plus4;
   } ex_mem_t;
