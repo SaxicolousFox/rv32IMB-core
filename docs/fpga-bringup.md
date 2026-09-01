@@ -198,9 +198,9 @@ already run. The design notes are in `rtl/soc/CLAUDE.md`; this file is the
 ```sh
 source toolchain/env.sh
 
-python3 fpga/scripts/gen_soc_clk.py --mhz 73.121        # MMCM + baud, one source
+python3 fpga/scripts/gen_soc_clk.py --mhz 70.131        # MMCM + baud, one source
 python3 fpga/scripts/build_soc_image.py \
-        --out fpga/generated/soc_init.mem --delay-cycles 73121000
+        --out fpga/generated/soc_init.mem --delay-cycles 70131000
 bash    fpga/scripts/build_soc.sh                        # ~2.5 min, Vivado on Windows
 python3 fpga/scripts/hw_bringup.py                       # program, capture, parse
 ```
@@ -277,18 +277,24 @@ strategy.
 
 | | |
 |---|---|
-| **Fmax** | **73.121 MHz** (period 13.676 ns, WNS +0.218 ns, WHS +0.036 ns) |
-| Fastest constraint that failed | 74.074 MHz (WNS −0.503 ns) |
-| Utilisation | 2114 LUTs (3.3%), 905 FFs (0.7%), 32 BRAM tiles (23.7%), 0 DSP, 1 MMCM |
+| **Fmax** | **70.131 MHz** (period 14.259 ns, WNS +0.170 ns, WHS +0.092 ns) — read it as *about 70 MHz*, see below |
+| Fastest constraint that failed | 70.641 MHz (WNS −0.245 ns) |
+| Utilisation | 2126 LUTs (3.4%), 913 FFs (0.7%), 32 BRAM tiles (23.7%), 0 DSP, 1 MMCM |
 | Critical path | EX/MEM `rd_addr` → forwarding mux → ALU → store byte-enables → BRAM `WEA` |
 | | 15 logic levels; 2.880 ns logic, 10.393 ns route (**78% route**) |
 | Bitstream | `fpga/build/soc/rvntt_soc_top.bit` (3,825,914 bytes) |
 
-The full search table and what the non-monotonic WNS means are in
-`rtl/soc/CLAUDE.md`. The short form: **do not report `1/(T − WNS)` from a passing
-run.** At 71.250 MHz this design closes with +0.092 ns and at 73.121 MHz with
-+0.218 ns — the router optimises to the constraint and stops, so extrapolating
-from the slower run would have *understated* Fmax.
+The full search table is in `rtl/soc/CLAUDE.md`. Two things not to lose:
+
+**Do not report `1/(T − WNS)` from a passing run.** At 64.998 MHz this design
+closes with +0.752 ns, which extrapolates to ~68 MHz — *below* the real answer.
+The router optimises to the constraint and stops; a passing run tells you nothing
+about a tighter one, in either direction.
+
+**Re-measure after any design change.** Fixing two transposed LED pins — no
+logical content whatsoever — moved Fmax from 73.121 MHz to 70.131 MHz, purely
+through placement. Carrying an Fmax number across an edit is quoting a
+measurement of a different design.
 
 ---
 
@@ -304,7 +310,7 @@ prove the RGB status ladder is readable — those need eyes. This is the only pa
 of A12 that cannot be automated.
 
 **BEFORE YOU START:** The Arty is plugged in and already programmed with
-`fpga/build/soc/rvntt_soc_top.bit` (73.121 MHz build). If it has been
+`fpga/build/soc/rvntt_soc_top.bit` (70.131 MHz build). If it has been
 power-cycled since, re-run `python3 fpga/scripts/hw_bringup.py` first —
 configuration is volatile and a power cycle clears it.
 

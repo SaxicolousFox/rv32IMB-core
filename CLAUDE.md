@@ -208,10 +208,15 @@ by design. See `rtl/core/CLAUDE.md`.
 **A12 is done and hardware-confirmed, and it is only half of M7.** The SoC —
 `rvntt_core` + a 128 KB dual-port BRAM + a memory-mapped UART and GPIO — loads,
 runs a program out of BRAM, and prints over the USB-UART from the board.
-**Fmax = 73.121 MHz** (Vivado 2025.2, `xc7a100tcsg324-1`, **-1** speed grade,
-default strategy), measured by the plan's binary search over six full
-implementation runs; 74.074 MHz is the fastest constraint that fails. 2114 LUTs,
-905 FFs, 32 BRAM tiles. The critical path is EX/MEM `rd_addr` → forwarding mux →
+**Fmax ≈ 70 MHz** — 70.131 MHz measured (Vivado 2025.2, `xc7a100tcsg324-1`,
+**-1** speed grade, default strategy) by the plan's binary search over six full
+implementation runs; 70.641 MHz is the fastest constraint that fails. 2126 LUTs,
+913 FFs, 32 BRAM tiles.
+
+**Do not carry that number across a design change.** It was measured twice: the
+first search said 73.121 MHz, on a build whose RGB LED red and blue pins were
+transposed. Correcting two output pins — no logical content at all — cost 3 MHz
+through placement alone. The design-to-design spread is about ±0.4 ns. The critical path is EX/MEM `rd_addr` → forwarding mux →
 ALU → store byte-enables → BRAM `WEA`, and it is **78% route delay at 3.3%
 utilisation** — the design is slow because it is spread across the 32 BRAMs, not
 because the logic is deep. See `rtl/soc/CLAUDE.md` and `docs/fpga-bringup.md`.
@@ -222,7 +227,14 @@ CoreMark on hardware" — that is A12 *and* A13.
 
 The bring-up loop needs no human: `fpga/scripts/hw_bringup.py` programs the board
 over JTAG in batch, captures the UART through a PowerShell helper whose output
-WSL reads back from `/mnt/c`, and parses it. Only the LEDs still need eyes.
+WSL reads back from `/mnt/c`, and parses it. **Only the LEDs still need eyes, and
+that is not a formality** — the pin transposition above passed lint, elaboration,
+synthesis, timing, programming and a byte-perfect UART capture, because a swapped
+*output* pin is invisible to everything upstream of the pad. A person looking at
+the board was the only thing that found it. `tb/fpga/check_xdc_pins.py` now
+compares every constraint against a pinout extracted mechanically from the vendor
+file, so that specific class cannot recur; which signal drives which port still
+cannot be mechanised.
 
 **What is still missing after A12**: the benchmarks (A13), and any Xkntt
 execution — the decoder recognises the extension and LD0 red lights if one ever

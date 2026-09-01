@@ -19,7 +19,7 @@ byte-for-byte unaffected by anything A12 did.
 
 ## The measured numbers
 
-**Fmax = 73.121 MHz**, Vivado 2025.2, `xc7a100tcsg324-1` (**-1** speed grade),
+**Fmax = 70.131 MHz**, Vivado 2025.2, `xc7a100tcsg324-1` (**-1** speed grade),
 default implementation strategy (`synth_design` then
 `opt`/`place`/`phys_opt`/`route_design`, no directives).
 
@@ -28,23 +28,52 @@ read WNS **post-route**, bisect. Six full implementation runs:
 
 | Constraint | Period | WNS | WHS | |
 |---|---|---|---|---|
-| 59.999 MHz | 16.667 ns | +0.812 | +0.073 | pass |
-| 67.499 MHz | 14.815 ns | +0.185 | +0.095 | pass |
-| 71.250 MHz | 14.035 ns | +0.092 | +0.050 | pass |
-| **73.121 MHz** | **13.676 ns** | **+0.218** | **+0.036** | **pass — Fmax** |
-| 74.074 MHz | 13.500 ns | −0.503 | +0.122 | fail |
-| 75.002 MHz | 13.333 ns | −0.453 | +0.115 | fail |
+| 64.998 MHz | 15.385 ns | +0.752 | +0.049 | pass |
+| 69.104 MHz | 14.471 ns | +0.002 | +0.047 | pass — *barely* |
+| **70.131 MHz** | **14.259 ns** | **+0.170** | **+0.092** | **pass — Fmax** |
+| 70.641 MHz | 14.156 ns | −0.245 | +0.068 | fail |
+| 71.154 MHz | 14.054 ns | −0.404 | +0.035 | fail |
+| 73.196 MHz | 13.662 ns | −0.306 | +0.027 | fail |
 
-Two things in that table are worth not smoothing over. **WNS is not monotonic**
-— 73.121 MHz closes with more slack than 71.250 MHz does. That is router noise,
-not a measurement error, and it is exactly why `1/(T − WNS)` from a passing run
-is not Fmax: at 71.250 MHz the router stopped at +0.092 ns because it had no
-reason to try harder, and extrapolating from that would have *understated* the
-answer. And **75.002 MHz fails by less than 74.074 MHz does**, for the same
-reason. Only a run constrained at `T` is evidence about `T`.
+**WNS is not monotonic in the constraint, and the table shows it twice.**
+69.104 MHz scrapes through at +0.002 ns while the *faster* 70.131 MHz clears by
++0.170; and 73.196 MHz fails by less than 71.154 MHz does. That is placement and
+routing landing differently, not measurement error.
 
-Utilisation at Fmax: **2114 LUTs (3.3%), 905 FFs (0.7%), 32 BRAM tiles (23.7%),
+It is also exactly why `1/(T − WNS)` from a passing run is not Fmax. At
+64.998 MHz this design closes with +0.752 ns, which would extrapolate to about
+68 MHz — *below* the answer, because the router stopped there having no reason to
+try harder. The extrapolation is not merely optimistic or pessimistic; it is
+uninformative in either direction. Only a run **constrained** at `T` is evidence
+about `T`.
+
+**These numbers were measured twice, and the first set was wrong.** The original
+search reported 73.121 MHz — on a design with the RGB LED's red and blue pins
+transposed. Fixing two output pins, a change with no logical content, cost
+3 MHz. See "What only a person could catch" below.
+
+Utilisation at Fmax: **2126 LUTs (3.4%), 913 FFs (0.7%), 32 BRAM tiles (23.7%),
 0 DSPs, 1 MMCM, 19 IOBs.**
+
+### How much to trust the last digit: about ±0.4 ns
+
+Transposing two **output pins** — a change with no logical content at all, and
+one that cannot affect a single internal path — moved WNS at 73.121 MHz from
+**+0.218 ns to −0.153 ns**, and moved Fmax from 73.121 MHz to 70.131 MHz. Same
+RTL, same constraint, same strategy; placement simply landed differently.
+
+So quote this as **about 70 MHz**, not to three decimals: the design-to-design
+spread is around ±0.4 ns, or ±2 MHz. Vivado is deterministic for identical
+input, so this never shows up as noise in a repeated build — it appears the
+moment anything perturbs placement, which is what every real edit does. **Anyone
+carrying an Fmax number forward across a design change is quoting a measurement
+of a different design.** Re-run the search.
+
+One distinction worth keeping straight: that spread is *design to design*, not
+margin within a given bitstream. A routed design that closes at +0.170 ns closes
+— static timing at the slow corner already derates for voltage and temperature,
+and re-running the same build cannot move it. So shipping *at* Fmax is fine; it
+is the number, not the bitstream, that needs the error bar.
 
 ### The critical path, named
 
@@ -188,7 +217,47 @@ group anyway could only hide a crossing that appears later.
 
 ---
 
+## What only a person could catch
+
+**The RGB LED's red and blue were on each other's pins.** The Digilent master
+XDC lists them in the order `led0_b`, `led0_g`, `led0_r`; they were read as
+r, g, b; E1 and G6 were transposed.
+
+Nothing upstream of the pad can see this. It linted, elaborated, synthesised,
+met timing, programmed, ran, and produced byte-perfect UART — a swapped **output**
+pin changes nothing any automated check in this repository looks at. The whole
+symptom was that the board lit the wrong colour: green blinking with red solid,
+where red was `alive_q` wearing blue's wiring, and the *actual* error indicator
+was dark. Reported by someone looking at the board.
+
+The lesson is not "be careful reading pin tables". It is **stop reading pin
+tables by hand**: `fpga/constraints/arty_a7_100t_pins.txt` is extracted
+mechanically from the vendor file, and `tb/fpga/check_xdc_pins.py` compares every
+assignment in every XDC against it, with five injected faults of its own
+(including this exact transposition). It found both pins independently.
+
+What that checker still **cannot** check is whether the right *signal* drives a
+correctly-named port: `led0_r` wired to the heartbeat would pass. Pin identity is
+mechanisable; intent is not, and that is the part the LED check on the bench is
+for. Do not skip it.
+
+**And the fix cost more than the fix.** Swapping two output pins moved WNS from
+**+0.218 ns to −0.153 ns** at the same 73.121 MHz constraint — a 0.371 ns swing
+from a change with no logical content whatsoever, purely because placement moved.
+That is the honest error bar on every Fmax number here; see below.
+
 ## What fault injection caught here
+
+**A build that failed timing, reported as a successful one.** `build_soc.sh`
+announced `BITSTREAM: …` by testing whether the file existed in the output
+directory — but a run that misses timing writes no `.bit`, so the *previous*
+run's bitstream was still sitting there and got announced, and `hw_bringup.py`
+duly reprogrammed the board with the old design. Two independent guards now: the
+output bitstream is deleted before the build so an absent artifact looks absent,
+and `hw_bringup.py` warns when the `.bit` is older than the newest source file.
+"I rebuilt and reprogrammed" silently becoming "I reprogrammed the previous
+design" is close to invisible in the output, and it invalidates whatever the
+board then says.
 
 **A `$readmemh` file that was not there, reported as a CRITICAL WARNING.** The
 first Vivado elaboration of `rvntt_soc_top` said `could not open $readmem data
