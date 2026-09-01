@@ -249,10 +249,20 @@ before the first store is the only check here that can see that.
 
 | | Meaning |
 |---|---|
-| **LD4–LD7** (green) | `GPIO_OUT`, entirely software — they count in binary, once per block |
+| **LD4–LD7** (green) | `GPIO_OUT`, entirely software — they count in binary, LD4 the LSB, once per block |
 | **LD0 green** | ~1 Hz heartbeat in the core clock domain |
 | **LD0 blue** | solid once any instruction has retired |
 | **LD0 red** | solid if `dbg_unsupported` ever fired — **should never light** |
+
+> **A healthy LD0 looks CYAN, not blue.** Blue is solid and green blinks on top of
+> it, and the two mix: the LED alternates between blue and turquoise once a
+> second. That is correct. Any red in the mix is not — and note that red plus
+> green reads as orange/yellow rather than as "red", which is how the transposed
+> pins were first described as "flashing between green and red".
+
+**Hardware-confirmed**, all three: LD0 cyan/turquoise at 1 Hz with no red; LD4–LD7
+counting in binary with LD4 as the LSB; and `sw=0xC btn=0x4` read back through
+`GPIO_IN` with the switches and a button physically set.
 
 Read it as a ladder, top down:
 

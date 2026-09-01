@@ -168,8 +168,16 @@ blinking but blue dark → clock fine, CPU not executing (reset, empty memory, b
 `RESET_PC`). Red → an illegal or Xkntt instruction retired, which A9 makes
 unreachable, so red is a defect in the core rather than a bug in the program.
 
-Both hardware indicators are **latched**, because a single-cycle pulse at 73 MHz
+Both hardware indicators are **latched**, because a single-cycle pulse at 70 MHz
 is invisible and "did it ever happen" is the actual question.
+
+**Hardware-confirmed.** A healthy LD0 reads **cyan**: blue solid with green
+blinking on top of it, mixing to turquoise once a second. Worth knowing before
+you look, because colour mixing is also what disguised the pin transposition —
+red plus green reads as orange, and the board was first described as "flashing
+between green and red". LD4–LD7 count in binary with LD4 as the LSB, and
+`sw=0xC btn=0x4` was read back through `GPIO_IN` with the switches physically
+set, so both directions of the GPIO are confirmed on silicon.
 
 ---
 
