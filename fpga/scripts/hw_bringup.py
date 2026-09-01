@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-The A12 hardware loop, with no human in it.
+The hardware loop, with no human in it.  Built for A12; A13 reuses it verbatim
+with --parser, --seconds and --send-byte, because "program, capture, parse" is
+the same loop whatever program is in the BRAM.
 
     program the board over JTAG  ->  capture the UART  ->  parse the capture
 
@@ -31,6 +33,13 @@ VIVADO_WIN = os.environ.get(
 STAGE_WIN  = os.environ.get("STAGE_WIN_HW", r"C:\Users\liamf\rvntt-hw")
 STAGE_WSL  = os.environ.get("STAGE_WSL_HW", "/mnt/c/Users/liamf/rvntt-hw")
 BIT_DEFAULT = os.path.join(ROOT, "fpga/build/soc/rvntt_soc_top.bit")
+PARSER_DEFAULT = os.path.join(ROOT, "tb/fpga/parse_soc_uart.py")
+
+# Every directory whose contents end up inside a bitstream.  Used only for the
+# stale-bitstream warning below, but it has to be complete: a source tree that is
+# newer than the .bit and is NOT listed here is precisely the case the warning
+# exists to catch, and A13 added sw/bench/ and a second generated image.
+SOURCE_DIRS = ("rtl", "sw/soc", "sw/bench", "fpga/constraints", "fpga/generated")
 
 
 def run(cmd, **kw):
@@ -108,7 +117,16 @@ def main() -> int:
     ap.add_argument("--port", default=os.environ.get("ARTY_COM"),
                     help="COM port; auto-detected from the FT2232 by default")
     ap.add_argument("--seconds", type=int, default=8)
-    ap.add_argument("--send-byte", type=lambda s: int(s, 0), default=0x5A)
+    ap.add_argument("--send-byte", type=lambda s: int(s, 0), default=0x5A,
+                    help="byte to inject into the UART; -1 to send nothing")
+    # A13 runs the same program-capture-parse loop over a different program, so
+    # the checker is an argument rather than a second copy of this file.  The
+    # default keeps A12's behaviour exactly.
+    ap.add_argument("--parser", default=PARSER_DEFAULT)
+    ap.add_argument("--parser-arg", action="append", default=None,
+                    help="extra argument for the parser; repeatable")
+    ap.add_argument("--out-name", default="uart.log",
+                    help="capture file name under the Windows staging dir")
     ap.add_argument("--no-program", action="store_true",
                     help="capture from whatever is already configured")
     ap.add_argument("--keep", default=None, help="copy the capture here")
@@ -142,7 +160,7 @@ def main() -> int:
     # reprogrammed the previous design" is very hard to notice from the output.
     if not a.no_program and os.path.exists(a.bit):
         newest = 0.0
-        for d in ("rtl", "sw/soc", "fpga/constraints", "fpga/generated"):
+        for d in SOURCE_DIRS:
             for root, _, files in os.walk(os.path.join(ROOT, d)):
                 for f in files:
                     newest = max(newest, os.path.getmtime(os.path.join(root, f)))
@@ -165,9 +183,11 @@ def main() -> int:
             print("SOC_HW_FAIL: programming failed")
             return 1
 
-    print("=== capturing %ds from %s (injecting 0x%02X) ==="
-          % (a.seconds, port, a.send_byte))
-    cap = capture(a.seconds, a.send_byte, port)
+    send = None if a.send_byte < 0 else a.send_byte
+    print("=== capturing %ds from %s (%s) ==="
+          % (a.seconds, port,
+             "injecting 0x%02X" % send if send is not None else "receive only"))
+    cap = capture(a.seconds, send, port, a.out_name)
     if cap is None:
         print("SOC_HW_FAIL: serial capture failed")
         return 1
@@ -178,9 +198,10 @@ def main() -> int:
             g.write(f.read())
         print("capture kept at %s" % os.path.relpath(a.keep, ROOT))
 
-    rc, out = run([sys.executable,
-                   os.path.join(ROOT, "tb/fpga/parse_soc_uart.py"), cap,
-                   "--expect-echo", "0x%02X" % a.send_byte])
+    pargs = a.parser_arg
+    if pargs is None:
+        pargs = ([] if send is None else ["--expect-echo", "0x%02X" % send])
+    rc, out = run([sys.executable, a.parser, cap] + pargs)
     print(out.strip())
     return 0 if rc == 0 else 1
 

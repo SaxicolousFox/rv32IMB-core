@@ -350,6 +350,43 @@ did not, so a missing board or checkout no longer shows up as a green row.
 
 ---
 
+## A13 — the benchmarks, on this same SoC
+
+Full methodology and every caveat: [`docs/a13-benchmarks.md`](../../docs/a13-benchmarks.md).
+The short version, measured on the board:
+
+| | |
+|---|---|
+| **DMIPS/MHz** | **0.7306** |
+| **CoreMark/MHz** | **0.9607** |
+| IPC | 0.7227 Dhrystone, 0.6930 CoreMark |
+| at | 70.129 870 MHz |
+
+Two things about this SoC that A13 confirmed and that are worth knowing here:
+
+**Changing only the BRAM contents changes nothing about timing.** The benchmark
+bitstream is the same RTL, the same constraints and the same clock as A12's, with
+a different `$readmemh` image — and Vivado returns the identical 2126 LUTs,
+913 FFs, 32 BRAM tiles and **WNS +0.170 ns**. So a new program costs a fourteen-
+minute implementation run but no re-measurement of Fmax, and no LED check: there
+is no new output pin to get wrong. Compare that with A12's finding that
+correcting two output *pins* — no logical content at all — cost 3 MHz. Contents
+are free; pinout is not.
+
+**The determinism is total.** Nine report blocks across three separate JTAG
+programming passes are identical to the cycle. No cache, no DRAM refresh, no
+interrupt source and no second bus master means there is nothing to vary, and the
+parser requires exact equality rather than a tolerance so that any future
+variation has to be explained rather than averaged away.
+
+**`mcycle` finally has a reference.** `rtl/core/rvntt_csr.sv` says it is a real
+cycle counter, that Spike therefore disagrees with it, and that *nothing compares
+it*. Verilator can, because it counted the clock edges itself: the timed regions
+plus the computable UART transmit time account for 96.4% of the simulated run.
+The mutation `mcycle_counts_retires_not_cycles` — Spike's behaviour, and
+self-consistent enough that IPC comes out at a plausible 1.00 — is caught by that
+and by nothing else.
+
 ## Not done here
 
 No flash image — configuration is volatile, so a power cycle returns the board to
@@ -358,5 +395,12 @@ whatever was there before. That is the right default for a bring-up loop.
 No Xkntt. The decoder recognises the extension and `dbg_unsupported` (LD0 red)
 fires if one ever retires, which on this board it must not.
 
-**A12 does not satisfy M7.** §12 wants "Fmax measured, Dhrystone + CoreMark on
-hardware" — that is A12 **and** A13. Fmax is measured; the benchmarks are not run.
+**No branch predictor**, and A13 says what that is worth measuring: Dhrystone
+retires 112 600 032 instructions in 155 800 003 cycles, so 0.384 cycles per
+instruction go to stalls and flushes. **Nothing here attributes that split** —
+the core has no branch or stall counters — and adding them is the first step of
+the plan's optional 2-bit-bimodal-plus-64-entry-BTB loop, not of A13.
+
+**M7 is met by A12 and A13 together.** §12 wants "Fmax measured, Dhrystone +
+CoreMark on hardware": A12 measured Fmax, A13 ran the benchmarks. Neither alone
+does it.

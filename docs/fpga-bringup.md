@@ -436,3 +436,152 @@ the UART at the wrong baud, and blame the cable.
 **`-log`/`-journal` must precede `-tclargs`.** Everything after `-tclargs` is
 handed to the Tcl script as `argv`. Already documented for `elab_core.sh`; it
 applies to the programming script too.
+
+---
+
+# A13 — Dhrystone and CoreMark on the board
+
+The measurement itself, its methodology and every caveat live in
+[`docs/a13-benchmarks.md`](a13-benchmarks.md). What follows is only the
+*procedure*: what to run, in what order, and what a person still has to do.
+
+## What a person has to do
+
+**Plug the Arty in, and nothing else.** That is the whole list.
+
+A13 changes only the contents of the BRAM — the RTL, the constraints, the pin
+assignments and the clock are byte-identical to A12's, and Vivado confirms it:
+the same 2126 LUTs, 913 FFs, 32 BRAM tiles and the same **WNS +0.170 ns**. So the
+LED check that A12 needed does not apply again; there is no new output pin to get
+wrong. If you *do* look at the board, LD0 should be the same cyan as A12 (solid
+blue plus a 1 Hz green) and LD4–LD7 will not count, because the benchmark program
+does not drive GPIO_OUT.
+
+Everything else runs unattended: the bitstream builds in batch, the board is
+configured over JTAG in batch, the UART is captured through a PowerShell helper
+whose output WSL reads back from `/mnt/c`, and the capture is parsed.
+
+## The three commands
+
+```sh
+source toolchain/env.sh
+```
+
+**Step 1 — build the image.** The Dhrystone run count and the CoreMark iteration
+count are compile-time constants, so this is where the run length is set.
+
+```sh
+python3 fpga/scripts/build_bench_image.py \
+    --out fpga/generated/bench_init.mem --elf fpga/generated/bench_image.elf \
+    --dhry-runs 200000 --iterations 800 --gap-cycles 2000000
+```
+
+Expect: `5439 words (21756 bytes used of 131072)` and a `flags:` line. If the
+word count is wildly smaller, the linker dropped something.
+
+**Step 2 — build the bitstream.** About fourteen minutes. Needs the sandbox
+disabled (the WSL↔Windows interop socket), and `SOC_MEM` is what points this at
+the benchmark image instead of A12's `hello`.
+
+```sh
+SOC_MEM=$PWD/fpga/generated/bench_init.mem OUT=$PWD/fpga/build/bench \
+STAGE_WIN='C:\Users\liamf\rvntt-bench' STAGE_WSL=/mnt/c/Users/liamf/rvntt-bench \
+    bash fpga/scripts/build_soc.sh 1 1
+```
+
+Expect: `SOC_RESULT period=14.259 … wns=0.170 …`, then `SOC_OK`, then
+`BITSTREAM: fpga/build/bench/rvntt_soc_top.bit`.
+If not: `NO BITSTREAM PRODUCED` means timing failed or the front end errored —
+read `fpga/build/bench/vivado.log`. **Do not reprogram after that**: the script
+deletes the previous `.bit` before building precisely so an absent artifact looks
+absent, which it did not the first time this happened during A12.
+
+**Step 3 — program, capture, parse.**
+
+```sh
+python3 fpga/scripts/hw_bringup.py \
+    --bit fpga/build/bench/rvntt_soc_top.bit \
+    --seconds 65 --send-byte -1 --out-name bench_uart.log \
+    --parser tb/fpga/parse_bench_uart.py \
+    --parser-arg=--min-blocks --parser-arg=3
+```
+
+Expect: `DONE = 1`, `PROGRAM_OK`, `CAPTURE_DONE bytes=…`, then the score table
+and `BENCH_OK`.
+If not: `SOC_HW_SKIP: no Arty enumerated` means the board is unplugged.
+`BENCH_FAIL:` names the specific check that failed — it never fails generically.
+
+## Why 65 seconds
+
+One report block is Dhrystone (2.22 s) plus CoreMark (11.87 s) plus a gap, about
+**14.2 s**. `--min-blocks 3` is the plan's "reproducible across three runs",
+enforced rather than eyeballed, and a capture that starts mid-block needs room
+for four: 4 × 14.2 = 57 s.
+
+The block repeats forever, so programming and capturing do not have to be
+interleaved — the same property A12 relies on. `iter` increments per block, so a
+stale capture file is distinguishable from a live one.
+
+`--send-byte -1` sends nothing. A12's program echoes an injected byte to prove
+the receive path; the benchmark program has no such loop, and injecting a byte it
+would never read is a false signal, not a spare check.
+
+## From the regression
+
+```sh
+RVNTT_HW=1 python3 tb/run_regress.py -k bench
+```
+
+`bench_hardware` is opt-in for the same reason `soc_hardware` is: it
+**reconfigures the FPGA**, which `make regress` has no business doing behind your
+back. Without `RVNTT_HW=1` it SKIPs and prints the command. It also SKIPs, never
+fails, if the board is unplugged or no bitstream has been built — a missing board
+must not look like a broken design, and must not look like a pass either.
+
+## Proving the hardware check can fail
+
+Same technique as A12: break the *capture*, not the source, and confirm the
+parser rejects it.
+
+```sh
+# take a real capture, then corrupt one field of it
+sed 's/dhry_check=0x00000000/dhry_check=0x00000040/' cap.log > bad.log
+python3 tb/fpga/parse_bench_uart.py bad.log
+# BENCH_FAIL: block 0: Dhrystone final values wrong (0x00000040):
+#             Arr_2_Glob[8][7] != runs + 10
+```
+
+The parser's twenty injected faults run in the regression as
+`bench_uart_parser`, and two of them break the flags that *relax* a check
+(`--allow-short`, `--functional-only`) — an escape hatch that does not actually
+open is a second way to pass vacuously.
+
+## Traps paid for during A13
+
+**A 30-run sanity check failed a percentage bound the real run would have passed
+vacuously.** The gap between Dhrystone's own timer and the `setStats` window is a
+fixed ~27 cycles, so a relative bound is a different test at every run length.
+It is now an absolute one. Any check whose threshold scales with the workload is
+worth a second look for this.
+
+**`-fwrapv` is not free.** Dhrystone's own rate arithmetic overflows 32-bit
+`long`, and the tidy fix costs **1.4%** because it changes code generation inside
+the timed loop. Measured, not assumed — and the flag was left out. See
+`docs/a13-benchmarks.md`.
+
+**`--parser-arg --min-blocks` does not parse; `--parser-arg=--min-blocks` does.**
+argparse reads a value beginning with `-` as the next option.
+
+**Back-to-back programming passes can collide on `hw_server`.** The third of
+three consecutive `hw_bringup.py` runs failed with the Vivado log stopping at
+`get_hw_devices` — the previous run's `hw_server` was still holding the JTAG
+target. It reported `SOC_HW_FAIL: programming failed`, which is the correct
+outcome (it did **not** go on to capture stale UART from the still-configured
+board and report a pass). Re-running it a few seconds later succeeded. If you
+script several passes, leave a gap between them.
+
+**Injecting a fault into the discarded part of a capture proves nothing.** A
+first attempt to corrupt a real capture perturbed the first `cm_cycles` in the
+file, which sits in the leading PARTIAL block that the parser drops by design —
+and the parser "passed", which looked like an escape and was not. A capture
+almost always starts mid-block; aim injections at a complete one.

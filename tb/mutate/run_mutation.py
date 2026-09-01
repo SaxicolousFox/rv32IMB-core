@@ -81,8 +81,60 @@ MIRROR_EXTRA = [RVFI, MMIO, SOCTOP, UARTRX,
 
 RVFI_RUNNER = os.path.join(ROOT, "tb/formal/run_riscv_formal.py")
 SOC_RUNNER  = os.path.join(ROOT, "tb/unit/test_soc_verilator.py")
+BENCH_RUNNER = os.path.join(ROOT, "tb/unit/test_bench_verilator.py")
 
 MUTATIONS = [
+    # --------------------------------------------------------------- A13 ----
+    # The benchmarks are the only workload here that reads mcycle and minstret
+    # for their VALUES rather than to check a single architectural rule, so they
+    # are the only thing that can notice a counter which is self-consistent but
+    # wrong.  rtl/core/rvntt_csr.sv says as much: "mcycle is a real cycle counter
+    # and therefore does NOT agree with Spike ... Nothing compares it."  These
+    # three are what makes that sentence false.
+    dict(step="A13", name="mcycle_counts_retires_not_cycles",
+         why="mcycle advances once per retired instruction instead of once per "
+             "clock -- exactly Spike's behaviour, and self-consistent enough "
+             "that IPC comes out at a perfectly plausible 1.00.  Every cycle "
+             "count, every score and every derived second would be wrong "
+             "together, with nothing in the output looking odd",
+         edits=[(CSR, "      mcycle_q <= mcycle_q + 64'd1;",
+                      "      if (instret_bump) mcycle_q <= mcycle_q + 64'd1;")],
+         caught=["bench"]),
+
+    dict(step="A13", name="minstret_counts_twice",
+         why="minstret advances by two per retirement, so IPC reads about 1.4 "
+             "-- impossible for a single-issue in-order pipeline, which is the "
+             "only reason it is detectable at all from a number with no "
+             "independent reference",
+         edits=[(CSR, "      if (instret_bump && !minstret_written) minstret_q <= minstret_q + 64'd1;",
+                      "      if (instret_bump && !minstret_written) minstret_q <= minstret_q + 64'd2;")],
+         caught=["bench"]),
+
+    # Not a counter bug: a datapath bug, checked by the benchmarks' OWN output
+    # rather than by anything this project wrote.  CoreMark validates its results
+    # against published CRCs and dhry_verify() checks Dhrystone's published final
+    # values, so this asks whether those two are worth anything as checkers.
+    #
+    # It replaces a first attempt that ESCAPED, and the reason is worth keeping:
+    # making SRA fill with zeros changed nothing here.  Both benchmarks do
+    # arithmetic right shifts -- libgcc's __divsi3 opens with `srai a2,a0,31` to
+    # capture the sign -- but only ever on non-negative values, where SRA and SRL
+    # agree.  Negative-operand SRA is covered by riscv-tests and riscv-formal and
+    # NOT by A13; recording that is more useful than inventing a benchmark input
+    # that would reach it.
+    # Written as a two-byte enable rather than the obvious 4'b1111, which left
+    # ex_byte_off unreferenced and would not build -- the same reformulation the
+    # A12 mutations needed, and for the same reason.
+    dict(step="A13", name="sb_writes_two_bytes",
+         why="a byte store also writes the byte above it.  Dhrystone's inner "
+             "loop is three 31-byte strcpy calls, so this corrupts the "
+             "character after every one it writes -- and the check that sees it "
+             "is Dhrystone's OWN published final string value, not anything "
+             "written here",
+         edits=[(CORE, "          dmem_be    = 4'b0001 << ex_byte_off;",
+                       "          dmem_be    = 4'b0011 << ex_byte_off;")],
+         caught=["bench"]),
+
     # --------------------------------------------------------------- A12 ----
     dict(step="A12", name="mmio_store_not_gated_from_ram",
          why="an MMIO store also reaches the RAM.  rvntt_ram ALIASES rather "
@@ -719,6 +771,31 @@ def run_soc(rtl_dir, work, mut_name):
     return r.returncode == 0
 
 
+def run_bench(rtl_dir, work, mut_name):
+    """Build and run the A13 benchmark image on a mirrored RTL tree.
+
+    Deliberately tiny counts: this is asking whether the mutation is VISIBLE,
+    not how fast the core is, and 30 Dhrystone runs plus one CoreMark iteration
+    already exercise every path a full run does.  One block, because the
+    block-to-block reproducibility check is about the machine being
+    deterministic, which no mutation here is meant to break.
+    """
+    build = os.path.join(work, "obj_bench_" + mut_name)
+    r = subprocess.run([sys.executable, BENCH_RUNNER,
+                        "--rtl-dir", rtl_dir, "--build-dir", build,
+                        "--dhry-runs", "30", "--iterations", "1",
+                        "--blocks", "1", "--max-cycles", "20000000"],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = r.stdout.decode("utf-8", "replace")
+    # As with run_soc: a mutation that does not elaborate proves nothing.  The
+    # testbench prints BENCH_TB_OK or BENCH_TB_FAIL once the design has built
+    # and run, so its absence means the build died.
+    if "BENCH_TB_OK" not in out and "BENCH_TB_FAIL" not in out:
+        raise RuntimeError("the benchmark testbench did not run for %s:\n%s"
+                           % (mut_name, out[-2500:]))
+    return r.returncode == 0
+
+
 def _run_test(kind, fx, exe, rtl_dir, work, mut_name):
     if kind.startswith("formal:"):
         return run_formal(work, mut_name, rtl_dir, kind.split(":", 1)[1])
@@ -726,6 +803,8 @@ def _run_test(kind, fx, exe, rtl_dir, work, mut_name):
         return run_rvfi(rtl_dir, kind.split(":", 1)[1])
     if kind == "soc":
         return run_soc(rtl_dir, work, mut_name)
+    if kind == "bench":
+        return run_bench(rtl_dir, work, mut_name)
     if kind.startswith("directed:"):
         prog = kind.split(":", 1)[1]
         return run_program_test(exe, fx.directed_elf(prog), work, fx.image, prog)

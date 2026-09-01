@@ -10,6 +10,7 @@
 riscv-tests	2ebecad997fa58cd9e5724340ba75aa4b59bd1d0	2026-08-14	master, --recurse-submodules (needs env/)
 riscv-arch-test	9bceaf5c02fa1131625bc6228b834e9e884c5801	2026-02-19	old-framework-3.x
 riscv-formal	c992aa61fdfe0846c5ed90324c596202a1c69b76	2026-07-16	main
+coremark	1f483d5b8316753a742cbf5590caf5bd0a4e4777	2025-05-01	main, --depth 1
 
 # How to reproduce:
 #   git clone --depth 1 --recurse-submodules \
@@ -17,6 +18,14 @@ riscv-formal	c992aa61fdfe0846c5ed90324c596202a1c69b76	2026-07-16	main
 #   git clone --depth 1 --branch old-framework-3.x \
 #       https://github.com/riscv-non-isa/riscv-arch-test.git toolchain/riscv-arch-test
 #   git clone https://github.com/YosysHQ/riscv-formal.git toolchain/riscv-formal
+#   git clone --depth 1 https://github.com/eembc/coremark.git toolchain/coremark
+#
+# CoreMark is compiled IN PLACE and never edited; the port is sw/bench/
+# coremark_port/, which is exactly the file EEMBC's barebones/ template exists to
+# be replaced by.  It is pinned because the published CRCs in core_main.c are
+# what validates every run, and A13's result is only meaningful against them.
+# Dhrystone comes from riscv-tests above and is treated the same way -- the port
+# lives in sw/bench/include/util.h.
 #
 # riscv-formal needs NO Python packages and no pinned branch: it is a set of
 # SystemVerilog checks plus one generator script, and it runs on the sby and
