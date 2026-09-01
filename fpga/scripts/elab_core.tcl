@@ -29,6 +29,11 @@ set rest [lsort [glob rtl/*.sv]]
 foreach p $pkgs { set rest [lsearch -inline -all -not -exact $rest $p] }
 read_verilog -sv [concat $pkgs $rest]
 
+# `include "soc_clk.svh" resolves against these, not against the file's own
+# directory.  Both are listed because the staging script drops the generated
+# headers in each.
+set_property include_dirs [list [pwd] [pwd]/rtl] [current_fileset]
+
 # Elaborate only.  -rtl stops after the RTL-level netlist, which is where SV
 # front-end errors surface, and takes seconds rather than minutes.
 synth_design -rtl -top $TOP -part $PART

@@ -33,6 +33,16 @@ DEFINE_PASSES = [
 ]
 
 DESIGNS = [
+    ("rvntt_soc_sim_top", [
+        "rtl/soc/rvntt_soc_sim_top.sv", "rtl/soc/rvntt_soc_top.sv",
+        "rtl/soc/rvntt_clkgen.sv", "rtl/soc/rvntt_uart_tx.sv",
+        "rtl/soc/rvntt_uart_rx.sv", "rtl/soc/rvntt_mmio.sv",
+        "rtl/soc/rvntt_ram.sv", "rtl/common/rvntt_sync_reset.sv",
+        "rtl/core/rv32i_pkg.sv", "rtl/core/rvntt_core.sv",
+        "rtl/core/rvntt_alu.sv", "rtl/core/rvntt_branch.sv",
+        "rtl/core/rvntt_csr.sv", "rtl/core/rvntt_decode.sv",
+        "rtl/core/rvntt_forward.sv", "rtl/core/rvntt_hazard.sv",
+        "rtl/core/rvntt_immgen.sv", "rtl/core/rvntt_regfile.sv"]),
     ("rvntt_blinky_top", [
         "rtl/soc/rvntt_blinky_top.sv", "rtl/soc/rvntt_clkgen.sv",
         "rtl/soc/rvntt_uart_tx.sv", "rtl/soc/rvntt_uart_report.sv",

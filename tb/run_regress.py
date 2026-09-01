@@ -294,6 +294,34 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "tb/formal/run_riscv_formal.py")],
                   requires=["sby", "yosys"], timeout=1800))
 
+    # A12.  The SoC in simulation: rvntt_core + rvntt_ram + memory-mapped UART
+    # and GPIO, running the same hello.c image that goes into the bitstream, with
+    # the UART decoded off the pin.  This is the gate the board work sits behind
+    # -- a memory-mapped UART is testable here long before it is testable on
+    # hardware, and getting "Hello" out of Verilator first is what stops a bench
+    # session being spent on a software bug.
+    t.append(Test("soc_sim", "rtl",
+                  [py, os.path.join(ROOT, "tb/unit/test_soc_verilator.py")],
+                  requires=["verilator", "riscv-none-elf-gcc"], timeout=900))
+
+    # The hardware capture parser, checked against itself.  It is the mechanism
+    # that decides whether the BOARD passed, so it gets the same fault injection
+    # as everything else here: nine deliberately-wrong captures, each of which it
+    # must reject.  A parser that has only ever seen good input is `return 0`.
+    t.append(Test("soc_uart_parser", "meta",
+                  [py, os.path.join(ROOT, "tb/fpga/parse_soc_uart.py"), "--selftest"],
+                  timeout=120))
+
+    # A12 on real hardware: program the Arty over JTAG, capture its UART, parse
+    # it.  OPT-IN, because running it reconfigures the FPGA and `make regress`
+    # should not do that behind your back; it SKIPs with the command to run
+    # otherwise, and also SKIPs if the board is unplugged or no bitstream has
+    # been built.  Never FAILs for either -- a missing board must not look like a
+    # broken design, and must not look like a pass either.
+    t.append(Test("soc_hardware", "fpga",
+                  [py, os.path.join(ROOT, "fpga/scripts/hw_bringup.py"), "--regress"],
+                  timeout=900))
+
     # Mutation testing (A6+).  ON by default, at about 3m45s -- it rebuilds the
     # simulator once per mutation, and A11's entries add a riscv-formal check
     # each on top, so it is the most expensive thing here by a wide margin.  It is on anyway because it is the only test that checks the
@@ -337,6 +365,22 @@ def run_one(tst: Test, verbose: bool) -> Result:
         ok = rc != 0
         detail = "" if ok else "expected nonzero exit, got 0"
         return Result(tst, XFAIL if ok else FAIL, dt, detail, out)
+    # A test that exits 0 having decided it could not run is a SKIP, not a pass.
+    # Several tests already report this way in their output -- RVTESTS_SKIP,
+    # RISCOF_SKIP, RVFORMAL_SKIP, SOC_HW_SKIP -- because a missing third-party
+    # checkout or an unplugged board must never FAIL.  Until now the table said
+    # PASS for all of them, which is the exact failure mode the docstring at the
+    # top of this file warns about: a green row that tested nothing.  Detecting
+    # the convention here makes the table match what those tests already say.
+    #
+    # SHARED WITH TRACK B: this is a change to reporting for every test, not
+    # only Track A's.  It is additive -- a test that does not print a *_SKIP:
+    # line is unaffected -- but it is worth knowing about.
+    for line in out.splitlines():
+        line = line.strip()
+        if line.split(":", 1)[0].endswith("SKIP") and line.split(":", 1)[0].isupper():
+            return Result(tst, SKIP, dt, line.split(":", 1)[-1].strip()[:60], out)
+
     ok = rc == 0
     return Result(tst, PASS if ok else FAIL, dt, "" if ok else f"exit {rc}", out)
 

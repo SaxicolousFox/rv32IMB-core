@@ -24,6 +24,18 @@ mkdir -p "$STAGE_WSL/rtl"
 
 cp "$ROOT"/rtl/core/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
 cp "$ROOT"/rtl/common/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
+# A12's tops live in rtl/soc and need the generated clock header.  The RVFI port
+# is excluded: it is only compiled under RISCV_FORMAL, and elaborating it here
+# would need the define plus riscv-formal's macros.
+cp "$ROOT"/rtl/soc/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
+cp "$ROOT"/fpga/generated/*.svh "$STAGE_WSL/" 2>/dev/null
+cp "$ROOT"/fpga/generated/*.svh "$STAGE_WSL/rtl/" 2>/dev/null
+# $readmemh resolves against Vivado's WORKING directory, not the source file's.
+# Without the image here elaboration emits "could not open $readmem data file
+# ... ignoring" as a CRITICAL WARNING and carries on with an empty memory --
+# which is precisely the class of thing the CRITICAL WARNING gate exists for.
+cp "$ROOT"/fpga/generated/*.mem "$STAGE_WSL/" 2>/dev/null
+rm -f "$STAGE_WSL/rtl/rvntt_rvfi.sv"
 cp "$ROOT"/fpga/scripts/elab_core.tcl "$STAGE_WSL/"
 
 cd "$STAGE_WSL"
