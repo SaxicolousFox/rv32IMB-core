@@ -55,6 +55,13 @@ rc=$?
 
 echo "=== copying products back ==="
 mkdir -p "$OUT"
+# Delete the previous bitstream BEFORE copying anything in.  Without this, a run
+# that fails timing writes no .bit, the old one is still sitting in $OUT, and the
+# report below announces it as though it were fresh -- which is exactly what
+# happened once: a timing failure was reported as a successful build and the
+# board was reprogrammed with the previous design.  An absent artifact must look
+# absent.
+rm -f "$OUT/rvntt_soc_top.bit"
 cp -r "$STAGE_WSL"/out/* "$OUT/" 2>/dev/null
 cp "$STAGE_WSL"/vivado.log "$OUT/" 2>/dev/null
 
@@ -63,5 +70,7 @@ grep -E "^SOC_RESULT|^SOC_OK|^SOC_FAIL|^SOC_TIMING_FAIL|inferred BRAM" "$OUT/viv
 if [ -f "$OUT/rvntt_soc_top.bit" ]; then
   echo "BITSTREAM: $(realpath --relative-to="$ROOT" "$OUT/rvntt_soc_top.bit")"
   ls -la "$OUT/rvntt_soc_top.bit"
+else
+  echo "NO BITSTREAM PRODUCED (vivado rc=$rc) -- see $OUT/vivado.log" >&2
 fi
 exit $rc

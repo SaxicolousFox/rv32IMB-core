@@ -134,6 +134,25 @@ def main() -> int:
               "  and a USB-UART bridge) and re-run.")
         return 0
     print("=== Arty found on %s ===" % port)
+    # Age check.  The bitstream is a build artifact and hw_bringup is usually run
+    # straight after a build; one that is much older than the newest source is
+    # almost certainly a leftover from a build that failed.  Warn rather than
+    # refuse -- deliberately reprogramming an older bitstream is legitimate --
+    # but say so, because "I rebuilt and reprogrammed" silently becoming "I
+    # reprogrammed the previous design" is very hard to notice from the output.
+    if not a.no_program and os.path.exists(a.bit):
+        newest = 0.0
+        for d in ("rtl", "sw/soc", "fpga/constraints", "fpga/generated"):
+            for root, _, files in os.walk(os.path.join(ROOT, d)):
+                for f in files:
+                    newest = max(newest, os.path.getmtime(os.path.join(root, f)))
+        age = newest - os.path.getmtime(a.bit)
+        if age > 0:
+            print("WARNING: %s is %.0f s OLDER than the newest source file.\n"
+                  "         A build that fails timing writes no bitstream, so this\n"
+                  "         may be a leftover from a previous design."
+                  % (os.path.relpath(a.bit, ROOT), age))
+
     if not a.no_program and not os.path.exists(a.bit):
         print("SOC_HW_SKIP: no bitstream at %s.\n"
               "  Build one with:  bash fpga/scripts/build_soc.sh"

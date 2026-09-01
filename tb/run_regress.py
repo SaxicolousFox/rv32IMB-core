@@ -312,6 +312,17 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "tb/fpga/parse_soc_uart.py"), "--selftest"],
                   timeout=120))
 
+    # Every constraint file's pin assignments, against a pinout extracted
+    # mechanically from the vendor's master XDC.  This is here because a
+    # hand-read pin table put A12's RGB LED red and blue on each other's pins:
+    # it elaborated, met timing, programmed, ran, and produced byte-perfect UART,
+    # because a swapped OUTPUT pin is invisible to everything upstream of the
+    # pad.  A person looking at the board was the only thing that caught it.
+    # Runs its own fault injection first, so it cannot rot into a no-op.
+    t.append(Test("xdc_pin_map", "fpga",
+                  [py, os.path.join(ROOT, "tb/fpga/check_xdc_pins.py")],
+                  timeout=120))
+
     # A12 on real hardware: program the Arty over JTAG, capture its UART, parse
     # it.  OPT-IN, because running it reconfigures the FPGA and `make regress`
     # should not do that behind your back; it SKIPs with the command to run

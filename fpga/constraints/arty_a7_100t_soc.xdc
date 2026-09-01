@@ -35,9 +35,16 @@ set_property -dict { PACKAGE_PIN T9  IOSTANDARD LVCMOS33 } [get_ports { led[2] }
 set_property -dict { PACKAGE_PIN T10 IOSTANDARD LVCMOS33 } [get_ports { led[3] }]
 
 ## ------------------------------------------------------- RGB LD0 (hardware status)
-set_property -dict { PACKAGE_PIN E1 IOSTANDARD LVCMOS33 } [get_ports { led0_r }]
+## The master XDC lists these in the order b, g, r.  A12 read them as r, g, b and
+## put red on E1 and blue on G6; everything built, met timing, programmed and ran
+## byte-perfect, and the only symptom was the wrong COLOUR on the board -- caught
+## by a person looking at it, because a swapped output pin is invisible to every
+## automated check upstream of the pad.  tb/fpga/check_xdc_pins.py now compares
+## every line below against fpga/constraints/arty_a7_100t_pins.txt, which is
+## extracted mechanically from the vendor file rather than read by eye.
+set_property -dict { PACKAGE_PIN G6 IOSTANDARD LVCMOS33 } [get_ports { led0_r }]
 set_property -dict { PACKAGE_PIN F6 IOSTANDARD LVCMOS33 } [get_ports { led0_g }]
-set_property -dict { PACKAGE_PIN G6 IOSTANDARD LVCMOS33 } [get_ports { led0_b }]
+set_property -dict { PACKAGE_PIN E1 IOSTANDARD LVCMOS33 } [get_ports { led0_b }]
 
 ## ------------------------------------------------------------- USB-UART bridge
 ## Naming is from the HOST's point of view: uart_rxd_out is what the FPGA DRIVES
