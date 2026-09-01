@@ -21,6 +21,13 @@ VIVADO_WIN="${VIVADO_WIN:-C:\\AMDDesignTools\\2025.2\\Vivado\\bin\\vivado.bat}"
 STAGE_WIN="${STAGE_WIN:-C:\\Users\\liamf\\rvntt-soc}"
 STAGE_WSL="${STAGE_WSL:-/mnt/c/Users/liamf/rvntt-soc}"
 OUT="${OUT:-$ROOT/fpga/build/soc}"
+# Which program is baked into the BRAM.  $readmemh runs at SYNTHESIS time, so
+# the image is part of the bitstream and a different program means a different
+# implementation run -- there is no loader.  A13 builds the benchmark image
+# through this same script by pointing SOC_MEM at it; the RTL, the constraints
+# and the clock are byte-identical to A12's, which is what makes the two
+# bitstreams comparable.
+SOC_MEM="${SOC_MEM:-$ROOT/fpga/generated/soc_init.mem}"
 
 echo "=== staging sources to $STAGE_WSL ==="
 rm -rf "$STAGE_WSL"
@@ -46,7 +53,12 @@ cp "$ROOT"/fpga/scripts/build_soc.tcl            "$STAGE_WSL/"
 # $readmemh and `include both resolve relative to Vivado's working directory.
 cp "$ROOT"/fpga/generated/soc_clk.svh   "$STAGE_WSL/"
 cp "$ROOT"/fpga/generated/soc_clk.svh   "$STAGE_WSL/rtl/"
-cp "$ROOT"/fpga/generated/soc_init.mem  "$STAGE_WSL/"
+if [ ! -f "$SOC_MEM" ]; then
+  echo "no memory image at $SOC_MEM" >&2
+  exit 2
+fi
+cp "$SOC_MEM" "$STAGE_WSL/soc_init.mem"
+echo "image: $SOC_MEM ($(wc -l < "$SOC_MEM") words)"
 
 echo "=== running Vivado (batch) ==="
 cd "$STAGE_WSL"

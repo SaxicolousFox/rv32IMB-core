@@ -333,6 +333,67 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "fpga/scripts/hw_bringup.py"), "--regress"],
                   timeout=900))
 
+    # A13.  The benchmark port, checked three ways before anything reaches the
+    # board, because each way can fail on its own and the symptoms are identical
+    # from the outside -- a wrong score.
+    #
+    #   bench_printf   the formatter, diffed against glibc over 340 cases.  This
+    #                  is the only path from a cycle counter to a printed number,
+    #                  so a formatting bug and a slow core produce the same
+    #                  artefact and nothing else here can separate them.
+    #   bench_host     Dhrystone and CoreMark compiled NATIVELY, checking
+    #                  CoreMark's own CRCs and Dhrystone's published final values
+    #                  in about a second.  If those are wrong on the board and
+    #                  right here the core is at fault; if wrong in both, the port
+    #                  is.  Without this run those two are one symptom.
+    #   bench_sim      the same image on the RTL under Verilator, which is also
+    #                  where mcycle is compared against ground truth: Verilator
+    #                  counted the clock edges itself, and Spike cannot be the
+    #                  reference because its mcycle advances per instruction.
+    t.append(Test("bench_printf", "meta",
+                  [py, os.path.join(ROOT, "tb/unit/test_bench_printf.py"),
+                   "--inject"],
+                  timeout=300))
+
+    t.append(Test("bench_host", "sw",
+                  [py, os.path.join(ROOT, "tb/unit/test_bench_host.py")],
+                  timeout=600))
+
+    t.append(Test("bench_sim", "rtl",
+                  [py, os.path.join(ROOT, "tb/unit/test_bench_verilator.py"),
+                   "--blocks", "2"],
+                  requires=["verilator", "riscv-none-elf-gcc"], timeout=1800))
+
+    # The benchmark capture parser against itself: twenty deliberately-broken
+    # captures it must reject, including two that RELAX a check (--allow-short
+    # and --functional-only), because an escape hatch that does not actually
+    # open is a second way to pass vacuously.
+    t.append(Test("bench_uart_parser", "meta",
+                  [py, os.path.join(ROOT, "tb/fpga/parse_bench_uart.py"),
+                   "--selftest"],
+                  timeout=120))
+
+    # A13 on real hardware, and the only place the reported scores come from.
+    # Same opt-in and same SKIP rules as soc_hardware, and the same reason: this
+    # reconfigures the FPGA.  --min-blocks 3 is the plan's "reproducible across
+    # three runs", enforced rather than eyeballed -- the parser requires the
+    # cycle counts to be EXACTLY equal across the three, which on a machine with
+    # no cache and no interrupts is the right bar.
+    t.append(Test("bench_hardware", "fpga",
+                  [py, os.path.join(ROOT, "fpga/scripts/hw_bringup.py"),
+                   "--regress",
+                   "--bit", os.path.join(ROOT, "fpga/build/bench/rvntt_soc_top.bit"),
+                   "--seconds", "60", "--send-byte", "-1",
+                   "--out-name", "bench_uart.log",
+                   "--parser", os.path.join(ROOT, "tb/fpga/parse_bench_uart.py"),
+                   # `--parser-arg=--flag` rather than `--parser-arg --flag`:
+                   # argparse reads a value beginning with `-` as the next
+                   # option and rejects the separated form.
+                   "--parser-arg=--min-blocks", "--parser-arg=3",
+                   "--parser-arg=--json",
+                   "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench/a13.json")],
+                  timeout=1800))
+
     # Mutation testing (A6+).  ON by default, at about 3m45s -- it rebuilds the
     # simulator once per mutation, and A11's entries add a riscv-formal check
     # each on top, so it is the most expensive thing here by a wide margin.  It is on anyway because it is the only test that checks the

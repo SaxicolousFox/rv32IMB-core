@@ -22,6 +22,8 @@ toolchain/llvm-project
 toolchain/riscv-tests/
 toolchain/riscv-arch-test/
 toolchain/riscv-formal/
+toolchain/coremark/
+toolchain/coremark
 toolchain/install/
 toolchain/install
 toolchain/.uv-cache
