@@ -61,17 +61,89 @@ ALU   = "rtl/core/rvntt_alu.sv"
 CSR   = "rtl/core/rvntt_csr.sv"
 RF    = "rtl/core/rvntt_regfile.sv"
 RVFI  = "rtl/core/rvntt_rvfi.sv"
+MMIO    = "rtl/soc/rvntt_mmio.sv"
+SOCTOP  = "rtl/soc/rvntt_soc_top.sv"
+UARTRX  = "rtl/soc/rvntt_uart_rx.sv"
 
 # Files that must be MIRRORED so they can be mutated, but which are not part of
 # the Verilator simulation build.  rvntt_rvfi.sv is instantiated only under
 # `RISCV_FORMAL, so t4.RTL -- which is the simulator's source list -- does not
 # name it, and without this a mutation to the RVFI port would be reported as
 # "not in the build's source list" rather than run.
-MIRROR_EXTRA = [RVFI]
+# A12's SoC is a second design over the same core: rvntt_soc_top instantiates
+# rvntt_core, rvntt_ram and rvntt_mmio, and none of them are in t4.RTL either
+# (that list is the CORE simulator's).  Mirroring them lets `soc:` mutations
+# reach the address decoder, the peripherals and the top level.
+MIRROR_EXTRA = [RVFI, MMIO, SOCTOP, UARTRX,
+                "rtl/soc/rvntt_soc_sim_top.sv", "rtl/soc/rvntt_clkgen.sv",
+                "rtl/soc/rvntt_uart_tx.sv", "rtl/soc/rvntt_ram.sv",
+                "rtl/common/rvntt_sync_reset.sv"]
 
 RVFI_RUNNER = os.path.join(ROOT, "tb/formal/run_riscv_formal.py")
+SOC_RUNNER  = os.path.join(ROOT, "tb/unit/test_soc_verilator.py")
 
 MUTATIONS = [
+    # --------------------------------------------------------------- A12 ----
+    dict(step="A12", name="mmio_store_not_gated_from_ram",
+         why="an MMIO store also reaches the RAM.  rvntt_ram ALIASES rather "
+             "than faulting, so a UART write lands at (addr-BASE) truncated "
+             "and quietly corrupts the program that is running",
+         edits=[(MMIO, "  always_comb ram_be = is_ram ? dmem_be : 4'b0000;",
+                       "  always_comb ram_be = dmem_be;")],
+         caught=["soc"]),
+
+    # Formulated as a wrong VALUE in sel_ram_q rather than as
+    # `dmem_rdata = is_ram ? ...`, which was the first attempt: that version left
+    # sel_ram_q unreferenced and Verilator refused to build it.  A mutation that
+    # does not compile proves nothing, so every signal has to stay live.
+    dict(step="A12", name="mmio_read_mux_never_selects_mmio",
+         why="the read mux always returns RAM data, so every peripheral read "
+             "gets whatever the aliased RAM word holds.  The bus has no "
+             "handshake and no error response, so nothing downstream can tell",
+         edits=[(MMIO, "      sel_ram_q    <= is_ram;",
+                       "      sel_ram_q    <= 1'b1;")],
+         caught=["soc"]),
+
+    # This one ESCAPED twice before it meant anything, and both reasons are
+    # worth keeping.  First formulation moved the sample to 25% of a bit, which
+    # is still comfortably inside it -- a mutation that does not change
+    # behaviour proves nothing.  Second, even a true boundary sample decodes
+    # perfectly when the host's edges are ideal, so with the original 8-cycle
+    # sim baud NOTHING could distinguish the two.  tb_soc.cpp now transmits ~2.9%
+    # slow at a 34-cycle divisor, which is what the receiver claims to tolerate;
+    # the STIMULUS was the gap, not the checker.
+    dict(step="A12", name="uart_rx_samples_on_bit_edge",
+         why="the receiver samples on the bit BOUNDARY instead of the midpoint, "
+             "so it decodes correctly only from a host with perfect edges and "
+             "shifts by a bit against any real baud mismatch",
+         edits=[(UARTRX, "              div_q   <= DIV_W'(DIVISOR - 1);\n"
+                         "              bit_q   <= '0;\n"
+                         "              state_q <= R_DATA;",
+                         "              div_q   <= DIV_W'(DIVISOR / 2 - 1);\n"
+                         "              bit_q   <= '0;\n"
+                         "              state_q <= R_DATA;")],
+         caught=["soc"]),
+
+    # NOT "the synchroniser is missing".  Bypassing the two-flop synchroniser
+    # (.sw(sw) instead of .sw(sw_sync_q)) is behaviourally IDENTICAL under a
+    # testbench that holds the switches steady, so that mutation would escape --
+    # and the stimulus is the reason, not the checker.  Metastability is not
+    # simulatable here; the synchroniser is justified by the XDC's false paths
+    # (rtl/soc/CLAUDE.md) and by review, not by this harness.  What IS checkable
+    # is that the readback path works at all, so that is what this claims.
+    # Zeroing the synchroniser output was the obvious formulation and left
+    # sw_meta_q unreferenced, so it would not build.  Swapping the two fields
+    # keeps every signal live AND is the more realistic bug: a packed read whose
+    # field order is wrong looks completely plausible in review.
+    dict(step="A12", name="gpio_in_fields_swapped",
+         why="GPIO_IN returns {sw, btn} instead of {btn, sw}, so software reads "
+             "the buttons where it expects the switches.  Both halves are still "
+             "live, which is exactly why a smoke test that only checks 'GPIO_IN "
+             "is nonzero' would pass",
+         edits=[(MMIO, "      R_GPIO_IN:   mmio_rdata_c = {24'b0, btn, sw};",
+                       "      R_GPIO_IN:   mmio_rdata_c = {24'b0, sw, btn};")],
+         caught=["soc"]),
+
     # ---------------------------------------------------------------- A6 ----
     dict(step="A6", name="fwd_priority_swapped",
          why="the older producer wins over the younger one -- the exact case "
@@ -627,11 +699,33 @@ def run_test(kind, fx, exe, rtl_dir, work, mut_name, quiet=True):
     return _run_test(kind, fx, exe, rtl_dir, work, mut_name)
 
 
+def run_soc(rtl_dir, work, mut_name):
+    """Build and run the A12 SoC testbench from a mirrored RTL tree.
+
+    Unlike the core tests this one has its own Verilator build (a different top,
+    a different memory image), so it gets its own object directory per mutation
+    -- sharing one would have each mutation silently rebuild over the last.
+    """
+    build = os.path.join(work, "obj_soc_" + mut_name)
+    r = subprocess.run([sys.executable, SOC_RUNNER,
+                        "--rtl-dir", rtl_dir, "--build-dir", build],
+                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    out = r.stdout.decode("utf-8", "replace")
+    # A mutation that fails to BUILD proves nothing -- it has to produce a
+    # design that elaborates and then misbehaves.  Distinguish the two.
+    if "SOC_TB_OK" not in out and "SOC_TB_FAIL" not in out:
+        raise RuntimeError("the SoC testbench did not run for %s:\n%s"
+                           % (mut_name, out[-2500:]))
+    return r.returncode == 0
+
+
 def _run_test(kind, fx, exe, rtl_dir, work, mut_name):
     if kind.startswith("formal:"):
         return run_formal(work, mut_name, rtl_dir, kind.split(":", 1)[1])
     if kind.startswith("rvfi:"):
         return run_rvfi(rtl_dir, kind.split(":", 1)[1])
+    if kind == "soc":
+        return run_soc(rtl_dir, work, mut_name)
     if kind.startswith("directed:"):
         prog = kind.split(":", 1)[1]
         return run_program_test(exe, fx.directed_elf(prog), work, fx.image, prog)

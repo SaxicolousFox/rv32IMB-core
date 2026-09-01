@@ -181,7 +181,8 @@ confirm it is satisfied.
 | M4 | Pipeline passes 1000 random programs in lockstep cosim vs. Spike | ✅ at max hazard density |
 | M5 | RISCOF RV32I compliance suite passes | ✅ 38/38 `I`, plus hints and privilege |
 | M6 | riscv-formal checks pass | ✅ 43 checks at BMC depth 14 |
-| M7–M16 | — | not started |
+| M7 | Core-only bitstream: Fmax + Dhrystone + CoreMark on hardware | ⏳ **A12 done, A13 not started** |
+| M8–M16 | — | not started |
 
 **M5 is a compliance claim, and its boundaries are recorded rather than
 implied.** The RV32I `I` suite passes 38/38 and the report is committed at
@@ -204,9 +205,28 @@ mux and a writeback mux disagreeing on `RES_XKNTT` — and its first *dishonest*
 run reported 43/43 over a broken adder, because sby exits 0 on a failed check
 by design. See `rtl/core/CLAUDE.md`.
 
-**What is still missing after M6**: no synthesis or timing closure, no
-bitstream, and no Xkntt execution — the decoder recognises the extension but no
-stage runs it.
+**A12 is done and hardware-confirmed, and it is only half of M7.** The SoC —
+`rvntt_core` + a 128 KB dual-port BRAM + a memory-mapped UART and GPIO — loads,
+runs a program out of BRAM, and prints over the USB-UART from the board.
+**Fmax = 73.121 MHz** (Vivado 2025.2, `xc7a100tcsg324-1`, **-1** speed grade,
+default strategy), measured by the plan's binary search over six full
+implementation runs; 74.074 MHz is the fastest constraint that fails. 2114 LUTs,
+905 FFs, 32 BRAM tiles. The critical path is EX/MEM `rd_addr` → forwarding mux →
+ALU → store byte-enables → BRAM `WEA`, and it is **78% route delay at 3.3%
+utilisation** — the design is slow because it is spread across the 32 BRAMs, not
+because the logic is deep. See `rtl/soc/CLAUDE.md` and `docs/fpga-bringup.md`.
+
+**M7 requires Dhrystone and CoreMark on hardware as well, so it is NOT met** and
+nothing is tagged. §12's text is "Core-only bitstream: Fmax measured, Dhrystone +
+CoreMark on hardware" — that is A12 *and* A13.
+
+The bring-up loop needs no human: `fpga/scripts/hw_bringup.py` programs the board
+over JTAG in batch, captures the UART through a PowerShell helper whose output
+WSL reads back from `/mnt/c`, and parses it. Only the LEDs still need eyes.
+
+**What is still missing after A12**: the benchmarks (A13), and any Xkntt
+execution — the decoder recognises the extension and LD0 red lights if one ever
+retires, but no stage runs it.
 
 **C6 is only partially done**, which gates more than it appears to: there is no
 TIER2 backend, no RTL verification, and no `make KAT` target. Any milestone
