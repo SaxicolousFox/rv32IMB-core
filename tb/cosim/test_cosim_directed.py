@@ -35,13 +35,16 @@ PROGRAMS = [
     ("a6_forward", os.path.join(ROOT, "sw/tests/a6_forward.S")),
     ("a7_loaduse", os.path.join(ROOT, "sw/tests/a7_loaduse.S")),
     ("a8_control", os.path.join(ROOT, "sw/tests/a8_control.S")),
+    ("a14_muldiv", os.path.join(ROOT, "sw/tests/a14_muldiv.S")),
 ]
 
 
 def compile_s(path, tmp, name):
     elf = os.path.join(tmp, name + ".elf")
     r = subprocess.run(
-        ["riscv-none-elf-gcc", "-march=rv32i_zicsr", "-mabi=ilp32",
+        # rv32im as of A14: a14_muldiv.S is written in M instructions, and the
+        # other three programs assemble identically either way.
+        ["riscv-none-elf-gcc", "-march=rv32im_zicsr", "-mabi=ilp32",
          "-nostdlib", "-nostartfiles", "-T", t4.LD, "-o", elf, path],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if r.returncode != 0:

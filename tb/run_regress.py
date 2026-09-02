@@ -207,6 +207,24 @@ def discover() -> list:
                    "--design", "rvntt_csr", "--depth", "6"],
                   requires=["sby", "yosys"], timeout=600))
 
+    # A14/A15.  The multi-cycle unit, standing alone.  DEPTH 37 -- the first
+    # proof here whose depth is set by a LATENCY rather than by a dependency
+    # distance: a divide presents its result on its 34th EX cycle, so nothing
+    # about it is observable before step 34.  This is MODS_A 3.2's route 2, and
+    # it exists because riscv-formal cannot reach the divider at all: that check
+    # set runs at depth 14 and abstracts this unit's arithmetic away.
+    #
+    # It proves the MAGNITUDE LOOP completely -- via a per-iteration invariant
+    # carried in ghost registers, because the direct algebraic statement asks
+    # the solver for multiplier equivalence and does not return.  The sign
+    # fixup and the quotient/remainder selection are covered by rv32um,
+    # a14_muldiv.S and cosimulation instead; rvntt_muldiv.sv states that
+    # boundary.  About three minutes, which is the most expensive proof here.
+    t.append(Test("formal_muldiv", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_muldiv", "--depth", "37"],
+                  requires=["sby", "yosys"], timeout=1800))
+
     # A4.  Builds sw/tests/a4_checksum.S, runs it on Spike for the reference,
     # then on the RTL.  Needs the RISC-V toolchain and Spike as well as
     # Verilator, so all three are listed -- a missing one must SKIP loudly
@@ -231,13 +249,19 @@ def discover() -> list:
     # CYCLE SPAN against tb/cosim/cycle_model.py.  A phantom stall produces a
     # byte-identical log, so the first check alone cannot see one.
     #
+    # --mul-density is A14 (MODS_A): 0.10 rather than 1.0, because a 34-cycle
+    # divide is 34 cycles in which nothing else is exercised -- a denser stream
+    # would trade away the hazard coverage the other three knobs buy.  The span
+    # check covers M too, via cycle_model.py's Sum(latency-1) term, which is
+    # what makes the LATENCY a checked property and not an assumption.
+    #
     # 100 programs here; the step's acceptance run is 1000, which takes about
     # two and a half minutes and is not something to pay for on every regress.
     t.append(Test("cosim_commit_log", "cosim",
                   [py, os.path.join(ROOT, "tb/cosim/test_cosim_a5.py"),
                    "-n", "100", "--len", "300",
                    "--raw-density", "1.0", "--load-use-density", "1.0",
-                   "--branch-density", "0.12"],
+                   "--branch-density", "0.12", "--mul-density", "0.10"],
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=1800))
 
@@ -257,8 +281,13 @@ def discover() -> list:
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=900))
 
-    # A9.  The first externally authored suite the core has faced: everything
-    # before it was written alongside the design and shares its blind spots.
+    # A9, plus A14's rv32um.  The first externally authored suite the core has
+    # faced: everything before it was written alongside the design and shares
+    # its blind spots.  A14 added the eight M tests, and fault injection has
+    # already found two things they cannot see -- a duplicated retirement (the
+    # last one writes the right value) and a divide-by-zero remainder returned
+    # as a magnitude (their only negative dividend over zero is -2^31, whose
+    # magnitude is itself).  See tb/mutate/run_mutation.py.
     # SKIPs itself with an explanatory message if toolchain/riscv-tests is not
     # checked out, rather than failing -- it is a third-party checkout, like
     # spike-src, and is not in the repository.

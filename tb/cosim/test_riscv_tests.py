@@ -38,7 +38,7 @@ import spike_asm                   # noqa: E402
 import test_core_verilator as t4   # noqa: E402
 
 TESTS_DIR = os.path.join(ROOT, "toolchain/riscv-tests")
-ISA = "rv32i_zicsr_zicntr"
+ISA = "rv32im_zicsr_zicntr"      # M as of A14 (MODS_A)
 
 # The RV32I user-level suite, minus the two that are outside this core's ISA.
 RV32UI = [
@@ -47,6 +47,12 @@ RV32UI = [
     "sb", "sh", "simple", "sll", "slli", "slt", "slti", "sltiu", "sltu", "sra",
     "srai", "srl", "srli", "sub", "sw", "xor", "xori", "ld_st", "st_ld",
 ]
+
+# The M extension (MODS_A A14).  Eight tests, one per instruction, and they are
+# the reason A14 built M rather than starting from Xkntt: they are somebody
+# else's tests for an instruction set with a published definition, which is
+# exactly what the custom extension does not have.
+RV32UM = ["mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"]
 
 # Machine mode.  See SKIPPED below for the ones deliberately absent.
 RV32MI = [
@@ -60,7 +66,7 @@ RV32MI = [
 # passed them would be implementing something it deliberately does not have.
 SKIPPED = [
     ("rv32ui", "fence_i",
-     "Zifencei. The target ISA is rv32i_zicsr_zicntr; FENCE.I is not in it, "
+     "Zifencei. The target ISA is rv32im_zicsr_zicntr; FENCE.I is not in it, "
      "and the decoder rejects it by design (rvntt_decode.sv)."),
     ("rv32ui", "ma_data",
      "requires misaligned load/store to SUCCEED. This core traps on them, "
@@ -78,7 +84,7 @@ def compile_test(suite, name, tmp):
         raise FileNotFoundError(src)
     elf = os.path.join(tmp, f"{suite}-p-{name}.elf")
     r = subprocess.run(
-        ["riscv-none-elf-gcc", "-march=rv32i_zicsr", "-mabi=ilp32",
+        ["riscv-none-elf-gcc", "-march=rv32im_zicsr", "-mabi=ilp32",
          "-nostdlib", "-nostartfiles", "-fno-pie",
          "-I", os.path.join(TESTS_DIR, "isa/macros/scalar"),
          "-I", os.path.join(TESTS_DIR, "env/p"),
@@ -130,7 +136,8 @@ def run_rtl(exe, elf, tmp, image_path):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--suite", choices=["all", "rv32ui", "rv32mi"], default="all")
+    ap.add_argument("--suite", choices=["all", "rv32ui", "rv32um", "rv32mi"],
+                    default="all")
     ap.add_argument("--only", default=None, help="one test by name")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
@@ -145,6 +152,8 @@ def main():
     plan = []
     if a.suite in ("all", "rv32ui"):
         plan += [("rv32ui", n) for n in RV32UI]
+    if a.suite in ("all", "rv32um"):
+        plan += [("rv32um", n) for n in RV32UM]
     if a.suite in ("all", "rv32mi"):
         plan += [("rv32mi", n) for n in RV32MI]
     if a.only:

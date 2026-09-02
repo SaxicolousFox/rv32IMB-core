@@ -155,6 +155,68 @@ def parse_report(path):
     return passed, failed, {k: tuple(v) for k, v in per.items()}
 
 
+ISA_YAML = os.path.join(HERE, "rvntt/rvntt_isa.yaml")
+CSR_SV   = os.path.join(ROOT, "rtl/core/rvntt_csr.sv")
+
+
+def check_isa_consistency():
+    """The ISA this core claims is written in two files.  Make them agree.
+
+    A15 found the third copy the hard way: the Spike reference plugin held its
+    own literal `rv32i`, so when A14 added M the arch-test M cases were compiled
+    -march=rv32im and handed to a Spike told rv32i.  That is not a failure -- the
+    illegal instruction traps to an unset handler and the model SPINS.  The run
+    stopped making progress for 25 minutes and reported nothing at all.
+
+    The plugin now derives its string from the yaml, which leaves two copies:
+    the yaml's own ISA/misa, and rvntt_csr.sv's MISA_VALUE.  Those cannot be
+    derived from each other -- one is a description for a compliance framework,
+    the other is a register the hardware reports -- so they are COMPARED, in the
+    same spirit as model/rv32i_ref.py's check_pkg_agreement().
+
+    Costs milliseconds and runs before anything else.  It catches the CAUSE; the
+    plugin's `timeout 600` catches the symptom, and a check that only catches
+    symptoms takes 600 seconds per test to say so.
+    """
+    with open(ISA_YAML) as f:
+        yaml_text = f.read()
+    m = re.search(r"^\s*ISA:\s*(\S+)", yaml_text, re.M)
+    if not m:
+        raise SystemExit("RISCOF_FAIL: no `ISA:` in %s" % ISA_YAML)
+    isa = m.group(1)
+    m = re.search(r"^\s*reset-val:\s*(0x[0-9a-fA-F]+)", yaml_text, re.M)
+    if not m:
+        raise SystemExit("RISCOF_FAIL: no misa `reset-val:` in %s" % ISA_YAML)
+    yaml_misa = int(m.group(1), 16)
+
+    # misa: bits 31:30 are MXL (1 = RV32), and bit (letter - 'A') is set for
+    # each single-letter extension.  Z* and X* extensions have no bit.
+    letters = re.match(r"RV32([A-WY]*)", isa.upper())
+    want = 0x4000_0000
+    for c in (letters.group(1) if letters else "I"):
+        want |= 1 << (ord(c) - ord("A"))
+    if yaml_misa != want:
+        raise SystemExit(
+            "RISCOF_FAIL: %s says ISA %s but misa reset-val 0x%08x; the "
+            "extension letters imply 0x%08x" % (ISA_YAML, isa, yaml_misa, want))
+
+    with open(CSR_SV) as f:
+        m = re.search(r"MISA_VALUE\s*=\s*32'h([0-9a-fA-F_]+)", f.read())
+    if not m:
+        raise SystemExit("RISCOF_FAIL: no MISA_VALUE in %s" % CSR_SV)
+    rtl_misa = int(m.group(1).replace("_", ""), 16)
+    if rtl_misa != yaml_misa:
+        raise SystemExit(
+            "RISCOF_FAIL: misa disagrees between the compliance description and "
+            "the hardware -- %s says 0x%08x, %s says 0x%08x.  RISCOF selects "
+            "tests from the first and the core answers with the second, so a "
+            "mismatch either runs tests the core cannot execute or silently "
+            "drops coverage." % (ISA_YAML, yaml_misa, CSR_SV, rtl_misa))
+    print("ISA claim: %s, misa 0x%08x -- yaml and rvntt_csr.sv agree"
+          % (isa, yaml_misa))
+    return isa, yaml_misa
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--keep", default=None,
@@ -176,6 +238,8 @@ def main():
         print("RISCOF_SKIP: riscof is not installed in the venv.\n"
               "  toolchain/opt/uv-*/uv pip install --python .venv/bin/python riscof")
         return 0
+
+    check_isa_consistency()
 
     tmp = a.keep or tempfile.mkdtemp(prefix="riscof_")
     os.makedirs(tmp, exist_ok=True)

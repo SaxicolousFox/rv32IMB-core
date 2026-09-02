@@ -22,8 +22,18 @@ TWO DELIBERATE DIFFERENCES FROM `spike_simple`:
     from the DUT is a reference that hides exactly the disagreements worth
     finding.  (The RV32I suite has no misaligned tests, so today this changes
     nothing -- which is the right time to get it right.)
-  * the ISA string is built only from what this core claims.  There is no long
-    if-chain over extensions it does not have.
+  * the ISA string is built only from what this core claims -- READ OUT OF THE
+    ISA YAML, not written here.  It used to be the literal 'rv32i' plus an
+    optional '_zicsr', which was true and stayed true right up until A14 added
+    M.  The tests were then compiled -march=rv32im from the suite's own ISA
+    field while Spike was still told rv32i, so it took an illegal-instruction
+    trap on the first `mul`, vectored to an unset handler, and SPUN FOREVER.
+    Nothing failed; the run simply stopped making progress for 25 minutes.
+    That is the same failure mode -mno-relax produces (run_riscof.py's header),
+    and it has now happened twice -- so the reference also gets a TIMEOUT below.
+    THE ISA STRING LIVES IN THREE PLACES and all three must move together:
+    tb/riscof/rvntt/rvntt_isa.yaml, rvntt_csr.sv's MISA_VALUE, and here.  This
+    one is now derived from the first, so there are really only two.
 
 THE ENVIRONMENT IS SHARED WITH THE DUT on purpose.  `model_test.h` and
 `link.ld` define the PLATFORM -- where memory is, how a test halts, where the
@@ -32,6 +42,7 @@ meaningless.  What must not be shared is how each side computes the answer, and
 none of that is in there.
 """
 import os
+import re
 import shlex
 import logging
 
@@ -85,9 +96,15 @@ class spike_ref(pluginTemplate):
         ispec = utils.load_yaml(isa_yaml)['hart0']
         if 64 in ispec['supported_xlen']:
             raise SystemExit("spike_ref is configured for RV32 only")
-        self.isa = 'rv32i'
-        if "Zicsr" in ispec["ISA"]:
+        # The single-letter extensions, taken from the yaml rather than
+        # written down.  [A-WY] deliberately excludes X and Z, which introduce
+        # multi-letter names and must not be swallowed as letters.
+        m = re.match(r"RV32([A-WY]*)", ispec["ISA"].upper())
+        self.isa = 'rv32' + (m.group(1).lower() if m and m.group(1) else 'i')
+        if "zicsr" in ispec["ISA"].lower():
             self.isa += '_zicsr'
+        logger.info("spike_ref: reference ISA is %s (from %s)"
+                    % (self.isa, ispec["ISA"]))
         self.compile_cmd += ' -mabi=ilp32'
 
     def runTests(self, testList):
@@ -106,7 +123,14 @@ class spike_ref(pluginTemplate):
             macros = ' -D' + " -D".join(entry['macros'])
             cmd = self.compile_cmd.format(entry['isa'].lower(),
                                           entry['test_path'], elf, macros)
-            sim = '{} --isa={} +signature={} +signature-granularity=4 {}'.format(
+            # A TIMEOUT, because a reference model that hangs must FAIL rather
+            # than stop the run silently.  A mismatch between the ISA the test
+            # is compiled for and the ISA Spike is told about does not produce
+            # an error: the illegal instruction traps to an unset handler and
+            # the model spins.  600 s is roughly fifty times the slowest test
+            # here, so it can only fire on a real hang.
+            sim = ('timeout 600 {} --isa={} +signature={} '
+                   '+signature-granularity=4 {}').format(
                 shlex.quote(self.dut_exe), self.isa, shlex.quote(sig), elf)
             make.add_target('@cd {}; {}; {};'.format(test_dir, cmd, sim))
 

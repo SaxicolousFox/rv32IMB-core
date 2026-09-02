@@ -34,6 +34,7 @@ RTL = [
     os.path.join(ROOT, "rtl/core/rvntt_hazard.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_branch.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_csr.sv"),
+    os.path.join(ROOT, "rtl/core/rvntt_muldiv.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_core.sv"),
     os.path.join(ROOT, "rtl/soc/rvntt_ram.sv"),
     os.path.join(ROOT, "rtl/soc/rvntt_core_sim_top.sv"),

@@ -94,7 +94,23 @@ async def test_directed_encodings(dut):
     CASES = [
         (0x00000033, "add x0,x0,x0",            0),
         (0x40208033, "sub x0,x1,x2",            0),
-        (0x02008033, "funct7=0000001 (M ext)",  1),
+        # M (A14).  All eight are legal; the two funct7 values on either side
+        # of 0000001 are not, which is what pins "M is one funct7" rather than
+        # "the low funct7 bits are ignored".  Written out one by one because a
+        # rule that legalises eight encodings out of 2^32 is exactly the shape
+        # the random sweep covers by luck and a directed test covers on purpose
+        # -- the same lesson A3's missing SYSTEM reserved-field case taught.
+        (0x02C58633, "mul    a2,a1,a2",         0),
+        (0x02C59633, "mulh   a2,a1,a2",         0),
+        (0x02C5A633, "mulhsu a2,a1,a2",         0),
+        (0x02C5B633, "mulhu  a2,a1,a2",         0),
+        (0x02C5C633, "div    a2,a1,a2",         0),
+        (0x02C5D633, "divu   a2,a1,a2",         0),
+        (0x02C5E633, "rem    a2,a1,a2",         0),
+        (0x02C5F633, "remu   a2,a1,a2",         0),
+        (0x04C58633, "OP funct7=0000010",       1),
+        (0x06C58633, "OP funct7=0000011",       1),
+        (0x02C5D613, "OP-IMM funct7=0000001",   1),
         (0x00001013, "slli",                    0),
         (0x02001013, "slli with insn[25] set",  1),
         (0x40005013, "srai",                    0),

@@ -58,6 +58,30 @@ IMM_FMTS = {
 }
 IMM_FMT_WIDTH = 3         # imm_fmt_e is logic [2:0]
 
+# ------------------------------------------------------- multi-cycle latency
+# EX OCCUPANCY in cycles for the M instructions (MODS_A A14).  An instruction
+# with occupancy N sits in EX for N cycles and inserts N-1 bubbles behind it,
+# which is the term tb/cosim/cycle_model.py adds to its span prediction.
+#
+# DUPLICATED FROM rv32i_pkg.sv ON PURPOSE, and compared by
+# check_pkg_agreement().  Reading the number out of the RTL would make the
+# "independent" cycle model agree with the pipeline by construction, which is
+# precisely what the model exists not to do; duplicating it and checking makes a
+# retune a test failure rather than a silent re-derivation.
+MUL_CYCLES = 4
+DIV_CYCLES = 34
+
+MULDIV_CYCLES = {
+    0b000: MUL_CYCLES,   # MUL
+    0b001: MUL_CYCLES,   # MULH
+    0b010: MUL_CYCLES,   # MULHSU
+    0b011: MUL_CYCLES,   # MULHU
+    0b100: DIV_CYCLES,   # DIV
+    0b101: DIV_CYCLES,   # DIVU
+    0b110: DIV_CYCLES,   # REM
+    0b111: DIV_CYCLES,   # REMU
+}
+
 
 # ------------------------------------------------------------------ helpers
 def u32(x):
@@ -219,7 +243,21 @@ def check_pkg_agreement():
                 f"but {val} in model/rv32i_ref.py")
             checked += 1
 
-    assert checked == len(ALU_OPS) + len(IMM_FMTS)
+    # The multi-cycle latency contract (A14).  Not an enum, so it is parsed
+    # separately -- and it is the number a performance change is most likely to
+    # touch without anyone thinking of the cycle model.
+    for name, expected in (("MULDIV_MUL_CYCLES", MUL_CYCLES),
+                           ("MULDIV_DIV_CYCLES", DIV_CYCLES)):
+        m = re.search(r"localparam\s+int\s+" + name + r"\s*=\s*(\d+)\s*;", text)
+        assert m, f"could not find `localparam int {name}` in {_PKG}"
+        assert int(m.group(1)) == expected, (
+            f"{name} is {m.group(1)} in the package but {expected} in "
+            f"model/rv32i_ref.py -- if the latency really changed, change it "
+            f"here AND in tb/cosim/cycle_model.py's prediction, or the "
+            f"independent cycle model silently stops being independent")
+        checked += 1
+
+    assert checked == len(ALU_OPS) + len(IMM_FMTS) + 2
     return checked
 
 
@@ -281,11 +319,13 @@ CTRL_FIELDS = [
     "reg_write", "mem_read", "mem_write", "mem_op", "branch", "jump", "jalr",
     "alu_op", "alu_src_a", "alu_src_b", "result_sel", "imm_fmt",
     "uses_rs1", "uses_rs2", "uses_rs3",
-    "is_ecall", "is_ebreak", "is_mret", "is_csr", "is_xkntt", "xkntt_op",
+    "is_ecall", "is_ebreak", "is_mret", "is_csr",
+    "is_muldiv", "muldiv_op",
+    "is_xkntt", "xkntt_op",
     "is_illegal",
 ]
 
-F7_BASE, F7_ALT = 0b0000000, 0b0100000
+F7_BASE, F7_ALT, F7_MULDIV = 0b0000000, 0b0100000, 0b0000001
 
 # funct3 -> alu_op for the non-shift OP/OP-IMM operations.
 _ALU_BY_F3 = {
@@ -311,8 +351,8 @@ def decode(insn):
     for why they are not one rule:
       1. Xkntt reserved fields are strict (delegated to model/isa/xkntt.py).
       2. FENCE's unused fields are ignored, per the base ISA.
-      3. Anything outside rv32i_zicsr_zicntr_xkntt0p1 is illegal -- no M, no
-         Zifencei.
+      3. Anything outside rv32im_zicsr_zicntr_xkntt0p1 is illegal.  M is IN it
+         as of A14 (MODS_A); Zifencei is not, so FENCE.I stays illegal.
     """
     insn = u32(insn)
     opcode = bits(insn, 6, 0)
@@ -382,7 +422,14 @@ def decode(insn):
     elif opcode == OPC_OP:
         c.update(reg_write=1, uses_rs1=1, uses_rs2=1, alu_src_b=SRCB_RS2,
                  result_sel=RES_ALU)
-        if funct3 == 0b000:                         # ADD / SUB
+        if funct7 == F7_MULDIV:
+            # M (A14).  Total: all eight funct3 values are legal under this
+            # funct7, so there is no illegal case here.  result_sel stays
+            # RES_ALU because rvntt_core delivers the product or quotient
+            # through `ex_result`, not through a new result_sel member.
+            c.update(is_muldiv=1, muldiv_op=funct3, alu_op=ALU_ADD,
+                     is_illegal=0)
+        elif funct3 == 0b000:                       # ADD / SUB
             c.update(alu_op=ALU_SUB if f7_alt else ALU_ADD,
                      is_illegal=0 if (f7_base or f7_alt) else 1)
         elif funct3 == 0b101:                       # SRL / SRA

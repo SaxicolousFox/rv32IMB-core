@@ -114,8 +114,40 @@ package rv32i_pkg;
   localparam logic [2:0] F3_KNTT_STAT  = 3'd3;
 
   // ----------------------------------------------------------------- funct7
-  localparam logic [6:0] F7_BASE = 7'b0000000;   // ADD, SRL, SLLI, SRLI, ...
-  localparam logic [6:0] F7_ALT  = 7'b0100000;   // SUB, SRA, SRAI
+  localparam logic [6:0] F7_BASE   = 7'b0000000;   // ADD, SRL, SLLI, SRLI, ...
+  localparam logic [6:0] F7_ALT    = 7'b0100000;   // SUB, SRA, SRAI
+  localparam logic [6:0] F7_MULDIV = 7'b0000001;   // M (A14)
+
+  // M funct3.  All eight values are legal under F7_MULDIV, which is why
+  // ctrl_t.muldiv_op carries funct3 verbatim rather than being an enum: there
+  // is no reserved encoding to keep representable, but there is also nothing to
+  // gain from a second name for a field that is already total.
+  localparam logic [2:0] F3_MUL    = 3'b000;
+  localparam logic [2:0] F3_MULH   = 3'b001;
+  localparam logic [2:0] F3_MULHSU = 3'b010;
+  localparam logic [2:0] F3_MULHU  = 3'b011;
+  localparam logic [2:0] F3_DIV    = 3'b100;
+  localparam logic [2:0] F3_DIVU   = 3'b101;
+  localparam logic [2:0] F3_REM    = 3'b110;
+  localparam logic [2:0] F3_REMU   = 3'b111;
+
+  // ------------------------------------------------------- multi-cycle EX
+  // THE LATENCY CONTRACT, in cycles of EX OCCUPANCY -- not in pipeline stages.
+  // An instruction with occupancy N sits in EX for N cycles and therefore
+  // inserts N-1 bubbles behind it, which is exactly the term tb/cosim/
+  // cycle_model.py adds to its span prediction.  model/rv32i_ref.py duplicates
+  // both numbers and check_pkg_agreement() parses this file to compare them, so
+  // retuning the divider here without retuning the model fails a test rather
+  // than silently making the independent cycle model agree by construction.
+  //
+  // MUL is 4 because the multiplier carries three register stages (operand,
+  // product, output) so that Vivado can pack AREG/BREG, MREG and PREG into the
+  // DSP48E1 -- plan B1's advice, for plan B1's reason.  DIV is 34 because the
+  // radix-2 restoring loop is one load cycle, 32 iterations and one fixup
+  // cycle, and it is DATA-INDEPENDENT: an early-out on a small dividend would
+  // make the cycle model unbuildable (MODS_A A14).
+  localparam int MULDIV_MUL_CYCLES = 4;
+  localparam int MULDIV_DIV_CYCLES = 34;
 
   // SYSTEM funct12 (the whole 31:20 field, not funct7).
   localparam logic [11:0] F12_ECALL  = 12'h000;
@@ -237,6 +269,13 @@ package rv32i_pkg;
     logic        is_ebreak;
     logic        is_mret;
     logic        is_csr;
+    // M (A14).  `is_muldiv` selects the multi-cycle EX unit; `muldiv_op` is
+    // funct3 verbatim, all eight values of which are legal.  The result comes
+    // back through `ex_result` and therefore through result_sel RES_ALU -- see
+    // rvntt_core.sv, which explains at length why this is NOT a new
+    // result_sel_e member.
+    logic        is_muldiv;
+    logic [2:0]  muldiv_op;
     logic        is_xkntt;
     xkntt_op_e   xkntt_op;
     logic        is_illegal;

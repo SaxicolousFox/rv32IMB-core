@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Random RV32I program generator for lockstep cosimulation (plan A5).
+Random RV32IM program generator for lockstep cosimulation (plan A5, MODS_A A15).
 
 Plan A5 is explicit that riscv-dv is not needed here: "a 300-line Python script
 that emits valid RV32I with a controlled hazard density, a bounded register set,
@@ -12,7 +12,10 @@ diverge the two logs for a reason that has nothing to do with the pipeline, and
 Spike does not even print a commit line for the trapping instruction, so the
 report would point at the wrong place.  Four rules keep that true:
 
-  * only legal RV32I encodings are emitted (no M, no Zifencei);
+  * only legal RV32IM encodings are emitted (no Zifencei).  M is safe to emit
+    freely, unlike everything else here: RISC-V division raises NO exceptions,
+    so a zero divisor and the -2^31 / -1 overflow are architecturally defined
+    results rather than traps, and Spike is still the reference for both;
   * every memory access uses the reserved base register, never a computed one,
     with an offset inside the scratch area;
   * every access is naturally aligned, because Spike traps on a misaligned lw
@@ -26,6 +29,11 @@ probability of ALLOWING a hazard rather than padding it away:
                        since the core has no forwarding.  A6 raises it.
   --load-use-density   0.0 keeps a load's result unused for 2 instructions.
                        A7 raises it.
+  --mul-density        0.0 emits no M instructions, which is the pre-A14
+                       setting and reproduces every earlier seed byte for byte.
+                       A14 raises it.  Kept low in practice: a 34-cycle divide
+                       is 34 cycles in which nothing else is exercised, so a
+                       high density buys stalls rather than coverage.
   --branch-density     0.0 emits no control flow at all, which A5 requires:
                        the A4 core's PC is pc+4 and rvntt_core's
                        dbg_unsupported fires on any branch or jump.  A8 raises
@@ -54,6 +62,7 @@ SHIFT_I = ["slli", "srli", "srai"]
 LOADS = [("lw", 4), ("lh", 2), ("lhu", 2), ("lb", 1), ("lbu", 1)]
 STORES = [("sw", 4), ("sh", 2), ("sb", 1)]
 BRANCHES = ["beq", "bne", "blt", "bge", "bltu", "bgeu"]
+MULDIV = ["mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"]
 
 # A RAW dependency is safe once the producer has reached WB.
 RAW_DISTANCE = 3
@@ -61,13 +70,14 @@ LOAD_USE_DISTANCE = 3
 
 
 class Gen:
-    def __init__(self, seed, n, pool, raw_d, lu_d, br_d):
+    def __init__(self, seed, n, pool, raw_d, lu_d, br_d, mul_d=0.0):
         self.rng = random.Random(seed)
         self.n = n
         self.pool = list(pool)
         self.raw_d = raw_d
         self.lu_d = lu_d
         self.br_d = br_d
+        self.mul_d = mul_d
 
         self.out = []              # emitted lines
         self.idx = 0               # instruction index (NOPs included)
@@ -140,21 +150,63 @@ class Gen:
 
         if pick < self.br_d:
             return self.branch()
-        if pick < self.br_d + 0.18:
+        if pick < self.br_d + self.mul_d:
+            return self.muldiv()
+        # Everything below is offset by both control knobs, so mul_d = 0 draws
+        # exactly the same instruction as before A14 for the same rng state --
+        # every earlier seed still reproduces byte for byte.
+        base = self.br_d + self.mul_d
+        if pick < base + 0.18:
             return self.mem()
         # LUI/AUIPC are the only instructions that inject entropy without
         # reading anything, so they are also the program's defence against every
         # register drifting to 0 or 1 over a few hundred instructions.  See
         # P_X0_SOURCE above for how that drift hid a real bug.
-        if pick < self.br_d + 0.34:
+        if pick < base + 0.34:
             return self.upper()
-        if pick < self.br_d + 0.62:
+        if pick < base + 0.62:
             return self.reg_imm()
         return self.reg_reg()
 
     def reg_reg(self):
         op = self.rng.choice(RR_OPS)
         rd, rs1, rs2 = self._r(), self._any_src(), self._any_src()
+        self._pad_for([rs1, rs2])
+        self._emit(f"{op:<6} x{rd}, x{rs1}, x{rs2}")
+        self._wrote(rd)
+
+    # THE THREE OPERAND SHAPES THAT MATTER ARE THE THREE RANDOM WILL NEVER DRAW.
+    # A uniform 32-bit divisor is zero with probability 2^-32 and -1 with the
+    # same; a uniform dividend is -2^31 with the same.  Those are exactly the
+    # cases the specification legislates for and every implementation gets
+    # wrong, so they are CONSTRUCTED rather than hoped for.  Without this the
+    # knob would raise the M instruction count and cover none of the hard part.
+    P_MULDIV_EDGE = 0.30
+
+    def muldiv(self):
+        op = self.rng.choice(MULDIV)
+        rd = self._r()
+        rs1 = self._any_src()
+        rs2 = self._any_src()
+
+        if op[0] in "dr" and self.rng.random() < self.P_MULDIV_EDGE:
+            kind = self.rng.randrange(3)
+            if kind == 0:
+                rs2 = 0                       # x0 -- division by zero
+            elif kind == 1:
+                rs2 = self._r()               # divisor -1
+                self._emit(f"addi   x{rs2}, x0, -1")
+                self._wrote(rs2)
+            else:
+                # The signed-overflow pair: -2^31 / -1.  Both operands have to
+                # be built, and they must be different registers.
+                rs1 = self._r()
+                rs2 = self.rng.choice([r for r in self.pool if r != rs1])
+                self._emit(f"lui    x{rs1}, {0x80000}")
+                self._wrote(rs1)
+                self._emit(f"addi   x{rs2}, x0, -1")
+                self._wrote(rs2)
+
         self._pad_for([rs1, rs2])
         self._emit(f"{op:<6} x{rd}, x{rs1}, x{rs2}")
         self._wrote(rd)
@@ -307,7 +359,7 @@ class Gen:
 
 
 PROLOGUE = """# Generated by tb/cosim/gen_random_prog.py -- do not edit.
-# seed=%d n=%d raw=%.2f load_use=%.2f branch=%.2f
+# seed=%d n=%d raw=%.2f load_use=%.2f branch=%.2f mul=%.2f
         .section .text.init
         .globl _start
 _start:
@@ -384,15 +436,15 @@ def _scratch_init():
 EPILOGUE = EPILOGUE.replace("{scratch_words}", _scratch_init())
 
 
-def generate(seed, n=200, pool=None, raw_d=0.0, lu_d=0.0, br_d=0.0):
+def generate(seed, n=200, pool=None, raw_d=0.0, lu_d=0.0, br_d=0.0, mul_d=0.0):
     """Return the full assembly source for one random program."""
     pool = pool or DEFAULT_POOL
     # t0/t1 (x5/x6) are used by the epilogue AFTER the body has finished, so
     # they may be in the pool; the base register may not.
     assert BASE_REG not in pool, "the memory base register must not be written"
-    g = Gen(seed, n, pool, raw_d, lu_d, br_d)
+    g = Gen(seed, n, pool, raw_d, lu_d, br_d, mul_d)
     body = "\n".join(g.generate())
-    return (PROLOGUE % (seed, n, raw_d, lu_d, br_d)) + body + "\n" + EPILOGUE
+    return (PROLOGUE % (seed, n, raw_d, lu_d, br_d, mul_d)) + body + "\n" + EPILOGUE
 
 
 def main():
@@ -402,11 +454,12 @@ def main():
     ap.add_argument("--raw-density", type=float, default=0.0)
     ap.add_argument("--load-use-density", type=float, default=0.0)
     ap.add_argument("--branch-density", type=float, default=0.0)
+    ap.add_argument("--mul-density", type=float, default=0.0)
     ap.add_argument("-o", default=None)
     a = ap.parse_args()
 
     src = generate(a.seed, a.n, None, a.raw_density,
-                   a.load_use_density, a.branch_density)
+                   a.load_use_density, a.branch_density, a.mul_density)
     if a.o:
         open(a.o, "w").write(src)
     else:

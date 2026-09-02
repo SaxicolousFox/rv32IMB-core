@@ -63,7 +63,7 @@ def assemble(src_text, tmp, name):
     elf = os.path.join(tmp, name + ".elf")
     open(src, "w").write(src_text)
     r = subprocess.run(
-        ["riscv-none-elf-gcc", "-march=rv32i_zicsr", "-mabi=ilp32",
+        ["riscv-none-elf-gcc", "-march=rv32im_zicsr", "-mabi=ilp32",
          "-nostdlib", "-nostartfiles", "-T", t4.LD, "-o", elf, src],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if r.returncode != 0:
@@ -139,6 +139,8 @@ def main():
     ap.add_argument("--raw-density", type=float, default=0.0)
     ap.add_argument("--load-use-density", type=float, default=0.0)
     ap.add_argument("--branch-density", type=float, default=0.0)
+    ap.add_argument("--mul-density", type=float, default=0.0,
+                    help="A14: probability an instruction is an M one")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
 
@@ -161,7 +163,7 @@ def main():
             seed = a.seed + i
             src = gen_random_prog.generate(
                 seed, a.len, None, a.raw_density,
-                a.load_use_density, a.branch_density)
+                a.load_use_density, a.branch_density, a.mul_density)
             name = f"rand_seed{seed:08x}"
             elf = assemble(src, tmp, name)
             if run_one(exe, elf, tmp, image, name, verbose=a.verbose):
@@ -177,7 +179,8 @@ def main():
 
         print(f"\nrandom programs: {ok}/{a.num} byte-identical "
               f"(len={a.len}, raw={a.raw_density}, "
-              f"load_use={a.load_use_density}, branch={a.branch_density})")
+              f"load_use={a.load_use_density}, branch={a.branch_density}, "
+              f"mul={a.mul_density})")
 
         if failures:
             print("COSIM_FAIL: " + ", ".join(failures))

@@ -33,6 +33,16 @@ extern unsigned int cm_cycles_start, cm_cycles_stop;
 extern unsigned int cm_instret_start, cm_instret_stop;
 extern long Begin_Time, End_Time;
 
+/* A16's dual baseline.  Behind BENCH_NTT because it needs two RISC-V builds of
+ * the reference NTT side by side, which the build-host and the pre-A14 image
+ * cannot have -- and because A13's numbers must stay reproducible from A13's
+ * image, byte for byte, rather than becoming "A13's numbers plus a section". */
+#ifdef BENCH_NTT
+extern void ntt_bench(void);
+extern unsigned int ntt_cyc_i, ntt_cyc_m, ntt_ins_i, ntt_ins_m;
+extern unsigned int ntt_check, ntt_sum;
+#endif
+
 #ifndef CORE_HZ
 #error "CORE_HZ must be defined -- it comes from fpga/generated/soc_clk.svh"
 #endif
@@ -101,6 +111,20 @@ int main(void)
         bench_printf("cm_cycles=%u\r\n", cm_cycles_stop - cm_cycles_start);
         bench_printf("cm_instret=%u\r\n", cm_instret_stop - cm_instret_start);
 
+#ifdef BENCH_NTT
+        bench_printf("--- ntt ---\r\n");
+        ntt_bench();
+        bench_printf("ntt_cycles_rv32i=%u\r\n",   ntt_cyc_i);
+        bench_printf("ntt_instret_rv32i=%u\r\n",  ntt_ins_i);
+        bench_printf("ntt_cycles_rv32im=%u\r\n",  ntt_cyc_m);
+        bench_printf("ntt_instret_rv32im=%u\r\n", ntt_ins_m);
+        bench_printf("ntt_check=0x%08x\r\n",      ntt_check);
+        bench_printf("ntt_sum=0x%08x\r\n",        ntt_sum);
+#endif
+
+        /* The A13 markers are the report FORMAT's name, not the step's, and the
+         * parser keys on them.  A16 adds a section inside the block and does not
+         * rename the block. */
         bench_printf("=== end A13 ===\r\n");
 
         iter++;

@@ -110,10 +110,16 @@ module rvntt_csr (
   localparam logic [11:0] CSR_MIMPID    = 12'hF13;
   localparam logic [11:0] CSR_MHARTID   = 12'hF14;
 
-  // MXL = 1 (RV32) in bits 31:30, extension bit I.  The X bit stays CLEAR even
-  // though the decoder recognises Xkntt: no stage executes it yet, and misa is
-  // a claim about what the hart can run, not about what it can decode.
-  localparam logic [31:0] MISA_VALUE = 32'h4000_0100;
+  // MXL = 1 (RV32) in bits 31:30, extension bits I and -- as of A14 (MODS_A) --
+  // M in bit 12.  The X bit stays CLEAR even though the decoder recognises
+  // Xkntt: no stage executes it yet, and misa is a claim about what the hart
+  // can RUN, not about what it can decode.  M is set for exactly the opposite
+  // reason: rvntt_muldiv executes it.
+  //
+  // This is not cosmetic.  tb/riscof/rvntt/rvntt_isa.yaml reads misa to decide
+  // which arch-test suites are selected, so this constant and that file's
+  // reset value must move together or RISCOF silently tests the wrong set.
+  localparam logic [31:0] MISA_VALUE = 32'h4000_1100;
 
   // ---------------------------------------------------------------- state
   logic        mstatus_mie_q, mstatus_mpie_q;

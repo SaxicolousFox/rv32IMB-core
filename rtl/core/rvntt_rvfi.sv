@@ -55,6 +55,19 @@ module rvntt_rvfi (
     // would be a claim about a register the instruction never touched.
     input  wire         ex_valid,
     input  wire         ex_trap,
+    // A14: EX is holding a multi-cycle instruction that has not finished.  Two
+    // separate things follow from it, and only the first is obvious.
+    //
+    //   1. The shadow must take the same bubble ex_mem_q takes -- otherwise a
+    //      34-cycle divide is REPORTED 34 TIMES, each report claiming a
+    //      retirement that did not happen, and every check downstream of
+    //      rvfi_order is wrong from there on.  The load-use stall needs no
+    //      equivalent: it bubbles ID/EX, so ex_valid is already low.
+    //
+    //   2. The packet must be sampled on the instruction's FIRST EX cycle, not
+    //      its last.  See ex_hold_q below -- riscv-formal's `reg` check found
+    //      this one, from a MULH, on the first honest run.
+    input  wire         ex_stall,
     input  wire [31:0]  ex_pc,
     input  wire [31:0]  ex_insn,
     input  wire         ex_redirect,
@@ -127,7 +140,7 @@ module rvntt_rvfi (
     logic [31:0] mem_wdata;
   } shadow_t;
 
-  shadow_t ex_pkt, em_q, mw_q;
+  shadow_t ex_pkt, ex_pkt_eff, ex_hold_q, em_q, mw_q;
   logic [31:0] mw_mem_rdata_q;
   logic [63:0] order_q;
 
@@ -172,13 +185,54 @@ module rvntt_rvfi (
     ex_pkt.mem_wdata = ex_dmem_wdata;
   end
 
+  // THE PACKET IS A SNAPSHOT OF THE FIRST EX CYCLE, AND IT HAS TO BE.
+  //
+  // Everything in ex_pkt above is combinational off signals that are only
+  // correct while the instruction is STARTING.  The forwarded operands are the
+  // ones that matter: during a multi-cycle stall the producers behind this
+  // instruction drain out of MEM and then out of WB -- EX/MEM is bubbled on
+  // every stalled cycle, so FWD_MEM stops matching after the first and FWD_WB
+  // after the second -- and the mux falls back to id_ex_q.rs1_data, the value
+  // the register file held at ID time.  By the last cycle of a divide that is
+  // stale by two instructions.
+  //
+  // The unit itself is unaffected: it latches its operands when it starts (see
+  // rvntt_muldiv.sv).  So the ARITHMETIC is right and only the REPORT is wrong,
+  // which is why no commit-log diff, no rv32um test and no Spike comparison can
+  // see it -- rvfi_rs1_rdata is not an architectural value, it is a claim about
+  // one.  riscv-formal's `reg` check found it in nine seconds, from a MULH:
+  // rvfi_rs1_rdata said 0xfffffff5 where the register held something else.
+  // That is the second time `reg` has caught a bug nothing else in the tree
+  // could reach.
+  //
+  // `!ex_stall_q` is "this is the instruction's first EX cycle": ex_stall high
+  // last cycle means the same instruction is still in EX, and anything else
+  // means a new one has just arrived.  It is derived here rather than passed in
+  // so that a verification-only correction stays inside the verification-only
+  // module.
+  logic ex_stall_q;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) ex_stall_q <= 1'b0;
+    else        ex_stall_q <= ex_stall;
+  end
+  wire ex_first = !ex_stall_q;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) ex_hold_q <= '0;
+    else if (ex_first) ex_hold_q <= ex_pkt;
+  end
+
+  // A single-cycle instruction is always on its first EX cycle, so this is the
+  // identity for everything that is not multi-cycle.
+  assign ex_pkt_eff = ex_first ? ex_pkt : ex_hold_q;
+
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       em_q           <= '0;
       mw_q           <= '0;
       mw_mem_rdata_q <= 32'h0;
     end else begin
-      em_q           <= ex_pkt;
+      em_q           <= ex_stall ? '0 : ex_pkt_eff;
       mw_q           <= em_q;
       // Sampled on the edge out of MEM, which is the cycle rvntt_ram's output
       // register holds the word for the access em_q issued.

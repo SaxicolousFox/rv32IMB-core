@@ -22,8 +22,10 @@
 //      FENCE would diverge from Spike, which is A5's reference.
 //
 //   3. Anything outside the ISA string is illegal.  The core is
-//      rv32i_zicsr_zicntr_xkntt0p1 (tb/cosim/spike_asm.py).  No M, so OP with
-//      funct7 = 0000001 is illegal.  No Zifencei, so FENCE.I is illegal.
+//      rv32im_zicsr_zicntr_xkntt0p1 (tb/cosim/spike_asm.py).  M IS in it as of
+//      A14, so OP with funct7 = 0000001 is legal for all eight funct3 values;
+//      every other funct7 in OP remains illegal.  No Zifencei, so FENCE.I is
+//      still illegal.
 //
 // An illegal instruction produces EXACTLY the reset bundle.  The whole ctrl_t
 // is cleared at the bottom of the always_comb, not just the side-effect flags:
@@ -206,14 +208,33 @@ module rvntt_decode
 
       // -------------------------------------------------------------- OP
       // funct7 must be 0000000, except ADD/SUB and SRL/SRA which also take
-      // 0100000.  funct7 = 0000001 is the M extension, which this core does not
-      // implement, so it lands on the illegal path like any other value.
+      // 0100000, and the M extension (A14) which is 0000001.  Every OTHER
+      // funct7 still lands on the illegal path.
       rv32i_pkg::OPC_OP: begin
         ctrl.reg_write  = 1'b1;
         ctrl.uses_rs1   = 1'b1;
         ctrl.uses_rs2   = 1'b1;
         ctrl.alu_src_b  = rv32i_pkg::SRCB_RS2;
         ctrl.result_sel = rv32i_pkg::RES_ALU;
+        // M (A14) is a THIRD legal funct7 in OP, and it is total: all eight
+        // funct3 values exist, so this arm has no illegal case of its own.
+        // Rule 3 in the header changes here and nowhere else -- OP with
+        // funct7 = 0000001 used to be "outside the ISA string"; it is now
+        // inside it.  Every other funct7 stays illegal, which is what keeps
+        // the strict-reserved-field claim intact.
+        //
+        // result_sel stays RES_ALU: the product or quotient is delivered
+        // through rvntt_core's `ex_result`, the same field a Zicsr read uses,
+        // rather than through a new result_sel_e member.  rvntt_core.sv says
+        // why at length -- in short, a new member has to be added to TWO case
+        // statements that must agree, and the one time that was done the two
+        // disagreed and riscv-formal found it.
+        if (funct7 == rv32i_pkg::F7_MULDIV) begin
+          ctrl.is_muldiv  = 1'b1;
+          ctrl.muldiv_op  = funct3;
+          ctrl.alu_op     = rv32i_pkg::ALU_ADD;   // the ALU is not consulted
+          ctrl.is_illegal = 1'b0;
+        end else
         unique case (funct3)
           rv32i_pkg::F3_ADD_SUB: begin
             ctrl.alu_op     = f7_alt ? rv32i_pkg::ALU_SUB : rv32i_pkg::ALU_ADD;
@@ -424,6 +445,29 @@ module rvntt_decode
   //    wrong answer, only as unexplained stalls and a worse IPC number.
   always_comb if (ctrl.is_csr && ctrl.imm_fmt == rv32i_pkg::IMM_Z)
     assert (!ctrl.uses_rs1);
+
+  // 7. A MULTI-CYCLE INSTRUCTION IS NEVER A MEMORY OPERATION (A14), and this
+  //    is the property rvntt_core relies on to leave its store path ungated by
+  //    ex_stall.  That gate would sit on the design's critical path, so the
+  //    invariant is proved here instead of paid for there -- and if it ever
+  //    stops holding, a store would be replayed once per stall cycle.
+  //    Also stated: a multi-cycle instruction writes a register through
+  //    RES_ALU, which is what lets the two result muxes in rvntt_core stay
+  //    untouched by A14.
+  always_comb if (ctrl.is_muldiv) begin
+    assert (!ctrl.is_illegal);
+    assert (!ctrl.mem_read && !ctrl.mem_write);
+    assert (!ctrl.branch && !ctrl.jump && !ctrl.is_csr && !ctrl.is_xkntt);
+    assert (!ctrl.is_ecall && !ctrl.is_ebreak && !ctrl.is_mret);
+    assert (ctrl.reg_write && ctrl.result_sel == rv32i_pkg::RES_ALU);
+    assert (ctrl.uses_rs1 && ctrl.uses_rs2 && !ctrl.uses_rs3);
+    assert (opcode == rv32i_pkg::OPC_OP && funct7 == rv32i_pkg::F7_MULDIV);
+    assert (ctrl.muldiv_op == funct3);
+  end
+  //    ... and the converse: the M funct7 in OP is ALWAYS the multi-cycle unit,
+  //    so no M encoding can slip through as something else.
+  always_comb if (opcode == rv32i_pkg::OPC_OP && funct7 == rv32i_pkg::F7_MULDIV)
+    assert (ctrl.is_muldiv);
 `endif
 
 endmodule
