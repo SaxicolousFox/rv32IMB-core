@@ -35,7 +35,8 @@ Two environment constraints that will otherwise waste a cycle each:
 
 | Where | What |
 |---|---|
-| `docs/RISC-V_NTT.txt` | **The plan document** — the source of truth for scope, sequencing and milestones. Read §12 before claiming any milestone. |
+| `docs/RISC-V_NTT.txt` | **The plan document** — the source of truth for scope, sequencing and milestones. Read §12 before claiming any milestone. **Never edit it**; corrections go in the file below or in "Known errors" here. |
+| `docs/RISC-V_NTT_MODS_A.txt` | **Track A modifications** — A14–A18 and milestones M7.1/M7.2, adding RV32IM and branch prediction. It **OVERRIDES §1.5's `RV32I`** and §A13's expected IPC/DMIPS bands; read its §2 before trusting the original on ISA scope. |
 | `docs/isa-spec.md` | The frozen `Xkntt` contract: encodings, semantics, latency, exceptions. |
 | `docs/spike-xkntt.md` | The Spike fork. **Track A needs this** — Spike is the cosim reference. |
 | `docs/insn-bridge.md` | How to emit `Xkntt` instructions from C or a testbench. |

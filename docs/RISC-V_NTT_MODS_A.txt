@@ -1,0 +1,551 @@
+# RV32IM + Branch Prediction — Track A Modifications to the Development Plan
+
+Companion to `RISC-V_NTT.txt`, which it never edits. Same target platform, same
+budget: 63,400 LUTs, 126,800 FFs, 240 DSP48E1, 135 × 36 Kb BRAM, 100 MHz
+oscillator. Track A as originally written is finished — A0 through A13, M0
+through M7, tagged `m7-fmax-and-benchmarks`. This document adds A14 through A18
+and milestones M7.1 and M7.2, and exists because two of A13's measured numbers
+say the original scope was one extension short of the baseline the original
+document itself assumes.
+
+---
+
+## 0. How to read this against RISC-V_NTT.txt
+
+**`RISC-V_NTT.txt` is never modified.** It is the record of what was planned and
+built, and the `m7-fmax-and-benchmarks` tag is the record of what that produced.
+Everything here is additive.
+
+Three markers are used, and they mean different things:
+
+- **OVERRIDES §x** — the original text is now wrong and this replaces it. There
+  are two of these. Both are listed in §2.
+- **EXTENDS §x** — the original stands and something is added on top. The
+  original's "done when" remains satisfied by what was already built.
+- **CLARIFIES §x** — the original was ambiguous or rested on an unstated
+  assumption. Nothing changes; the assumption is written down.
+
+**A numbering hazard, stated once.** `RISC-V_NTT.txt` uses `M1`–`M5` in §10 as
+*measurement* headings and `M0`–`M16` in §12 as *milestones*. They are different
+sequences with colliding names. `M7.1` and `M7.2` here are **milestones**, in
+§12's sequence. Nothing in this document adds to §10's sequence; where §10's
+measurements are amended, they are named as "§10 M2", never bare.
+
+---
+
+## 1. Why this exists
+
+Two measurements, both taken after A13 was complete and tagged.
+
+**The first.** The reference ML-KEM NTT, identical source, identical `-O2`,
+dynamic instruction count on Spike:
+
+| ISA | instructions per `ntt()` |
+|---|---|
+| `rv32i_zicsr` | 148,645 |
+| `rv32im_zicsr` | 23,795 |
+
+**6.25×.** Now read §B6 of the original: *"a software NTT on your RV32I core of
+roughly 15,000–30,000 cycles depending on compiler quality."* The RV32IM number
+lands inside that band. The RV32I number is 7–14× outside it. **§B6's baseline
+estimate was written assuming a hardware multiplier**, while §1.5 scopes the core
+without one. That contradiction is in the original document, not in the
+implementation, and it is not a cosmetic one: at §B6's P=4 (~224 cycles) the
+headline kernel speedup is ~150× against an RV32IM baseline and ~900× against
+ours.
+
+It is worse than a scaling factor, because it is not uniform. ML-KEM's
+polynomial arithmetic is multiply-bound and Keccak has no multiplies at all, so
+on an RV32I machine the NTT slice of the profile is inflated and the Keccak slice
+is not. §10 M3 asks for exactly that breakdown and warns that presenting it
+honestly matters more than a big number. **On RV32I hardware that breakdown is
+distorted no matter how it is reported**, which is why this is a silicon change
+and not a wording change.
+
+**The second.** Stall attribution on the real RTL over both A13 benchmarks,
+counting `stall` cycles and `ex_redirect` pulses (each redirect flushes two
+younger slots). The identity `cycles = retired + stalls + 2 × redirects` closes
+with **residual zero**, and the region totals reproduce the hardware numbers to
+the cycle:
+
+| | Dhrystone | CoreMark |
+|---|---|---|
+| cycles | 1,558,048 | 1,040,943 |
+| retired | 1,126,032 (IPC 0.7227) | 721,374 (IPC 0.6930) |
+| **branch/jump flushes** | **380,016 — 24.4%** | **298,856 — 28.7%** |
+| load-use interlocks | 52,000 — 3.3% | 20,713 — 2.0% |
+| taken branches | 120,000 | 122,930 |
+| not-taken branches | 74,001 | 75,171 |
+| JAL | 38,004 | 14,962 |
+| JALR | 32,004 | 11,536 |
+
+Control flow is ~90% of the lost cycles. The forwarding network is doing its
+job; the fetch is not. That is what makes A13's *optional improvement loop* worth
+taking, and it is why it is specified here rather than left optional.
+
+---
+
+## 2. Overrides, extensions and clarifications
+
+**Read this table before writing any code.** Everything else in this document
+follows from it.
+
+| Original | Marker | What now holds |
+|---|---|---|
+| §1.5 *"RV32I + `Zicsr` + `Zicntr`, machine mode only"* | **OVERRIDES** | **RV32IM** + `Zicsr` + `Zicntr`, machine mode only. `M` only — no `A`, `F`, `D`, `C`, `Zifencei`, and PMP stays excluded. |
+| §A13 *"Realistic expectation: IPC 0.75–0.95 … DMIPS/MHz 0.8–1.2"* | **OVERRIDES** | The original expectation was correct for RV32IM and was missed on RV32I (0.7227 / 0.7306). A14 and A17 are expected to bring both inside the band. If they do not, the band was wrong, not the core. |
+| §B6 *"software NTT … 15,000–30,000 cycles"* | **CLARIFIES** | Only reachable with a hardware multiplier. After A14 the figure becomes correct as written; before A14 it is 7–14× optimistic. |
+| §8 I1, the multi-cycle EX unit and its (a)/(b) hazard options | **CLARIFIES + pre-empts** | A14 builds mechanism (a) **generically**, not for `M` specifically. I1 inherits it rather than building a second one. I1's option (b) — full pipelining with per-sub-stage forwarding — remains future work, and remains future work for `M` too. |
+| §9 Phase 5, *"if Fmax drops materially from the core-only number"* | **EXTENDS** | The comparison baseline for the integrated design becomes **M7.2's** Fmax, not A12's 70.131 MHz. A12's number is the RV32I record and does not carry across this change. |
+| §10 M1, core performance | **EXTENDS** | Report RV32I *and* RV32IM. The RV32I figures are what the `m7-fmax-and-benchmarks` tag holds; do not quietly replace them. |
+| §10 M2 / M3, kernel and application speedup | **EXTENDS** | The software baseline **must** be the RV32IM build. The RV32I build may be shown alongside, labelled as such. This is the reason this document exists. |
+| §12 M5, RISCOF | **EXTENDS** | M5 stands as achieved (38/38 `I`). A15 adds the `M` suite; the result is recorded under M7.1, not by re-opening M5. |
+| §12 M6, riscv-formal | **EXTENDS** | M6 stands as achieved (43 checks, depth 14). A15 adds the `M` models. See §3.2 — this is one of the two genuinely hard parts. |
+| §12 M7 | **UNCHANGED** | Stands as achieved for the RV32I core. `m7-fmax-and-benchmarks` remains the RV32I record and is not retagged. M7.1 and M7.2 record what replaces it. |
+| §11 risk register, *"Multi-cycle EX unit wrecks Fmax"* | **EXTENDS** | Already listed, mitigation already correct ("build the stall version first"). A14 is the first thing that actually exercises it. |
+| `CLAUDE.md`, the four-way agreement | **EXTENDS** | RTL decoder / `model/isa/xkntt.py` / Spike / LLVM `SchedModel` must still agree on `Xkntt`. `M` adds no fifth party — it is standard and Spike and LLVM already know it — but §C4's `SchedMachineModel` must now also cover `M`'s writes or the machine scheduler falls back to defaults for them. |
+| `CLAUDE.md`, *"`model/` is a frozen contract"* | **NOT overridden** | The frozen files are `modarith.py`, `ntt_ref.py`, `ntt_math.py`, `isa/xkntt.py`. **`model/rv32i_ref.py` is not among them.** Extending it to decode `M` is an addition, not an adjustment made to let hardware pass, and the four frozen files are untouched by everything here. |
+
+---
+
+## 3. Conflict analysis
+
+The instruction was to look hard for things that become intractable later. Four
+candidates turned out not to be problems, two are genuinely hard, and one is a
+budget to watch.
+
+### 3.1 What is *not* a conflict, and why — each of these was checked
+
+**Opcode space.** The obvious catastrophe would be `Xkntt` overlapping `M`.
+It does not. `docs/isa-spec.md` §2 puts Tier 1 in `custom-0` (`0b0001011`,
+`0x0B`) and Tier 2 in `custom-1` (`0b0101011`, `0x2B`); `M` lives in `OP`
+(`0x33`) with `funct7 = 0000001`. Disjoint, with no shared `funct3`/`funct7`
+decode. **The strict-reserved-field rule survives intact**: `funct7` values other
+than `0000000`, `0100000` and now `0000001` remain illegal in `OP`, and nothing
+in `custom-0`/`custom-1` changes at all.
+
+**Toolchain.** Verified, not assumed: `riscv-none-elf-gcc --print-multi-lib`
+lists `rv32im/ilp32`, and `-march=rv32im_zicsr -mabi=ilp32
+-print-libgcc-file-name` resolves to a real `rv32im/ilp32/libgcc.a`. No toolchain
+work, no new multilib, no rebuild.
+
+**Spike.** `M` is native. **No fork change**, so `toolchain/patches.sh export
+spike` is unaffected and `patches_in_sync` stays green. Only the `--isa` strings
+in `tb/cosim/*` change.
+
+**DSP budget.** 240 DSP48E1 available. `M`'s 32×32→64 multiplier takes at most 4.
+§B1 specifies 3 per Montgomery multiplier plus 2 for Barrett; §B6 estimates
+14–20 at P=4 and the arithmetic scales to roughly 50–60 at P=16. Worst case
+~65 of 240. There is no contention, and there was never going to be.
+
+**§B6's done-when gets *easier*.** It requires "the coprocessor's standalone
+Fmax exceeds the core's Fmax". Adding `M` and a predictor lowers the core's
+Fmax. This is the one place where the cost here is a benefit elsewhere, and it
+should be read as a warning that the criterion is weak rather than as good news.
+
+### 3.2 Genuinely hard, first: riscv-formal depth versus divider latency
+
+`tb/formal/run_riscv_formal.py` documents why the BMC depth is 14 and not more:
+it is derived from the deepest property the check set has to reach — a register
+dependency at distance 3, plus a load-use stall, plus a two-cycle control bubble
+— and *"BMC time here blows up superlinearly with depth: `formal_regfile` proves
+at depth 8 in about three seconds and was still grinding at step 13 of depth 20
+after eight minutes."*
+
+**A multi-cycle instruction extends every one of those windows by its latency
+minus one.** A 3-cycle `MUL` needs roughly depth 17, which is cheap. A 32-cycle
+iterative `DIV` needs roughly depth 46, which is very likely not to converge in
+any reasonable time.
+
+Three ways out, in order of preference. Take the first that works; do not skip to
+the third because the first was inconvenient.
+
+1. **Per-check depth.** Keep the existing 43 checks at 14, run `insn_mul*` at
+   the depth `MUL`'s latency requires, and give `insn_div*`/`insn_rem*` whatever
+   converges. Verify that riscv-formal's `genchecks.py` honours per-check depth
+   entries before designing around it.
+2. **Prove the divider standalone.** This project already proves `rvntt_alu`,
+   `rvntt_regfile`, `rvntt_branch`, `rvntt_hazard` and `rvntt_csr` as isolated
+   modules. Prove the divider the same way — against a reference division,
+   including the two mandated edge cases — at whatever depth its own latency
+   needs, with no pipeline around it. riscv-formal then only has to establish
+   that the *pipeline* retires it correctly, which is a shallower property.
+3. **Record the boundary.** M6 already states, precisely, that it does not cover
+   `dmem`, the `bus_*` family, CSRs, or the `Xkntt` encodings. A recorded gap is
+   worth more than an unrun check, and far more than a check that was made to
+   pass by weakening it.
+
+**What you must not do is lower the global depth to make `DIV` fit.** That
+weakens 43 existing checks to accommodate 8 new ones, and it would not be visible
+in any report.
+
+### 3.3 Genuinely hard, second: the independent cycle model
+
+`tb/cosim/cycle_model.py` predicts
+
+    span = (retired − 1) + stalls + flush_penalties
+
+and its value is stated in its own header: a phantom stall changes no
+architectural state, so a commit-log diff cannot see it. Its independence comes
+from decoding the *retired instruction stream* with `model/rv32i_ref.py` rather
+than from the RTL's own hazard predicate.
+
+**Both A14 and A17 break it, in different ways, and the second is the awkward
+one.**
+
+- **A14** adds `Σ(latency − 1)` for each multi-cycle `M` instruction. This is
+  easy: the latency is a property of the opcode, the model already decodes the
+  opcode, and the term is additive. Independence is preserved.
+- **A17** changes `flush_penalties` from `2 × redirects` to `2 × mispredicts`,
+  and **a mispredict count cannot be derived from the retired stream alone.**
+
+The wrong fix is to read the RTL's predictor state, which would destroy exactly
+the independence the model exists for. **The right fix is to model the predictor
+from its specification** — a 2-bit bimodal with a defined index function, a
+direct-mapped tagged BTB with a defined replacement policy, an 8-entry RAS with
+defined push/pop rules — and let the model simulate that spec against the
+dynamic branch stream. That stays independent of the implementation while
+predicting its timing, and it has a valuable side effect: **it forces the
+predictor to have a written specification precise enough to be simulated**,
+which is the difference between a predictor you can verify and one you can only
+benchmark.
+
+This makes the predictor's specification (A17) a deliverable in its own right,
+not a description of whatever the RTL happens to do.
+
+### 3.4 A budget, not a conflict: Fmax headroom
+
+A14 and A17 both add logic to a design that A12 measured at **78% route delay at
+3.4% utilisation** — slow because it is spread across 32 BRAM tiles, not because
+anything is deep. Two features on top of that is a routing risk even though the
+area is trivial.
+
+**Set the floor explicitly.** §A12 already says *"if you're under 60 [MHz], look
+at the forwarding mux depth and whether your branch target adder shares a path
+with the comparator."* Adopt that as a stop condition: if the core-only Fmax
+after A14 or after A17 falls below **60 MHz**, stop and read the timing report
+before continuing, because §9 still needs headroom for the coprocessor on top.
+
+Note that DMIPS/MHz, CoreMark/MHz and IPC are all per-MHz and are **immune** to
+whatever Fmax does. Only the absolute Dhrystones/second and CoreMark score move.
+Do not let an Fmax regression be reported as a performance regression, or the
+reverse.
+
+### 3.5 Everything this touches
+
+Checked by search, not by memory. Anything not on this list should be treated as
+a surprise worth stopping for.
+
+**RTL** — `rv32i_pkg.sv` (opcode/ALU-op enums), `rvntt_decode.sv`,
+`rvntt_hazard.sv` (multi-cycle stall), `rvntt_core.sv` (EX wiring, redirect
+path), `rvntt_csr.sv` (`misa` bit 12), `rvntt_forward.sv` (no partial results),
+plus new `rvntt_muldiv.sv` and, for A17, new `rvntt_bpred.sv`.
+
+**Model** — `model/rv32i_ref.py` extended to decode `M` (permitted addition; see
+§2). The four frozen files are untouched.
+
+**Verification** — `tb/cosim/gen_random_prog.py` (emit `M` with controlled
+density), `tb/cosim/cycle_model.py` (§3.3), `tb/cosim/test_cosim_a5.py`,
+`tb/cosim/test_riscv_tests.py` (add the `rv32um` suite; its `ISA` constant),
+`tb/cosim/test_kyber_kat_spike.py` and `test_spike_xkntt.py` (`--isa` strings),
+`tb/cocotb/test_decode_cocotb.py` (the A3 10⁶-word decoder equivalence sweep now
+covers `M` encodings), `tb/riscof/rvntt/rvntt_isa.yaml` (`misa` bitmask and ISA
+string), `tb/formal/run_riscv_formal.py` (§3.2), `tb/mutate/run_mutation.py`,
+`tb/run_regress.py`.
+
+**Software and build** — `sw/kyber/Makefile` (`-march`, and the dual baseline of
+A18), `fpga/scripts/build_bench_image.py` and `build_soc_image.py` (`ARCH`),
+`docs/kyber-backends.md`.
+
+**Unchanged, deliberately** — `docs/isa-spec.md` (disjoint opcode space; the only
+`Xkntt`-adjacent fact that moves is `misa`, which the spec mentions only in its
+exception table), `toolchain/` (no fork touched, no new pin), and every `Xkntt`
+encoding.
+
+---
+
+## 4. Track A additions
+
+### A14 — Multi-cycle EX, and the M datapath
+
+**Build the mechanism before the instructions.** §8 I1 needs a multi-cycle EX
+functional unit for `Xkntt` Tier 1 and offers two designs: **(a)** stall IF/ID/EX
+for `L−1` cycles, simple and obviously correct; **(b)** fully pipeline it with
+forwarding from each sub-stage, much better throughput and much more hazard
+logic. Its recommendation is to build (a) first. **Build (a) here, generically —
+a `busy`/`done` handshake from an arbitrary EX-resident unit, with the latency a
+property of the unit and not of `M`.** I1 then inherits it instead of building a
+second mechanism, and the first thing to exercise it is a standard, independently
+verifiable extension rather than a custom one nobody else can check.
+
+**Build:**
+
+- `MUL`, `MULH`, `MULHSU`, `MULHU`. All four need the full 64-bit product, so
+  build one 32×32→64 unit and select halves. On DSP48E1 (25×18) that is at most
+  four slices. Pipeline it 3–4 stages and let Vivado pack `AREG`/`BREG`/`MREG`/
+  `PREG` — the same advice §B1 gives for the Montgomery multiplier, and for the
+  same reason. **Verify DSP inference by reading the synthesis report, not by
+  assuming it**, exactly as §B1 insists.
+- `DIV`, `DIVU`, `REM`, `REMU`. Iterative, fixed latency. Radix-2 restoring is 32
+  cycles plus fixup and is obviously correct; build that first and measure before
+  considering radix-4. **The latency must be data-independent** — not for the
+  side-channel reason §B4 gives, but because a data-dependent latency makes the
+  cycle model of §3.3 unbuildable.
+- The three edge cases the specification mandates, which are where every
+  implementation gets it wrong:
+  - **Divide by zero**: quotient = all ones (−1 signed), remainder = dividend.
+  - **Signed overflow**, `−2³¹ ÷ −1`: quotient = `−2³¹`, remainder = 0.
+  - **No traps for either.** RISC-V division raises no exceptions. A core that
+    traps here passes casual testing and fails compliance.
+- `misa` gains bit 12. This is not cosmetic — `tb/riscof/rvntt/rvntt_isa.yaml`
+  reads it to decide which tests to select.
+- Decoder: `OP` with `funct7 = 0000001`. `dbg_unsupported` (LD0 red on the board)
+  must not fire on any of the eight.
+- Forwarding: the result is valid only in the final EX cycle. **Confirm no
+  forwarding path can observe a partial product**, which is the characteristic
+  failure of bolting a multi-cycle unit onto a forwarding network built for
+  single-cycle results.
+
+**Verify:** directed tests for every edge case above; `rv32um` from riscv-tests
+(present in the pinned checkout, 8 tests, one per instruction); cosim against
+Spike with `M` in the random program generator at high hazard density.
+
+**Fault-inject:** break the divide-by-zero result, invert one `MULHSU` sign,
+remove the signed-overflow special case, and let a consumer forward a partial
+product. Each must be caught by something named in advance, per the existing
+mutation manifest discipline. If any escapes, the stimulus is the gap, not the
+checker — that has been true of every escape in this project so far.
+
+**Realistic expectation:** Dhrystone and CoreMark both improve, because both call
+`__divsi3`/`__mulsi3` today. The NTT instruction count should fall by ~6.25×, to
+the 23,795 measured on Spike. If it does not, the multiplier is not being
+selected and something is still calling libgcc.
+
+**Done when:** all 8 `rv32um` tests pass on the RTL, 1000 random programs containing `M` at
+high hazard density are byte-identical against Spike, and every mandated edge
+case has a directed test that fails when that case is broken.
+
+---
+
+### A15 — M compliance and formal
+
+**Build/run:**
+
+- **RISCOF.** Change `rvntt_isa.yaml`'s ISA string to `RV32IMZicsr` and its
+  `misa` reset value and bitmask to include bit 12 (`0x40000100` becomes
+  `0x40001100`). That file's own header says what happens next: *"claim M and
+  the multiply tests are selected"* — which is now the intent rather than the
+  warning. The suite is present in the pinned checkout at
+  `riscv-test-suite/rv32i_m/M/` and is **8 tests** (`mul`, `mulh`, `mulhsu`,
+  `mulhu`, `div`, `divu`, `rem`, `remu`). Save the HTML report; keep the
+  existing exclusions (`pmp` by name; the branch pin on `old-framework-3.x`)
+  exactly as they are.
+- **riscv-formal.** Add the `M` instruction models and resolve the depth problem
+  by §3.2, in that order of preference. Whatever the outcome, **write down what
+  is and is not proved**, in the same form `rtl/core/CLAUDE.md` already uses for
+  `dmem`, CSRs and the `Xkntt` encodings.
+- **The random program generator.** Add `M` opcodes with a `--mul-density` knob,
+  mirroring the existing `--raw-density` / `--load-use-density` /
+  `--branch-density`. Include operands that hit the edge cases: zero divisors,
+  `−2³¹`, and `−1`. A generator that emits only benign operands will never
+  produce the two special cases, and they are the ones that are wrong.
+- **`model/rv32i_ref.py`.** Extend to decode `M`. Then re-run A3's 10⁶-word
+  decoder equivalence sweep: it now covers `M` encodings, and it must still show
+  the RTL and Python decoders agreeing on strict reserved-field behaviour for
+  every `funct7` outside the three legal values.
+- **`tb/cosim/cycle_model.py`.** Add the `Σ(latency − 1)` term. This is the easy
+  half of §3.3; the hard half is A17's.
+
+**Done when:** RISCOF passes the RV32IM suite with the report committed; the
+formal result is either proved or recorded with its boundary stated; the A3
+decoder sweep passes over the extended instruction set; and the A5 cycle-span
+check passes with `M` in the stream.
+
+---
+
+### A16 — The stall attribution instrument (do this before the predictor)
+
+Deliberately structured like A5, and for the same reason: A5 built the commit-log
+tracer *before* the hazard logic because you cannot debug what you cannot see.
+**You cannot honestly report a predictor's payoff without an instrument that
+measured the baseline first**, and "we added a predictor and the benchmark got
+faster" is not an attribution.
+
+**Build:** a profiling harness over the RTL that counts, across a delimited
+region: retired instructions, load-use stall cycles, multi-cycle EX stall cycles,
+`ex_redirect` pulses, and a classification of retired control transfers into
+taken branch / not-taken branch / `JAL` / `JALR`.
+
+**The check that makes it trustworthy** is that the accounting closes:
+
+    cycles = retired + load_use_stalls + muldiv_stalls + 2 × redirects
+
+**The residual must be exactly zero.** If it is not, either the instrument or the
+core is wrong, and you must find out which before believing any number that comes
+out of it. On the RV32I core this identity already closes with residual 0 over
+both benchmarks, which is what makes the table in §1 usable.
+
+**Baseline already measured** (RV32I, no `M`, no predictor) — the §1 table. Note
+it will shift after A14: fewer instructions, a different mix, and a new stall
+category. **Retake it after A14 and before A17**, or the predictor's delta will
+be contaminated by the multiplier's.
+
+**Done when:** the residual is zero on both benchmarks with `M` present, and the
+instrument runs in the regression rather than living in a scratch directory —
+the same standard `tb/mutate/run_mutation.py` was held to.
+
+---
+
+### A17 — Branch prediction: 2-bit bimodal, 64-entry BTB, 8-entry RAS
+
+This is §A13's "optional improvement loop", promoted to a specified step because
+A16's measurement says control flow is ~90% of the lost cycles. Three deviations
+from the original one-line description, each earned by that measurement.
+
+**Build:**
+
+- **A 2-bit bimodal predictor.** The pattern-history table is 2 bits per entry
+  and is therefore cheap; size it independently of the BTB rather than assuming
+  they must match.
+- **A 64-entry BTB, direct-mapped and tagged, looked up in IF with the fetch
+  address.** *This is the one design decision that determines whether the
+  projected numbers are real.* A hit must redirect the fetch in the same cycle so
+  a correctly-predicted taken branch costs **zero** bubbles. If the lookup lands
+  in ID instead, every predicted-taken branch costs one bubble and roughly half
+  the payoff disappears — and the design will still look correct, because it is.
+- **An 8-entry return-address stack.** Not in the original description, and the
+  measurement is why: `JALR` is 32,004 of Dhrystone's 190,008 redirects — 16
+  returns per iteration, because upstream riscv-tests builds Dhrystone with the
+  no-inline pragma. A BTB stores one target per PC and predicts returns badly,
+  since the same `ret` goes to different callers. Push/pop on the architectural
+  return hints (`rd`/`rs1` being `x1` or `x5`), not on a guess.
+- **Recovery reuses the existing EX redirect path**, which already flushes both
+  younger slots. The predictor must be architecturally invisible: it changes when
+  instructions are fetched, never which ones retire.
+- **Initialise the counters weakly-not-taken and require a BTB tag hit before
+  predicting taken.** See the downside term below.
+
+**The downside term, stated so that it is measured rather than discovered.**
+74,001 not-taken branches per 2,000 Dhrystone runs are **free today** under
+static not-taken. Every one the predictor gets wrong costs two cycles it does not
+currently cost. The net is strongly positive, but a predictor with a careless
+reset policy could plausibly make CoreMark *slower*, and the report must show the
+regression term alongside the improvement, not just the net.
+
+**Write the specification before the RTL.** §3.3 requires the cycle model to
+simulate the predictor from its specification rather than from its
+implementation. That is only possible if the index function, the tag comparison,
+the replacement policy, the counter update rule and the RAS push/pop conditions
+are all written down precisely enough to be implemented twice, independently.
+Treat that document as a deliverable of this step.
+
+**Verify:**
+
+- **riscv-formal is the right net here and it already exists.** `pc_fwd`,
+  `pc_bwd`, `causal` and `unique` are precisely the checks that see a
+  speculation bug, and they must still pass at the same depth. A predictor that
+  changes architectural PC behaviour cannot survive them.
+- Cosim: 1000 random programs at high branch density, byte-identical against
+  Spike.
+- The cycle model of §3.3, predicting the span with mispredicts.
+- **Fault-inject:** break the BTB tag comparison so it predicts on any index
+  match; invert the 2-bit counter saturation; break the RAS push condition;
+  predict taken from a cold entry. Each must be caught, and at least one must be
+  caught by the *cycle model* rather than by a correctness check — a predictor
+  bug that is architecturally invisible is exactly the class the commit-log diff
+  cannot see, which is the reason the cycle model exists at all.
+
+**Realistic expectation**, projected from A16's measured counts:
+
+| | measured today | conservative | central | with RAS |
+|---|---|---|---|---|
+| DMIPS/MHz | 0.7306 | 0.892 | 0.913 | 0.939 |
+| CoreMark/MHz | 0.9607 | ~1.19 | ~1.26 | ~1.31 |
+| IPC (Dhrystone) | 0.7227 | 0.883 | 0.904 | 0.929 |
+
+**+22% to +31%**, and the first time both figures land inside §A13's stated
+bands. These are projections from measured counts, not guesses — but they assume
+`M` is *not* present. After A14 the instruction mix changes and the branch
+fraction with it, so **retake the baseline and recompute the projection before
+believing the delta**.
+
+**If you measure less than +15%, the BTB is almost certainly being read in ID
+rather than IF.** Check that before looking anywhere else.
+
+**Done when:** measured before and after with A16's instrument, on hardware;
+riscv-formal still passes at the same depth; cosim still passes; and the reported
+delta includes the not-taken regression term.
+
+---
+
+### A18 — Re-measurement, the dual baseline, and the milestones
+
+**Build/run:**
+
+- **Re-run A12's Fmax binary search.** *The A12 number does not carry.* A12
+  established that ±0.4 ns of spread comes from placement alone — correcting two
+  output pins, with no logical content, cost 3 MHz — and A14 and A17 are real
+  logic changes. Constrain `T` in the XDC, implement to routed, read WNS
+  **post-route**, bisect. Do not report `1/(T − WNS)` from a passing run.
+- **Re-run A13 on hardware.** Dhrystone, CoreMark, IPC, three separate
+  programming passes, exact-equality reproducibility. The existing harness does
+  this unattended.
+- **Re-run A16's attribution** and report where the remaining stall cycles are.
+- **The dual baseline — the point of the whole exercise.** Build the ML-KEM
+  software NTT backend twice, `-march=rv32i` and `-march=rv32im`, and run
+  **both on the RV32IM hardware**. With `M` in the core the old baseline is still
+  measurable, on real silicon, so §10 M2 and M3 can quote the honest number *and*
+  show the other one beside it rather than choosing between them. Record the
+  ratio measured here — 148,645 versus 23,795 instructions per `ntt()` — as the
+  cross-check.
+- Update the milestone table, `rtl/soc/CLAUDE.md`, `rtl/core/CLAUDE.md` and
+  `docs/a13-benchmarks.md`, and tag.
+
+**Done when:** M7.1 and M7.2 below are both recorded, with the RV32I figures
+preserved rather than overwritten.
+
+---
+
+## 5. Risk register additions
+
+In the format of §11, and additive to it.
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| `DIV` latency puts riscv-formal past a depth that converges | Medium — a verification gap in a milestone that already passed | §3.2's three routes, in order. Never lower the global depth to accommodate it. |
+| The cycle model has to be taught the predictor and stops being independent | Medium — the check quietly becomes self-fulfilling | Model the predictor from its written specification, never from RTL state. Make the specification a deliverable of A17. |
+| A14 + A17 together push Fmax below what §9 needs for the coprocessor | Medium — discovered at M15, far from the cause | Re-measure after **each** step, not once at the end. Stop at 60 MHz per §A12 and read the report. |
+| A predictor makes CoreMark slower via the 74k free not-taken branches | Low, but embarrassing if unreported | Weakly-not-taken initialisation, tag hit required before predicting taken, and report the regression term separately. |
+| The RV32IM numbers silently replace the RV32I ones in the write-up | Medium — the `m7` tag stops matching the prose | M7 and its tag are explicitly not reopened. §10 M1 reports both. |
+| A multi-cycle EX unit is built twice, once for `M` and once for `Xkntt` | Medium — two hazard mechanisms is how you get a hazard bug | A14 builds it generically. §8 I1 inherits it; this is written into §2. |
+
+---
+
+## 6. Milestone additions
+
+Added to §12's sequence. `RISC-V_NTT.txt` is not edited; these live here.
+
+- [ ] **M7.1** — **RV32IM core: `M` verified and the benchmark re-measured.**
+  RISCOF passes the RV32IM suite with the report committed; riscv-formal's `M`
+  models either pass or their boundary is recorded; 1000 random programs
+  containing `M` at high hazard density are byte-identical against Spike; and
+  Fmax, DMIPS/MHz, CoreMark/MHz and IPC are re-measured on hardware across three
+  passes. **The dual software NTT baseline — `-march=rv32i` and `-march=rv32im`,
+  both run on the RV32IM board — is recorded, because that is the number §10 M2
+  and M3 depend on.** M7's RV32I figures are preserved, not replaced.
+
+- [ ] **M7.2** — **Branch prediction: IPC delta measured and attributed.**
+  The predictor, BTB and RAS are specified in a document precise enough for the
+  cycle model to simulate independently; riscv-formal still passes at the same
+  depth; cosim still passes; and the before/after is measured on hardware with
+  A16's instrument, reported with the not-taken regression term shown separately
+  and with the residual stall attribution for what remains. Fmax is re-measured
+  and the core-only baseline for §9 is updated.
+
+**Why two milestones and not one.** They were asked for as one. They are split
+because M7.1 must remain claimable if the predictor is deferred or abandoned:
+the `M` extension fixes a correctness-of-measurement problem that §10 depends on,
+while the predictor is a performance improvement that §10 does not depend on. A
+single milestone would make the necessary work hostage to the optional work.
+Collapse them if you disagree — nothing else in this document depends on the
+split.
