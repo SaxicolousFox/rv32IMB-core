@@ -426,14 +426,23 @@ def discover() -> list:
                   timeout=120))
 
     # A17's done-when, mechanised: two benchmark captures may differ ONLY in the
-    # clock and in the wall-clock rates derived from it.  Run here against A16's
-    # two committed captures -- which share a clock, so the comparison itself is
-    # trivial -- purely to keep the tool and its four fault injections alive.
-    # The comparison that matters is A16 against A17, in docs/a17-fmax.md.
+    # clock and in the wall-clock rates derived from it.  Run here against two of
+    # A19's captures -- which share a clock, so the comparison itself is trivial
+    # -- purely to keep the tool and its four fault injections alive.  The
+    # comparisons that matter are A16 vs A17 in docs/a17-fmax.md and A17 vs A19
+    # in docs/a19-benchmarks.md.
+    #
+    # NOTE, and it is not a small one: these two inputs live under fpga/build/,
+    # which is GITIGNORED.  They are NOT committed, whatever an earlier version
+    # of this comment claimed, so on a fresh clone this test fails rather than
+    # skips -- run_one's missing-input SKIP only inspects the last argv element
+    # and only for .sv/.py.  --selftest is the portable half and is what keeps
+    # the four fault injections honest; the --ref/--new half needs a board to
+    # have been run locally first.
     t.append(Test("bench_compare", "meta",
                   [py, os.path.join(ROOT, "tb/fpga/compare_bench_runs.py"),
-                   "--ref", os.path.join(ROOT, "fpga/build/bench_a16/a16.json"),
-                   "--new", os.path.join(ROOT, "fpga/build/bench_a16/a16_run2.json"),
+                   "--ref", os.path.join(ROOT, "fpga/build/bench_a19/a19_run1.json"),
+                   "--new", os.path.join(ROOT, "fpga/build/bench_a19/a19_run2.json"),
                    "--selftest"],
                   timeout=120))
 
@@ -462,14 +471,21 @@ def discover() -> list:
     t.append(Test("bench_hardware", "fpga",
                   [py, os.path.join(ROOT, "fpga/scripts/hw_bringup.py"),
                    "--regress",
-                   # A16's bitstream, not A13's: the benchmark this reproduces
-                   # is the current one.  A13's RV32I numbers are preserved by
-                   # docs/a13-benchmarks.md and by A16's control image, not by
-                   # leaving the regression pointed at a stale .bit.
-                   "--bit", os.path.join(ROOT, "fpga/build/bench_a16/rvntt_soc_top.bit"),
-                   # 75 s, not 60: CoreMark needs 2200 iterations to clear its
-                   # own ten-second minimum now that M has made it 2.53x faster,
-                   # so a block is ~14.5 s and three of them do not fit in 60.
+                   # A19's bitstream, not A16's: the benchmark this reproduces
+                   # is the CURRENT one.  Earlier numbers are preserved by
+                   # docs/a13-benchmarks.md, docs/a16-benchmarks.md and
+                   # docs/a19-benchmarks.md, not by leaving the regression
+                   # pointed at a stale .bit -- which is exactly what this
+                   # pointer had become between A16 and A19, and what the note
+                   # it replaces was written to prevent.  A stale bitstream here
+                   # is the worst kind of green: it programs a real board, gets
+                   # byte-perfect UART and reproducible counters, and certifies
+                   # a design the repository no longer contains.
+                   "--bit", os.path.join(ROOT, "fpga/build/bench_a19/rvntt_soc_top.bit"),
+                   # 75 s, not 60: CoreMark needs 2500 iterations to clear its
+                   # own ten-second minimum -- A19's predictor made the 2200 the
+                   # M extension had called for finish in 9.81 s -- so a block is
+                   # ~13.5 s and three of them do not fit in 60.
                    "--seconds", "75", "--send-byte", "-1",
                    "--out-name", "bench_uart.log",
                    "--parser", os.path.join(ROOT, "tb/fpga/parse_bench_uart.py"),
@@ -480,7 +496,7 @@ def discover() -> list:
                    # A19: block 1 is cold.  See parse_bench_uart.py.
                    "--parser-arg=--warmup-blocks", "--parser-arg=1",
                    "--parser-arg=--json",
-                   "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a16/a16.json")],
+                   "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a19/a19_regress.json")],
                   timeout=1800))
 
     # Mutation testing (A6+).  ON by default, at about 3m45s -- it rebuilds the
