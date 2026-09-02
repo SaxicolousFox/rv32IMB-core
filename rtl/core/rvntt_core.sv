@@ -153,13 +153,33 @@ module rvntt_core #(
   logic        id_stall;                   // driven by rvntt_hazard, in ID
   logic        ex_stall;                   // driven by an EX functional unit
   wire         front_stall = id_stall || ex_stall;
+  // A19 LEVER: ex_redirect drives 244 loads -- every pipeline register's clear --
+  // and at 74.0 MHz its net alone was 1.491 ns, the biggest single hop on the
+  // critical path.  A17 tried the same attribute on ex_trap and got nothing,
+  // because that net's own route was 5% of the path; this one's is 11%.  The
+  // attribute is a synthesis directive and cannot change what the design
+  // computes.
+  (* max_fanout = 48 *)
   logic        ex_redirect;                // a control transfer, MRET or a trap
   logic [31:0] ex_redirect_target;
   logic [31:0] ex_jump_target;             // branch/JAL/JALR only
+  // A17 LEVER 2 WAS TRIED HERE AND REJECTED.  `(* max_fanout = 32 *)` on this
+  // net -- MODS_A A17's second lever, expecting 0.3-0.5 ns -- moved timing the
+  // wrong way by 0.263 ns at the constraint lever 1 had just met.  That is
+  // inside the +/-0.4 ns placement spread, so the honest reading is "no
+  // measurable gain", not "it hurt"; either way there is nothing to adopt.
+  // See docs/a17-fmax.md for the run.  `ex_trap` still drives 142 loads.
   logic        ex_trap;                    // the instruction in EX faults
   logic [4:0]  ex_trap_cause;
   logic [31:0] ex_trap_val;
   logic        ex_mret;
+
+  // A19.  bp_pred_* come OUT of the predictor and steer the PC mux; ex_bp_*
+  // go INTO it from the EX stage's resolution.
+  logic        bp_pred_taken;
+  logic [31:0] bp_pred_target;
+  logic        ex_bp_upd;
+  logic [1:0]  ex_bp_kind;
 
   // A REDIRECT AND A STALL CANNOT COINCIDE.  Both are properties of the single
   // instruction in EX: `id_stall` needs the EX instruction to be a load,
@@ -168,12 +188,62 @@ module rvntt_core #(
   // is more than one of those.  A14 made that argument load-bearing rather than
   // decorative, so ex_redirect is now GATED on !ex_stall below instead of being
   // left to the priority here -- see the redirect assignment.
-  always_ff @(posedge clk or negedge rst_n) begin
-    if (!rst_n)           pc_q <= RESET_PC;
-    else if (ex_redirect) pc_q <= ex_redirect_target;
-    else if (front_stall) pc_q <= pc_q;
-    else                  pc_q <= pc_q + 32'd4;
+  // A19 puts the predictor in front of this mux and nothing else changes about
+  // it.  `pc_next` is broken out because the PREDICTOR IS LOOKED UP WITH IT,
+  // one address ahead of the fetch: the prediction registered from pc_next this
+  // cycle describes pc_q next cycle, so all that is left in the PC register's
+  // own path is the 2:1 mux below.  See docs/a19-bpred-spec.md section 2 --
+  // done the other way round, the array read and the tag compare land in the
+  // PC path and A17's margin goes straight back out.
+  //
+  // The redirect outranks the prediction because EX has seen the instruction
+  // and IF has only seen its address.  Under front_stall the address does not
+  // move, so the lookup simply repeats and re-registers the same answer.
+  logic [31:0] pc_next;
+  always_comb begin
+    if      (ex_redirect)   pc_next = ex_redirect_target;
+    else if (front_stall)   pc_next = pc_q;
+    else if (bp_pred_taken) pc_next = bp_pred_target;
+    else                    pc_next = pc_q + 32'd4;
   end
+
+  // THE PREDICTOR IS NOT LOOKED UP WITH pc_next, AND THIS IS THE WHOLE OF A19's
+  // TIMING STORY.  pc_next contains ex_redirect_target, which is the ALU's own
+  // output; indexing a 256-entry RAM with it and comparing a tag put the
+  // forwarding mux, the full ALU carry chain and the array read in ONE cycle.
+  // Measured: 16.058 ns and 24 logic levels, against A17's 11.562 -- the design
+  // failed 80 MHz by 3.886 ns.  Registering the prediction, which the
+  // specification called for and which is done, was necessary and nowhere near
+  // sufficient.
+  //
+  // So the lookup reads only REGISTERED sources.  The consequence is that the
+  // instruction at a redirect target cannot be predicted -- the predictor was
+  // looking somewhere else during the cycle the redirect fired -- and
+  // `bp_flush` below tells the predictor to say so rather than answer about the
+  // wrong address.  One unpredicted instruction per redirect, and the entire EX
+  // datapath leaves the fetch path.
+  wire [31:0] bp_lookup_pc = front_stall  ? pc_q
+                           : bp_pred_taken ? bp_pred_target
+                           :                 pc_q + 32'd4;
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) pc_q <= RESET_PC;
+    else        pc_q <= pc_next;
+  end
+
+  rvntt_bpred u_bpred (
+      .clk         (clk),
+      .rst_n       (rst_n),
+      .lookup_pc   (bp_lookup_pc),
+      .flush       (ex_redirect),
+      .pred_taken  (bp_pred_taken),
+      .pred_target (bp_pred_target),
+      .upd_valid   (ex_bp_upd),
+      .upd_pc      (id_ex_q.pc),
+      .upd_kind    (ex_bp_kind),
+      .upd_taken   (ex_ctrl_xfer),
+      .upd_target  (ex_jump_target)
+  );
 
   assign imem_addr = pc_q;
 
@@ -222,14 +292,23 @@ module rvntt_core #(
       if_id_q.valid <= 1'b0;
       if_id_q.pc    <= RESET_PC;
       if_id_q.insn  <= 32'h0;
+      if_id_q.pred_taken  <= 1'b0;
+      if_id_q.pred_target <= 32'h0;
     end else if (ex_redirect) begin
       if_id_q.valid <= 1'b0;
       if_id_q.pc    <= pc_q;
       if_id_q.insn  <= 32'h0;
+      if_id_q.pred_taken  <= 1'b0;
+      if_id_q.pred_target <= 32'h0;
     end else if (!front_stall) begin
       if_id_q.valid <= 1'b1;
       if_id_q.pc    <= pc_q;
       if_id_q.insn  <= 32'h0;              // unused; insn comes from the RAM
+      // bp_pred_* describe pc_q, the address being fetched THIS cycle, and
+      // if_id_q.pc is loaded with that same pc_q -- so the prediction and the
+      // instruction it is about arrive together.
+      if_id_q.pred_taken  <= bp_pred_taken;
+      if_id_q.pred_target <= bp_pred_target;
     end
   end
 
@@ -325,6 +404,8 @@ module rvntt_core #(
       id_ex_q.rs1_data <= id_rs1_data;
       id_ex_q.rs2_data <= id_rs2_data;
       id_ex_q.rs3_data <= id_rs3_data;
+      id_ex_q.pred_taken  <= if_id.pred_taken;
+      id_ex_q.pred_target <= if_id.pred_target;
     end
   end
 
@@ -401,6 +482,8 @@ module rvntt_core #(
     endcase
   end
 
+  wire [31:0] ex_pc_plus4 = id_ex_q.pc + 32'd4;
+
   logic [31:0] ex_alu_a, ex_alu_b, ex_alu_y;
 
   always_comb begin
@@ -457,10 +540,28 @@ module rvntt_core #(
 
   assign ex_stall = ex_md_req && !ex_md_done;
 
+  // ---- A17: the dedicated address adder ------------------------------------
+  // A data address is ALWAYS rs1 + imm.  It is never a shift, an AND or a SUB,
+  // and the decoder enforces that: every load and store sets alu_op = ALU_ADD,
+  // alu_src_a = SRCA_RS1 and alu_src_b = SRCB_IMM.  So ex_mem_addr below and
+  // ex_alu_y are the same number for exactly the instructions that use it --
+  // a_addr_adder_matches_alu proves it rather than trusting the sentence.
+  //
+  // WHY A SECOND ADDER IS WORTH ITS AREA.  Taking the address off ex_alu_y put
+  // the ALU's four-level operation-select mux in front of the alignment check,
+  // which gates the trap, which gates the byte enables, which reach the BRAM's
+  // write enable.  A12 measured that mux at 33% of the critical path.  This
+  // adder is not on the ALU's result path at all, and the alignment check now
+  // needs only the bottom two bits of a sum -- no carry chain in front of it.
+  //
+  // It costs a 32-bit adder that is idle for most instructions.  At 3.3%
+  // utilisation that is the cheapest thing in the design to spend.
+  wire [31:0] ex_mem_addr = ex_rs1_fwd + id_ex_q.imm;
+
   // ---- data-memory request, issued from EX so the RAM's address register is
   // ---- the EX/MEM address register and rdata is valid during MEM.
   logic [1:0] ex_byte_off;
-  assign ex_byte_off = ex_alu_y[1:0];
+  assign ex_byte_off = ex_mem_addr[1:0];
 
   always_comb begin
     dmem_wdata = ex_rs2_fwd;
@@ -489,7 +590,7 @@ module rvntt_core #(
     end
   end
 
-  assign dmem_addr = ex_alu_y;
+  assign dmem_addr = ex_mem_addr;
 
   // ---- control transfer (A8) ----------------------------------------------
   // The ALU has already computed the target for all three shapes: pc + imm for
@@ -520,7 +621,57 @@ module rvntt_core #(
   // blanket `& ~1`, so a target that is misaligned for some other reason stays
   // misaligned -- which is exactly what the A9 misaligned-fetch trap below has
   // to be able to see.
-  assign ex_jump_target = id_ex_q.ctrl.jalr ? {ex_alu_y[31:1], 1'b0} : ex_alu_y;
+  // A19: THE BRANCH AND JAL TARGET DOES NOT NEED THE ALU.  Both its operands
+  // are registered -- pc and imm -- so a dedicated adder produces it a full ALU
+  // result-mux earlier, and the mispredict comparison that feeds ex_redirect
+  // starts that much earlier with it.  Same trick as A17's address adder and
+  // for the same reason: the ALU's four-level operation-select mux is in front
+  // of something that only ever wanted a sum.
+  //
+  // JALR is left on the ALU: its target genuinely depends on a register, which
+  // is the whole difference between it and the other two shapes.
+  wire [31:0] ex_pc_target = id_ex_q.pc + id_ex_q.imm;
+
+  assign ex_jump_target = id_ex_q.ctrl.jalr ? {ex_alu_y[31:1], 1'b0}
+                                            : ex_pc_target;
+
+  // ---- A19: checking the prediction, and telling the predictor -------------
+  // The predictor's classification is NOT the decoder's.  The decoder knows
+  // branch/JAL/JALR; the predictor needs to know whether a target comes from
+  // the BTB or from the return stack, which is a question about rd and rs1.
+  // docs/a19-bpred-spec.md section 4 has the table, including the one case it
+  // knowingly gets wrong -- link(rd) && link(rs1), the spec's "pop then push",
+  // which is classified CALL here and mispredicts its return.
+  wire ex_rd_link  = (id_ex_q.rd_addr  == 5'd1) || (id_ex_q.rd_addr  == 5'd5);
+  wire ex_rs1_link = (id_ex_q.rs1_addr == 5'd1) || (id_ex_q.rs1_addr == 5'd5);
+
+  always_comb begin
+    if      (id_ex_q.ctrl.branch)             ex_bp_kind = rv32i_pkg::BP_BRANCH;
+    else if (id_ex_q.ctrl.jalr && ex_rs1_link
+             && !ex_rd_link)                  ex_bp_kind = rv32i_pkg::BP_RET;
+    else if (ex_rd_link)                      ex_bp_kind = rv32i_pkg::BP_CALL;
+    else                                      ex_bp_kind = rv32i_pkg::BP_JUMP;
+  end
+
+  // A TRAPPING INSTRUCTION TEACHES THE PREDICTOR NOTHING.  It did not transfer
+  // control to its target; it transferred to mtvec, and recording that would
+  // make the BTB predict the trap vector for a branch that will not trap next
+  // time.  Nothing younger than EX can be flushed out from under this, because
+  // a flush only reaches IF/ID and ID/EX -- the instruction in EX is always the
+  // real one.
+  assign ex_bp_upd = id_ex_q.valid && !ex_stall && !ex_trap &&
+                     (id_ex_q.ctrl.branch || id_ex_q.ctrl.jump);
+
+  // The prediction was right when it agreed about BOTH the direction and, if
+  // taken, the address.  A prediction of taken on an instruction that is not a
+  // control transfer at all cannot happen -- index and tag together are the
+  // whole word address, so a hit is the same instruction that allocated the
+  // entry -- but it needs no special case either: ex_ctrl_xfer is 0, the
+  // comparison fails, and the redirect goes to pc + 4, which is correct.
+  wire ex_mispredict = id_ex_q.valid &&
+                       ((id_ex_q.pred_taken != ex_ctrl_xfer) ||
+                        (ex_ctrl_xfer &&
+                         (id_ex_q.pred_target != ex_jump_target)));
 
   // ---- Zicsr access (A9) ---------------------------------------------------
   // funct3 comes from the instruction word, as it does for the branch
@@ -620,8 +771,8 @@ module rvntt_core #(
   logic ex_addr_misaligned;
   always_comb begin
     unique case (id_ex_q.ctrl.mem_op)
-      rv32i_pkg::F3_LH, rv32i_pkg::F3_LHU: ex_addr_misaligned = ex_alu_y[0];
-      rv32i_pkg::F3_LW:                    ex_addr_misaligned = |ex_alu_y[1:0];
+      rv32i_pkg::F3_LH, rv32i_pkg::F3_LHU: ex_addr_misaligned = ex_mem_addr[0];
+      rv32i_pkg::F3_LW:                    ex_addr_misaligned = |ex_mem_addr[1:0];
       default:                             ex_addr_misaligned = 1'b0;  // byte
     endcase
   end
@@ -650,9 +801,9 @@ module rvntt_core #(
       end else if (ex_target_misaligned) begin
         ex_trap = 1'b1; ex_trap_cause = 5'd0;  ex_trap_val = ex_jump_target;
       end else if (id_ex_q.ctrl.mem_read && ex_addr_misaligned) begin
-        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = ex_alu_y;
+        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = ex_mem_addr;
       end else if (id_ex_q.ctrl.mem_write && ex_addr_misaligned) begin
-        ex_trap = 1'b1; ex_trap_cause = 5'd6;  ex_trap_val = ex_alu_y;
+        ex_trap = 1'b1; ex_trap_cause = 5'd6;  ex_trap_val = ex_mem_addr;
       end
     end
   end
@@ -663,12 +814,24 @@ module rvntt_core #(
   // and a redirect fired while EX was held would flush the front end around an
   // instruction that had not finished.  One AND gate, off the critical path,
   // to make the invariant structural instead of argued.
-  assign ex_redirect = !ex_stall && (ex_trap || ex_mret || ex_ctrl_xfer);
+  // A19 CHANGES WHAT SETS THIS AND NOTHING ELSE ABOUT IT.  A correctly
+  // predicted taken transfer no longer redirects at all -- that is the entire
+  // payoff -- and a branch predicted taken that resolves not-taken now
+  // redirects to pc + 4, which is a redirect this core has never issued
+  // before and is the whole of the downside term in the spec's section 7.
+  assign ex_redirect = !ex_stall && (ex_trap || ex_mret || ex_mispredict);
 
+  // ...and this is now the ARCHITECTURAL next pc in every case, whether or not
+  // a redirect is taken.  It has to be, because RVFI reports it as pc_wdata and
+  // a correctly predicted branch does not redirect: computing it from
+  // ex_redirect would have RVFI claim the branch fell through.  riscv-formal's
+  // pc_fwd is exactly the check that would have found that, and making the
+  // signal unconditional is cheaper than being found by it.
   always_comb begin
-    if      (ex_trap) ex_redirect_target = csr_mtvec;
-    else if (ex_mret) ex_redirect_target = csr_mepc;
-    else              ex_redirect_target = ex_jump_target;
+    if      (ex_trap)      ex_redirect_target = csr_mtvec;
+    else if (ex_mret)      ex_redirect_target = csr_mepc;
+    else if (ex_ctrl_xfer) ex_redirect_target = ex_jump_target;
+    else                   ex_redirect_target = ex_pc_plus4;
   end
 
   // ==========================================================================
@@ -700,7 +863,7 @@ module rvntt_core #(
       ex_mem_q.rd_addr    <= id_ex_q.rd_addr;
       ex_mem_q.ex_result  <= ex_result;
       ex_mem_q.store_data <= ex_rs2_fwd;
-      ex_mem_q.pc_plus4   <= id_ex_q.pc + 32'd4;
+      ex_mem_q.pc_plus4   <= ex_pc_plus4;
     end
   end
 
@@ -825,7 +988,6 @@ module rvntt_core #(
       .ex_stall           (ex_stall),
       .ex_pc              (id_ex_q.pc),
       .ex_insn            (id_ex_q.insn),
-      .ex_redirect        (ex_redirect),
       .ex_redirect_target (ex_redirect_target),
       .ex_uses_rs1        (id_ex_q.ctrl.uses_rs1),
       .ex_uses_rs2        (id_ex_q.ctrl.uses_rs2),
@@ -834,7 +996,7 @@ module rvntt_core #(
       .ex_rs1_fwd         (ex_rs1_fwd),
       .ex_rs2_fwd         (ex_rs2_fwd),
       .ex_mem_read        (id_ex_q.ctrl.mem_read),
-      .ex_alu_y           (ex_alu_y),
+      .ex_mem_addr        (ex_mem_addr),
       .ex_dmem_be         (dmem_be),
       .ex_dmem_wdata      (dmem_wdata),
 
@@ -869,6 +1031,47 @@ module rvntt_core #(
       .rvfi_mem_rdata     (rvfi_mem_rdata),
       .rvfi_mem_wdata     (rvfi_mem_wdata)
   );
+`endif
+
+  // ---- A17: the invariant the dedicated address adder rests on -------------
+  // Everything the adder is allowed to do follows from one equality: for the
+  // instructions that use an address, the second adder and the ALU agree.  It
+  // is stated here rather than argued in a comment because the argument is a
+  // property of the DECODER (alu_op/alu_src_a/alu_src_b for loads and stores)
+  // and decoders get edited.  Every riscv-formal check proves it at depth 14,
+  // for free, because an assert in the design is an obligation on all of them.
+  //
+  // The RISCV_FORMAL guard is not because the property is formal-only -- it is
+  // because that is the only harness in this project that reads the core with
+  // assertions enabled, and an unguarded SVA block would be dead text in the
+  // nine simulator builds here, none of which are compiled with assertions on.
+`ifdef RISCV_FORMAL
+  always_comb begin
+    if (id_ex_q.valid && (id_ex_q.ctrl.mem_read || id_ex_q.ctrl.mem_write))
+      a_addr_adder_matches_alu: assert (ex_mem_addr == ex_alu_y);
+  end
+
+  // ---- A19: the other half of rvntt_bpred's interface contract ------------
+  // The predictor ASSUMES both of these; asserting them here is what stops
+  // that assumption from being a hole.  It was not written down first -- the
+  // module's own proof found it, by predicting a misaligned return address
+  // from a RAS entry pushed by a CALL at a misaligned pc.  The core cannot do
+  // that (a pc is aligned or the fetch trapped, a target is aligned or the
+  // misaligned-target trap gated upd_valid off) and now it is proved rather
+  // than asserted in prose.
+  always_comb begin
+    if (ex_bp_upd) begin
+      a_bp_upd_pc_aligned:     assert (id_ex_q.pc[1:0]   == 2'b00);
+      // The dedicated branch/JAL target adder agrees with the ALU, for the
+      // shapes that use it.  Same shape of claim as a_addr_adder_matches_alu,
+      // and a property of the DECODER (SRCA_PC, SRCB_IMM, ALU_ADD for B and J)
+      // rather than of this file, so it is asserted rather than argued.
+      if (!id_ex_q.ctrl.jalr)
+        a_pc_target_matches_alu: assert (ex_pc_target == ex_alu_y);
+      a_bp_upd_target_aligned: assert (ex_jump_target[1:0] == 2'b00 ||
+                                       !ex_ctrl_xfer);
+    end
+  end
 `endif
 
 endmodule

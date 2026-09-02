@@ -22,8 +22,14 @@ set OUTDIR [pwd]/out
 
 set FAIL_ON_NEG 1
 set WANT_BIT    1
+# A17 lever 3.  "default" is A12's flow, unchanged to the command; anything else
+# is an opt-in.  The strategy is echoed into SOC_RESULT below, because an Fmax
+# number measured under a different implementation strategy is a different
+# measurement and the two must never be compared without saying so.
+set STRATEGY    "default"
 if {[llength $argv] > 0} { set FAIL_ON_NEG [lindex $argv 0] }
 if {[llength $argv] > 1} { set WANT_BIT    [lindex $argv 1] }
+if {[llength $argv] > 2} { set STRATEGY    [lindex $argv 2] }
 
 file mkdir $OUTDIR
 
@@ -68,10 +74,23 @@ if {$nbram < 8} {
 }
 
 # ------------------------------------------------------- place and route
-opt_design
-place_design
-phys_opt_design
-route_design
+# A17 lever 3.  MODS_A A17 names Performance_ExplorePostRoutePhysOpt, which in a
+# non-project flow is these directives plus a second phys_opt_design AFTER the
+# router -- the "PostRoutePhysOpt" half of the name, and the half that does
+# something a place-and-route rerun cannot.
+puts "=== implementation strategy: $STRATEGY ==="
+if {$STRATEGY eq "explore_postroute"} {
+  opt_design      -directive Explore
+  place_design    -directive Explore
+  phys_opt_design -directive Explore
+  route_design    -directive Explore
+  phys_opt_design -directive Explore
+} else {
+  opt_design
+  place_design
+  phys_opt_design
+  route_design
+}
 
 write_checkpoint -force $OUTDIR/post_route.dcp
 report_timing_summary -file $OUTDIR/post_route_timing.rpt
@@ -124,7 +143,7 @@ nanoseconds -- see rtl/core/rvntt_muldiv.sv."
 
 puts "=== core clock [get_property NAME $core_clk] period $period ns = $fmhz MHz ==="
 puts "=== WNS = $wns ns   WHS = $whs ns ==="
-puts "SOC_RESULT period=$period mhz=$fmhz wns=$wns whs=$whs luts=$luts ffs=$ffs bram=$nbram dsp=$ndsp"
+puts "SOC_RESULT period=$period mhz=$fmhz wns=$wns whs=$whs luts=$luts ffs=$ffs bram=$nbram dsp=$ndsp strategy=$STRATEGY"
 
 if {$wns < 0 || $whs < 0} {
   puts "SOC_TIMING_FAIL: WNS=$wns WHS=$whs"

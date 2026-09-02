@@ -46,6 +46,7 @@ always the reference for what it should do.
 """
 import argparse
 import random
+import re
 import sys
 
 # Registers the generator may write.  x0 is excluded (writes are discarded), and
@@ -85,6 +86,9 @@ class Gen:
         self.last_was_load = {}    # reg -> True if that write was a load
         self.label_n = 0
         self.pending_labels = []   # (index_to_emit_at, label)
+        # Set while a multi-instruction idiom is being emitted, to keep a
+        # branch target from landing INSIDE it.  See mem().
+        self.label_hold = False
 
     # ---------------------------------------------------------------- emit
     def _emit(self, text):
@@ -92,7 +96,8 @@ class Gen:
         # reaches it; labels are emitted between instructions, never inside a
         # padding run, so a branch can never land on a NOP that was inserted
         # after the target was chosen.
-        due = [lbl for at, lbl in self.pending_labels if at <= self.idx]
+        due = ([] if self.label_hold else
+               [lbl for at, lbl in self.pending_labels if at <= self.idx])
         if due:
             for lbl in due:
                 self.out.append(f"{lbl}:")
@@ -258,20 +263,56 @@ class Gen:
         self._emit(f"{op:<6} x{rd}, {imm}")
         self._wrote(rd)
 
+    # A17 added a second adder for the effective address, and doing so exposed
+    # two things this generator could never reach with x8 as the only base.
+    #
+    #   * x8 is NEVER WRITTEN -- that is what keeps every access inside the
+    #     scratch area -- so the address operand was never a forwarded value.
+    #     A mutation that read the address's rs1 straight out of ID/EX instead
+    #     of out of the forwarding mux was invisible to every random program
+    #     this generator has ever produced, in all of A6 through A16.
+    #   * an aligned base plus an aligned offset never carries out of bit 1, so
+    #     the bottom of the adder was only ever exercised in its easy case.
+    #
+    # Both are fixed by ALIASING THE BASE: `addi xN, x8, k` immediately before
+    # the access, with the offset reduced by k so the address is unchanged.  k
+    # is not aligned, which puts arbitrary bits in the base's low two, and the
+    # access still lands exactly where it would have.
+    P_ALIAS_BASE = 0.25
+
     def mem(self):
-        if self.rng.random() < 0.5:
-            op, align = self.rng.choice(LOADS)
-            off = self.rng.randrange(0, SCRATCH_BYTES - 4) // align * align
+        load = self.rng.random() < 0.5
+        op, align = self.rng.choice(LOADS if load else STORES)
+        total = self.rng.randrange(0, SCRATCH_BYTES - 4) // align * align
+
+        base, off = BASE_REG, total
+        if self.rng.random() < self.P_ALIAS_BASE:
+            base = self._r()                       # from the pool: never x0, never x8
+            k = self.rng.randrange(0, total + 1)
+            off = total - k
+            self._emit(f"addi   x{base}, x{BASE_REG}, {k}")
+            self._wrote(base)
+            # THE ADDI AND ITS ACCESS ARE ONE IDIOM AND A LABEL MUST NOT SPLIT
+            # THEM.  A branch landing between the two enters with the base
+            # register holding whatever it held before -- an arbitrary 32-bit
+            # value -- and the access goes somewhere outside scratch, usually
+            # misaligned.  That breaks the generator's first promise, that the
+            # program never traps before its final ECALL, and the symptom is
+            # not a wrong answer: Spike takes the trap, the program never
+            # reaches ECALL, and the run HANGS.  Found exactly that way, by a
+            # 600-second Spike timeout in the mutation suite.
+            self.label_hold = True
+
+        if load:
             rd = self._r()
-            self._pad_for([BASE_REG])
-            self._emit(f"{op:<6} x{rd}, {off}(x{BASE_REG})")
+            self._pad_for([base])
+            self._emit(f"{op:<6} x{rd}, {off}(x{base})")
             self._wrote(rd, is_load=True)
         else:
-            op, align = self.rng.choice(STORES)
-            off = self.rng.randrange(0, SCRATCH_BYTES - 4) // align * align
             rs2 = self._any_src()
-            self._pad_for([BASE_REG, rs2])
-            self._emit(f"{op:<6} x{rs2}, {off}(x{BASE_REG})")
+            self._pad_for([base, rs2])
+            self._emit(f"{op:<6} x{rs2}, {off}(x{base})")
+        self.label_hold = False
 
     # A branch between two independently random 32-bit values is almost never
     # taken for beq and almost always taken for bne, and the fall-through and
@@ -436,6 +477,43 @@ def _scratch_init():
 EPILOGUE = EPILOGUE.replace("{scratch_words}", _scratch_init())
 
 
+MEM_RE = re.compile(r"^\s+(lw|lh|lhu|lb|lbu|sw|sh|sb)\s+x\d+,\s*-?\d+\(x(\d+)\)")
+ALIAS_RE = re.compile(r"^\s+addi\s+x(\d+), x%d, \d+$" % BASE_REG)
+
+
+def check_alias_bases(lines):
+    """Every aliased base is initialised on every path that reaches its access.
+
+    The generator's first promise is that the program never traps before its
+    final ECALL, and the aliased base of `mem()` is the one construct that can
+    break it: a branch target emitted between the `addi` and the access lets
+    control arrive with the base register holding an arbitrary value, and the
+    access then leaves the scratch area.  `label_hold` prevents that; this
+    checks it, because the failure mode is a HANG rather than a wrong answer --
+    mtvec is not armed until the epilogue, so a trap in the body jumps to zero
+    and runs forever, and what the harness reports is a 600-second timeout with
+    no indication of which instruction caused it.
+
+    Raises AssertionError rather than returning a flag: a generator that emits
+    a trapping program has no correct output to fall back on.
+    """
+    for i, line in enumerate(lines):
+        m = MEM_RE.match(line)
+        if not m or int(m.group(2)) == BASE_REG:
+            continue
+        base = int(m.group(2))
+        j = i - 1
+        while j >= 0 and lines[j].strip() == "nop":
+            j -= 1
+        assert j >= 0, "aliased access at line %d has nothing before it" % i
+        a = ALIAS_RE.match(lines[j])
+        assert a and int(a.group(1)) == base, (
+            "aliased access `%s` is not immediately preceded by its "
+            "`addi x%d, x%d, k` -- found `%s`.  A label between the two makes "
+            "the base register arbitrary on the branch's path."
+            % (line.strip(), base, BASE_REG, lines[j].strip()))
+
+
 def generate(seed, n=200, pool=None, raw_d=0.0, lu_d=0.0, br_d=0.0, mul_d=0.0):
     """Return the full assembly source for one random program."""
     pool = pool or DEFAULT_POOL
@@ -443,7 +521,9 @@ def generate(seed, n=200, pool=None, raw_d=0.0, lu_d=0.0, br_d=0.0, mul_d=0.0):
     # they may be in the pool; the base register may not.
     assert BASE_REG not in pool, "the memory base register must not be written"
     g = Gen(seed, n, pool, raw_d, lu_d, br_d, mul_d)
-    body = "\n".join(g.generate())
+    lines = g.generate()
+    check_alias_bases(lines)
+    body = "\n".join(lines)
     return (PROLOGUE % (seed, n, raw_d, lu_d, br_d, mul_d)) + body + "\n" + EPILOGUE
 
 

@@ -8,7 +8,7 @@
 # NOTE: the WSL<->Windows interop socket is blocked under the agent sandbox, so
 # this must run with the sandbox disabled (or from a normal shell).
 #
-# Usage: build_soc.sh [fail_on_neg] [want_bit]
+# Usage: build_soc.sh [fail_on_neg] [want_bit] [strategy]
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,6 +16,10 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 
 FAIL_ON_NEG="${1:-1}"
 WANT_BIT="${2:-1}"
+# A17 lever 3.  Empty and "default" both mean A12's flow; the value is passed
+# through to build_soc.tcl and echoed back in SOC_RESULT, so a number measured
+# under a non-default strategy cannot be quoted as if it were a default one.
+STRATEGY="${3:-${SOC_STRATEGY:-default}}"
 
 VIVADO_WIN="${VIVADO_WIN:-C:\\AMDDesignTools\\2025.2\\Vivado\\bin\\vivado.bat}"
 STAGE_WIN="${STAGE_WIN:-C:\\Users\\liamf\\rvntt-soc}"
@@ -62,7 +66,7 @@ echo "image: $SOC_MEM ($(wc -l < "$SOC_MEM") words)"
 
 echo "=== running Vivado (batch) ==="
 cd "$STAGE_WSL"
-cmd.exe /c "cd /d $STAGE_WIN && $VIVADO_WIN -mode batch -log vivado.log -journal vivado.jou -source build_soc.tcl -tclargs $FAIL_ON_NEG $WANT_BIT" 2>&1
+cmd.exe /c "cd /d $STAGE_WIN && $VIVADO_WIN -mode batch -log vivado.log -journal vivado.jou -source build_soc.tcl -tclargs $FAIL_ON_NEG $WANT_BIT $STRATEGY" 2>&1
 rc=$?
 
 echo "=== copying products back ==="

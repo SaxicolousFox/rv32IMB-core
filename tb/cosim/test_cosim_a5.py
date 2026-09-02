@@ -32,6 +32,15 @@ sys.path.insert(0, os.path.join(ROOT, "tb/unit"))
 import spike_asm          # noqa: E402
 import commit_diff        # noqa: E402
 import cycle_model        # noqa: E402
+
+# A19.  The span identity's control term is `2 x redirects` on a statically
+# not-taken core and `2 x mispredicts` on a predicting one, and cycle_model.py
+# implements both -- see its header and docs/a19-bpred-spec.md.  This says
+# which machine is being checked.  It is a constant rather than a probe of the
+# RTL on purpose: the model is supposed to know what the core is from the
+# specification, and a model that sniffs the design for the answer has stopped
+# being independent of it.
+CORE_HAS_PREDICTOR = True
 import gen_random_prog    # noqa: E402
 import test_core_verilator as t4   # noqa: E402
 
@@ -115,7 +124,7 @@ def run_one(exe, elf, tmp, image_path, name, context=6, verbose=False,
             print(f"\n=== {name}: no span reported ===\n    " + out)
             return False
         actual = int(m.group(1))
-        pred = cycle_model.analyse(rt)
+        pred = cycle_model.analyse(rt, predictor=CORE_HAS_PREDICTOR)
         if pred["span"] != actual:
             print(f"\n=== {name}: CYCLE COUNT DISAGREES ===")
             print("  The commit logs are byte-identical, so this is a timing "
