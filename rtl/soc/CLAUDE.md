@@ -55,6 +55,59 @@ transposed. Fixing two output pins, a change with no logical content, cost
 Utilisation at Fmax: **2126 LUTs (3.4%), 913 FFs (0.7%), 32 BRAM tiles (23.7%),
 0 DSPs, 1 MMCM, 19 IOBs.**
 
+### A16 re-measured it after A14 added M, and it went UP
+
+**Fmax = 73.752 MHz** with the M extension in the core — Vivado 2025.2, same
+part, same **-1** speed grade, same default strategy, same `soc_init.mem` image,
+six full implementation runs. **A12's 70.131 MHz is preserved above as the RV32I
+record and is not superseded**; the two are measurements of two designs.
+
+| Constraint | Period | WNS | WHS | |
+|---|---|---|---|---|
+| 72.998 MHz | 13.699 ns | +0.111 | +0.071 | pass |
+| **73.752 MHz** | **13.559 ns** | **+0.005** | **+0.066** | **pass — Fmax** |
+| 74.118 MHz | 13.492 ns | −0.494 | +0.085 | fail |
+| 74.488 MHz | 13.425 ns | −0.388 | +0.091 | fail |
+| 75.999 MHz | 13.158 ns | −0.494 | +0.072 | fail |
+| 79.001 MHz | 12.658 ns | −0.673 | +0.133 | fail |
+
+**Adding a 33×33 multiplier and a 32-cycle divider made the design 5.2%
+faster.** That is not a paradox and it is not a mistake — it is the ±0.4 ns
+spread in the section below, arriving in the direction nobody double-checks. The
+critical path does not go through either new unit, A14 changed placement, and
+placement is worth more than the M extension costs. **The lesson is the one A12
+already recorded, and this is the harder half of it**: a *favourable* Fmax
+movement after a design change is exactly as much a measurement of a different
+design as an unfavourable one, and is far less likely to be questioned.
+
+Non-monotonicity shows up again, twice: 74.118 MHz fails by −0.494 while the
+*slower* 74.488 MHz fails by only −0.388, and 75.999 MHz fails by the same
+−0.494 as 74.118.
+
+Utilisation at Fmax: **2613 LUTs (4.1%), 1148 FFs (0.9%), 32 BRAM tiles,
+4 DSP48E1 (1.7%), 1 MMCM, 19 IOBs** — so M cost **+487 LUTs, +235 FFs and
+4 DSPs**, and no BRAM. `build_soc.tcl` now counts DSP primitives by `REF_NAME`
+and **fails the build** below four: a multiplier that fell back to fabric would
+still be correct, would cost about a thousand LUTs and several nanoseconds, and
+every symptom would appear as a timing number with no obvious cause.
+
+**The critical path is the same shape it was**, which is what makes A17 still the
+right next move. Source `ex_mem_q_reg[rd_addr]`, destination the BRAM — this time
+`DIADI` (store data) rather than `WEA` (byte enables), which are the two halves
+of the same gated store. 13.168 ns of data path, **logic 2.870 ns (21.8%), route
+10.298 ns (78.2%)** — the same 78% as A12, on a different design:
+
+| segment | delay | share |
+|---|---|---|
+| EX/MEM `rd_addr` → forwarding mux → `ex_alu_a` | 4.49 ns | 34% |
+| → CARRY4 ×2 (the ALU adder) → ALU result mux | 3.52 ns | 27% |
+| → `ex_trap9_out` (fanout **176**) | 1.64 ns | 12% |
+| → store-data mux → BRAM `DIADI` | 2.78 ns | 21% |
+
+The final core-to-BRAM net is 1.424 ns — **11% of the path**, again under a
+fifth, exactly as the corrected A12 analysis said. Forwarding mux plus ALU chain
+is 61%, and that is what A17 is aimed at.
+
 ### How much to trust the last digit: about ±0.4 ns
 
 Transposing two **output pins** — a change with no logical content at all, and

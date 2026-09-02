@@ -6,6 +6,13 @@ result. The machine-readable record is
 [`docs/a13-benchmarks.json`](a13-benchmarks.json), and **Reproducing it** has the
 exact commands.
 
+> **These are the RV32I numbers, and they still stand.** `MODS_A` A14 added the
+> M extension and A16 re-measured; see
+> [`docs/a16-benchmarks.md`](a16-benchmarks.md). Nothing below is superseded —
+> A16 re-ran **this exact image** on the RV32IM core and got every counter back
+> identical, to the cycle, so this page is a measurement of the software as much
+> as of the hardware it was taken on.
+
 **Three separate JTAG programming passes, three report blocks each — all nine
 blocks identical to the cycle.** Not "within tolerance": every counter, every
 CRC, byte for byte. That is the plan's "reproducible across three runs",

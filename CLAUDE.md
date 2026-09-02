@@ -187,13 +187,16 @@ confirm it is satisfied.
 | M3 | Spike executes the extension; ML-KEM keygen passes on Spike | ✅ full 10000-vector KAT |
 | M4 | Pipeline passes 1000 random programs in lockstep cosim vs. Spike | ✅ at max hazard density |
 | M5 | RISCOF RV32I compliance suite passes | ✅ 38/38 `I`, plus hints and privilege |
-| M6 | riscv-formal checks pass | ✅ 43 checks at BMC depth 14 |
+| M6 | riscv-formal checks pass | ✅ 43 checks at BMC depth 14 (`liveness` 47 since A15) |
 | M7 | Core-only bitstream: Fmax + Dhrystone + CoreMark on hardware | ✅ hardware-confirmed |
+| **M7.1** | **RV32IM core: `M` verified and the benchmark re-measured** (`MODS_A`) | ✅ **hardware-confirmed** |
+| M7.2 | Core performance: Fmax recovered and branch prediction measured (`MODS_A`) | not started — A17–A19 |
 | M8–M16 | — | not started |
 
 **M5 is a compliance claim, and its boundaries are recorded rather than
 implied.** The RV32I `I` suite passes 38/38 and the report is committed at
-`docs/riscof-report.html`. The `pmp` tests are **excluded by name**, because
+`docs/riscof-report.html`. **A15 added the `M` suite — 8/8, so the report is now
+84/84** — and that is recorded under M7.1 rather than by re-opening M5. The `pmp` tests are **excluded by name**, because
 plan §1.5 excludes PMP and riscof 1.25.3 ignores the `verify` clause those
 tests use to deselect themselves. RISCOF itself is deprecated upstream — the
 arch-test default branch has moved to ACT4, which needs Sail and a UDB config —
@@ -201,7 +204,20 @@ so `toolchain/riscv-arch-test` is pinned to the maintained `old-framework-3.x`
 branch. See `rtl/core/CLAUDE.md` for the four corrections it took to get a
 report that means anything.
 
-**M6's boundaries are recorded too.** The 36 RV32I instruction models plus
+**M6's boundaries are recorded too, and A15 added one more to the list.**
+`rvntt_muldiv`'s *arithmetic* is abstracted to a free value in the riscv-formal
+run: a combinational 33×33 multiplier unrolled fourteen times is the canonical
+hard SAT instance, and it sits in the cone of the RVFI outputs whether any check
+reads it or not — it took the 43 checks from 40 s for the whole set to several
+hundred seconds each. Its **sequencer is not abstracted**, so every stall,
+bubble and retirement time those checks depend on is the real design's. The
+arithmetic is proved separately by `formal_muldiv` at depth 37, by the eight
+`rv32um` tests and by cosimulation. riscv-formal's own `insn_mul*`/`insn_div*`
+models are deliberately **not** enabled — against the abstraction they would be
+vacuous and against the concrete multiplier they do not converge — and that is
+`MODS_A` §3.2's third route taken knowingly, not a check quietly skipped.
+
+ The 36 RV32I instruction models plus
 `reg`, `pc_fwd`, `pc_bwd`, `causal`, `liveness` and `unique` all pass at depth
 14. What is **not** proved: memory consistency (`dmem` and the `bus_*` checks
 need a memory model in the wrapper, which would defeat the unconstrained
@@ -274,6 +290,42 @@ recognises the extension and LD0 red lights if one ever retires, but no stage
 runs it. Also no flash image (configuration is volatile), and no attribution of
 the 0.384 stall cycles per instruction the benchmarks measured, which would need
 branch and stall counters the core does not have (`MODS_A` A18).
+
+**M7.1 is met by A14, A15 and A16 together, and is hardware-confirmed.**
+**Fmax 73.752 MHz** (up from A12's 70.131 — see below), **DMIPS/MHz 0.7325,
+CoreMark/MHz 2.4309, IPC 0.6860 (Dhrystone) and 0.7006 (CoreMark)** at
+73.750 000 MHz, over three JTAG programming passes with all twelve report blocks
+identical to the cycle. 2613 LUTs, 1148 FFs, 32 BRAM tiles, **4 DSP48E1**. See
+`docs/a16-benchmarks.md` and `docs/a16-benchmarks.json`.
+
+**The dual baseline, which is the number §10 M2 and M3 actually depend on**: the
+same reference ML-KEM NTT compiled `-march=rv32i` and `-march=rv32im`, linked
+into one image, measured on one core at one clock — **205 884 vs 39 058 cycles
+and 148 655 vs 23 805 instructions, a 5.271× cycle and 6.245× instruction
+ratio**, with all 256 output coefficients identical between the two builds. The
+instruction ratio matches the 6.247× A13 measured on Spike. Plan §B6's
+"15 000–30 000 cycles" baseline estimate lands inside the RV32IM band and 5–10×
+outside the RV32I one, which is the contradiction `MODS_A` §1 exists to resolve.
+
+**A13's RV32I figures are preserved, and A16 proved it rather than asserting
+it**: A13's exact image was rebuilt and run on the RV32IM core, and every
+counter came back identical — 155 800 003 cycles and 112 600 032 instructions
+for Dhrystone, 832 746 233 and 577 088 625 for CoreMark. **Adding M cost RV32I
+code exactly zero cycles.** `docs/a13-benchmarks.md` still stands as the RV32I
+record.
+
+**`MODS_A` A14 predicted Dhrystone and CoreMark would both improve. Only one
+does.** CoreMark/MHz went ×2.53; Dhrystone moved +0.3%, because it retires 5.3%
+fewer instructions and pays almost all of it back in four-cycle `MUL` stalls —
+its IPC *falls*, 0.7227 to 0.6860. M's benefit is concentrated in multiply-bound
+code, which is ML-KEM's polynomial arithmetic and not Keccak.
+
+**Fmax went UP by 5.2% after adding a multiplier and a divider**, and that is
+the ±0.4 ns placement spread A12 recorded arriving in the direction nobody
+double-checks. The critical path is the same one A12 had — forwarding mux, ALU,
+trap, BRAM — and neither new unit is on it. **A favourable Fmax movement across
+a design change is exactly as much a measurement of a different design as an
+unfavourable one.** `rtl/soc/CLAUDE.md` has the table and the hop-by-hop path.
 
 **A14 and A15 are done: the core is RV32IM.** A generic multi-cycle EX handshake
 — built for plan §8 I1's Xkntt Tier-1 unit and exercised first by a standard

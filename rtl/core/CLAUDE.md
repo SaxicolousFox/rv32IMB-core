@@ -856,9 +856,15 @@ What the mapping table says, and it is worth reading rather than the count:
 **`MREG` is not used at all** — the 33×33 is one expression, so there is no
 register in the source between the partial products and the cascade adds for
 Vivado to push into `M`. The consequence is a combinational path through two
-chained DSPs inside one clock. That is very likely still inside A12's 13.373 ns
-budget, but it is a candidate for the new critical path, and **A16's Fmax search
-is what will say** — not this paragraph.
+chained DSPs inside one clock, which was flagged here as a candidate for the new
+critical path with A16's Fmax search named as the thing that would settle it.
+
+**A16 settled it: no.** The post-route critical path is the same
+`EX/MEM rd_addr → forwarding mux → ALU → trap → BRAM` path A12 had, the
+multiplier is nowhere on it, and Fmax went *up* — 70.131 to 73.752 MHz. The
+unused `MREG` costs nothing today. It is still the lever to reach for if a later
+step makes the multiplier critical, and it is written down here so that step does
+not have to rediscover it.
 
 Total: 403 LUTs, 239 FFs, 53 CARRY4, 4 DSP48E1, out of 63,400 / 126,800 / 240.
 
