@@ -94,12 +94,37 @@ The store byte enables depend on that same address for sub-word alignment, so
 "forwarding → ALU → alignment → WEA" is one combinational path by construction.
 The timing cost of that choice is now a number rather than an opinion.
 
-**78% route delay at 3.3% utilisation is the more interesting half.** The design
-is tiny; it is slow because it is *spread out*, and it is spread out because the
-32 BRAMs of the 128 KB array are scattered across the die and the logic follows
-them. Anyone trying to push past 73 MHz should look there — a floorplan
-constraint or a smaller array — before touching the forwarding muxes, because
-2.88 ns of logic is not what is costing the time.
+**78% route delay at 3.3% utilisation is the more interesting half — but the
+first reading of it was wrong, and the correction matters.** This file used to
+say the design is slow *because* it is spread across the 32 BRAMs of the 128 KB
+array, and that anyone pushing past 73 MHz should start with a floorplan
+constraint or a smaller array. Reading the post-route path hop by hop
+(`fpga/build/*/post_route_critical.rpt`) says otherwise. Of the 13.373 ns:
+
+| segment | delay | share |
+|---|---|---|
+| EX/MEM `rd_addr` → forwarding mux → `ex_alu_b` | 4.56 ns | 34% |
+| `ex_alu_b` → CARRY4 → **ALU result mux, 4× LUT6** → `ex_addr_misaligned` | 4.44 ns | 33% |
+| misalign → `ex_trap7_out` (**fanout 245**) → `dmem_be` | 2.14 ns | 16% |
+| `dmem_be` → `ram_be` → BRAM `WEA` | 1.32 ns | 10% |
+
+**The core-to-BRAM crossing is under a fifth of the path.** Roughly half is a
+logical dependency chain, and the route dominance is substantially a
+*consequence* of that chain being long enough that the placer cannot keep it
+local — not an independent cause. The BRAM spread is real and contributes, but
+it is not the lever it was described as.
+
+The lever is `ex_addr_misaligned`, which is `|ex_alu_y[1:0]` — bits read off the
+**muxed** ALU output, so the entire four-level operation-select mux sits in front
+of the alignment check, which then gates the trap, which then gates the byte
+enables. A memory address is always `rs1 + imm`; it is never a shift or an AND.
+A dedicated address adder feeding `dmem_addr` and the misalign check would
+bypass that mux entirely. That, plus `MAX_FANOUT` on the 245-load trap net, is
+where to start — not the forwarding muxes, and not the array size.
+
+(Note also that the two LUT counts in this project are both correct and count
+different things: `build_soc.tcl` counts LUT **primitives** — 2126 — while
+Vivado's utilisation report counts **Slice LUTs after LUT combining** — 1893.)
 
 ---
 

@@ -219,8 +219,12 @@ first search said 73.121 MHz, on a build whose RGB LED red and blue pins were
 transposed. Correcting two output pins — no logical content at all — cost 3 MHz
 through placement alone. The design-to-design spread is about ±0.4 ns. The critical path is EX/MEM `rd_addr` → forwarding mux →
 ALU → store byte-enables → BRAM `WEA`, and it is **78% route delay at 3.3%
-utilisation** — the design is slow because it is spread across the 32 BRAMs, not
-because the logic is deep. See `rtl/soc/CLAUDE.md` and `docs/fpga-bringup.md`.
+utilisation**. An earlier reading of that blamed the 32-BRAM spread; the hop-by-hop
+post-route path says the core-to-BRAM crossing is **under a fifth** of it and that
+about half is a logical dependency chain — forwarding mux, then the full ALU
+result mux, then the misaligned-address check, then the trap gating the byte
+enables. The correction and the lever it points at are in `rtl/soc/CLAUDE.md`;
+see also `docs/fpga-bringup.md`.
 
 **M7 is met by A12 and A13 together** — §12's text is "Core-only bitstream: Fmax
 measured, Dhrystone + CoreMark on hardware", and neither step alone does it.
