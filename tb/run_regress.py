@@ -411,8 +411,15 @@ def discover() -> list:
     t.append(Test("bench_hardware", "fpga",
                   [py, os.path.join(ROOT, "fpga/scripts/hw_bringup.py"),
                    "--regress",
-                   "--bit", os.path.join(ROOT, "fpga/build/bench/rvntt_soc_top.bit"),
-                   "--seconds", "60", "--send-byte", "-1",
+                   # A16's bitstream, not A13's: the benchmark this reproduces
+                   # is the current one.  A13's RV32I numbers are preserved by
+                   # docs/a13-benchmarks.md and by A16's control image, not by
+                   # leaving the regression pointed at a stale .bit.
+                   "--bit", os.path.join(ROOT, "fpga/build/bench_a16/rvntt_soc_top.bit"),
+                   # 75 s, not 60: CoreMark needs 2200 iterations to clear its
+                   # own ten-second minimum now that M has made it 2.53x faster,
+                   # so a block is ~14.5 s and three of them do not fit in 60.
+                   "--seconds", "75", "--send-byte", "-1",
                    "--out-name", "bench_uart.log",
                    "--parser", os.path.join(ROOT, "tb/fpga/parse_bench_uart.py"),
                    # `--parser-arg=--flag` rather than `--parser-arg --flag`:
@@ -420,7 +427,7 @@ def discover() -> list:
                    # option and rejects the separated form.
                    "--parser-arg=--min-blocks", "--parser-arg=3",
                    "--parser-arg=--json",
-                   "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench/a13.json")],
+                   "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a16/a16.json")],
                   timeout=1800))
 
     # Mutation testing (A6+).  ON by default, at about 3m45s -- it rebuilds the

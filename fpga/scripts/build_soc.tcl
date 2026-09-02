@@ -99,9 +99,32 @@ set fmhz     [expr {1000.0 / $period}]
 set luts [llength [get_cells -hierarchical -filter {PRIMITIVE_GROUP == LUT}]]
 set ffs  [llength [get_cells -hierarchical -filter {PRIMITIVE_GROUP == FLOP_LATCH}]]
 
+# A14's multiplier MUST be on DSP48E1s, and this is where that gets checked in
+# the design that ships rather than in an out-of-context experiment.  Counted by
+# REF_NAME over every primitive, with nothing filtered: fpga/scripts/synth_ooc.tcl
+# first tried to count DSPs by PRIMITIVE_TYPE and reported ZERO over a netlist
+# containing four, because the group name was guessed rather than looked up.  A
+# histogram-style count names no group and therefore cannot name one wrongly.
+#
+# A multiplier that fell back to fabric would still be CORRECT -- which is why
+# this is a hard failure rather than a warning.  It would cost roughly a
+# thousand LUTs and several nanoseconds, and every symptom would show up as a
+# timing number with no obvious cause.
+set ndsp 0
+foreach c [get_cells -hierarchical -filter {IS_PRIMITIVE}] {
+  if {[string match "DSP*" [get_property REF_NAME $c]]} { incr ndsp }
+}
+puts "=== inferred DSP primitives: $ndsp ==="
+if {$ndsp < 4} {
+  puts "SOC_FAIL: the 33x33 multiplier was not mapped to DSP48E1 ($ndsp DSPs).\
+It would still be correct, and it would cost about a thousand LUTs and several\
+nanoseconds -- see rtl/core/rvntt_muldiv.sv."
+  exit 1
+}
+
 puts "=== core clock [get_property NAME $core_clk] period $period ns = $fmhz MHz ==="
 puts "=== WNS = $wns ns   WHS = $whs ns ==="
-puts "SOC_RESULT period=$period mhz=$fmhz wns=$wns whs=$whs luts=$luts ffs=$ffs bram=$nbram"
+puts "SOC_RESULT period=$period mhz=$fmhz wns=$wns whs=$whs luts=$luts ffs=$ffs bram=$nbram dsp=$ndsp"
 
 if {$wns < 0 || $whs < 0} {
   puts "SOC_TIMING_FAIL: WNS=$wns WHS=$whs"
