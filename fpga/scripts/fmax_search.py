@@ -31,7 +31,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 RE_RESULT = re.compile(r"^SOC_RESULT (.*)$", re.M)
 
 
-def run_one(mhz, keep_dir):
+def run_one(mhz, keep_dir, strategy="default"):
     """Implement at `mhz` and return the parsed SOC_RESULT dict (or None)."""
     r = subprocess.run([sys.executable,
                         os.path.join(ROOT, "fpga/scripts/gen_soc_clk.py"),
@@ -46,7 +46,7 @@ def run_one(mhz, keep_dir):
     env["OUT"] = keep_dir
     t0 = time.time()
     r = subprocess.run(["bash", os.path.join(ROOT, "fpga/scripts/build_soc.sh"),
-                        "0", "0"],
+                        "0", "0", strategy],
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env)
     out = r.stdout.decode("utf-8", "replace")
     dt = time.time() - t0
@@ -73,6 +73,12 @@ def main() -> int:
     ap.add_argument("--tol", type=float, default=1.0, help="stop when hi-lo < tol")
     ap.add_argument("--max-iters", type=int, default=8)
     ap.add_argument("--out", default=os.path.join(ROOT, "fpga/build/fmax"))
+    # A17 lever 3.  The strategy is part of the MEASUREMENT, not of the tooling:
+    # A12's number, A16's and A17 lever 1's were all taken under "default", and a
+    # number taken under anything else is comparable only to other numbers taken
+    # under the same thing.  It is recorded in the summary for that reason.
+    ap.add_argument("--strategy", default="default",
+                    choices=["default", "explore_postroute"])
     a = ap.parse_args()
 
     # ABSOLUTE, always.  build_soc.sh cds into its Windows staging directory
@@ -90,7 +96,7 @@ def main() -> int:
     # The endpoints are measured, not assumed.  Taking `lo` on trust is how a
     # search converges neatly onto a number that was never verified.
     for label, mhz in (("lo", lo), ("hi", hi)):
-        d = run_one(mhz, os.path.join(a.out, "mhz_%.2f" % mhz))
+        d = run_one(mhz, os.path.join(a.out, "mhz_%.2f" % mhz), a.strategy)
         if d is None:
             print("FMAX_FAIL: implementation did not complete at %.2f MHz" % mhz)
             return 1
@@ -116,7 +122,7 @@ def main() -> int:
     while hi - lo >= a.tol and it < a.max_iters:
         it += 1
         mid = (lo + hi) / 2.0
-        d = run_one(mid, os.path.join(a.out, "mhz_%.2f" % mid))
+        d = run_one(mid, os.path.join(a.out, "mhz_%.2f" % mid), a.strategy)
         if d is None:
             print("FMAX_FAIL: implementation did not complete at %.2f MHz" % mid)
             return 1
@@ -146,8 +152,11 @@ def main() -> int:
         "luts": best["luts"], "ffs": best["ffs"], "bram": best["bram"],
         "part": "xc7a100tcsg324-1", "speed_grade": "-1",
         "vivado": "2025.2",
-        "strategy": "default (synth_design + opt/place/phys_opt/route_design, "
-                    "no directive overrides)",
+        "strategy": (
+            "default (synth_design + opt/place/phys_opt/route_design, "
+            "no directive overrides)" if a.strategy == "default" else
+            "explore_postroute (opt/place/phys_opt/route -directive Explore, "
+            "plus a second post-route phys_opt_design)"),
         "history": history,
     }
     with open(os.path.join(a.out, "fmax.json"), "w") as f:
@@ -159,7 +168,8 @@ def main() -> int:
     if summary["first_failing_mhz"]:
         print("fastest constraint that FAILED: %.3f MHz"
               % summary["first_failing_mhz"])
-    print("Vivado 2025.2, xc7a100tcsg324-1 (-1 speed grade), default strategy")
+    print("Vivado 2025.2, xc7a100tcsg324-1 (-1 speed grade), strategy %s"
+          % a.strategy)
     print("LUTs %d  FFs %d  BRAM tiles %d" % (best["luts"], best["ffs"], best["bram"]))
     print("wrote %s" % os.path.relpath(os.path.join(a.out, "fmax.json"), ROOT))
     print("FMAX_OK")

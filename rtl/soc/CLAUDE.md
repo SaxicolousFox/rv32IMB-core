@@ -108,6 +108,113 @@ The final core-to-BRAM net is 1.424 ns — **11% of the path**, again under a
 fifth, exactly as the corrected A12 analysis said. Forwarding mux plus ALU chain
 is 61%, and that is what A17 is aimed at.
 
+### A19 took it BACK DOWN to 77.501 MHz, and that is the trade
+
+**Fmax = 77.501 MHz** with the branch predictor — Vivado 2025.2, same part, same
+**-1** speed grade, `explore_postroute`, seven implementation runs. WNS +0.003 ns,
+WHS +0.030 ns, fastest failing constraint 77.942 MHz. **3471 LUTs, 1530 FFs, 32
+BRAM tiles, 4 DSP48E1** — the predictor is about a third of the core's logic.
+
+**This is the core-only Fmax baseline for §9**, superseding A17's number below.
+A17's 86.490 MHz is preserved as the measurement of the machine without a
+predictor, exactly as A12's and A16's are preserved below it.
+
+| | A16 (RV32IM) | A17 | **A19** |
+|---|---|---|---|
+| Fmax | 73.752 MHz | 86.490 MHz | **77.501 MHz** |
+| period | 13.559 ns | 11.562 ns | **12.903 ns** |
+| LUTs / FFs | 2613 / 1148 | 2637 / 1157 | **3471 / 1530** |
+| Dhrystone IPC | 0.6860 | 0.6860 | **0.8752** |
+| DMIPS (absolute) | 54.03 | 63.35 | **72.43** |
+
+**A 10.4% clock loss bought a 27.6% IPC gain**, so the board is faster in
+absolute terms on a slower part. The decision to keep it is recorded in
+`docs/a19-benchmarks.md` along with everything needed to reverse it.
+
+**THE FIRST BUILD FAILED 80 MHz BY 3.886 ns**, and the fix was architectural
+rather than a lever. Looking the predictor up with `pc_next` puts the ALU in the
+fetch path, because `pc_next` contains `ex_redirect_target`:
+
+    ex_mem_q[rd_addr] -> forwarding mux -> ALU (9 x CARRY4) -> ex_jump_target
+                      -> ex_redirect_target -> pc_next -> BTB index -> RAMD64E
+                      -> tag compare -> pred_taken_q          16.058 ns, 24 levels
+
+`MODS_A` A19 names this as the one real timing risk and prescribes registering
+the prediction. **That was done from the start and was nowhere near sufficient** —
+registering an output does not remove the ALU from the cone that computes it. The
+lookup now reads only *registered* sources and the instruction at a redirect
+target goes unpredicted (`SUPPRESS_AFTER_REDIRECT`), which costs 0.33% of
+Dhrystone to buy 4 ns.
+
+**THE SEARCH IS NOT MONOTONIC, and this is the number's real uncertainty.**
+
+| constraint | WNS | implied path |
+|---|---|---|
+| 77.501 MHz | +0.003 | 12.900 ns |
+| 77.942 MHz | −0.198 | 13.028 ns |
+| 78.376 MHz | −0.612 | 13.371 ns |
+| 79.246 MHz | **−1.186** | **13.805 ns** |
+| 80.998 MHz | −0.676 | 13.022 ns |
+| 87.997 MHz | −1.966 | 13.330 ns |
+
+**79.246 MHz failed by more than the tighter 80.998 MHz did.** One netlist's
+implied path delay spans 12.90–13.81 ns — **a 0.9 ns spread, twice the ±0.4 ns
+recorded below**. So 77.501 MHz is *the highest constraint observed to pass*, not
+a boundary. The A17-to-A19 gap of 8.99 MHz survives that comfortably; a future
+±1 MHz claim against this baseline would not, and must not be made from a single
+search.
+
+---
+
+### A17 took it to 86.490 MHz, and two of the four levers did nothing
+
+**Fmax = 86.490 MHz**, Vivado 2025.2, same part, same **-1** speed grade, same
+`soc_init.mem` image, **strategy `explore_postroute`** — seven implementation
+runs for the strategy search on top of eight for the address adder. A12's
+70.131 MHz and A16's 73.752 MHz are preserved above as the RV32I and RV32IM
+records and are not superseded; all three are measurements of three designs, and
+the last one is under a different implementation strategy as well.
+
+| | A12 (RV32I) | A16 (RV32IM) | A17 |
+|---|---|---|---|
+| Fmax | 70.131 MHz | 73.752 MHz | **86.490 MHz** |
+| period | 14.259 ns | 13.559 ns | **11.562 ns** |
+| strategy | default | default | **explore_postroute** |
+| LUTs / FFs | 2126 / 913 | 2613 / 1148 | 2637 / 1157 |
+
+**Where the 1.997 ns came from, and what did not come:**
+
+| lever | verdict | contribution |
+|---|---|---|
+| 1 — dedicated address adder | **adopted** | **−1.589 ns**, 26 LUTs |
+| 2 — `MAX_FANOUT` on `ex_trap` | rejected | +0.263 ns at the constraint lever 1 met; inside the spread |
+| 3 — `explore_postroute` | adopted | **−0.408 ns**, 0 LUTs — *and that is exactly the spread* |
+| 4 — 64 KB instead of 128 KB | see `docs/a17-fmax.md` | |
+
+Two things are worth carrying forward from that table. **Lever 3's entire
+contribution is the size of the ±0.4 ns spread described below**, so 86.490 MHz
+should be read as 83.5–86.5 MHz with the strategy as a plausible but unproven
+cause. And **lever 2 was aimed by the post-route report and still did nothing**:
+`ex_trap` drives 141 loads and sits on the path, and replicating its driver
+bought no measurable time — a high-fanout net is only worth what its own route
+costs, which here is a nanosecond in eleven.
+
+**The critical path's SOURCE moved.** A12's and A16's both began at
+`ex_mem_q_reg[rd_addr]` — the forwarding mux. A17's begins at
+`id_ex_q_reg[insn][20]`, and the forwarding mux is not on it at all:
+
+| segment | delay | share |
+|---|---|---|
+| `id_ex_q.insn[20]` → decode → `uses_rs2` → operand select | 3.90 ns | 36% |
+| → CARRY4 (the ALU adder) | 1.81 ns | 17% |
+| → 4 × LUT6 → `ex_trap9_out` (fanout 141) | 2.92 ns | 27% |
+| → byte enables → BRAM `WEA` | 2.24 ns | 21% |
+
+Lever 1 did not make the forwarding mux faster. It made the tail behind the ALU
+short enough that **decode and operand selection became the longest thing in the
+design**, which is where the next lever is — and that one changes
+microarchitecture rather than only timing, so it needs its own before/after.
+
 ### How much to trust the last digit: about ±0.4 ns
 
 Transposing two **output pins** — a change with no logical content at all, and

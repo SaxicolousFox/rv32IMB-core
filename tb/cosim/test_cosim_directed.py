@@ -36,6 +36,7 @@ PROGRAMS = [
     ("a7_loaduse", os.path.join(ROOT, "sw/tests/a7_loaduse.S")),
     ("a8_control", os.path.join(ROOT, "sw/tests/a8_control.S")),
     ("a14_muldiv", os.path.join(ROOT, "sw/tests/a14_muldiv.S")),
+    ("a19_bpred",  os.path.join(ROOT, "sw/tests/a19_bpred.S")),
 ]
 
 

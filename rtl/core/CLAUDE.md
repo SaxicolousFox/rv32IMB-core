@@ -614,6 +614,30 @@ adders bit-blast cheaply; it is the *unrolling* of a 32×32 memory that blows up
 not the width of an accumulator. If the depth is ever raised, re-measure before
 concluding anything.
 
+### riscv-formal's work area is shared, and two runs will eat each other
+
+`tb/formal/run_riscv_formal.py` builds into
+`toolchain/riscv-formal/cores/rvntt/checks/`, and that path is **fixed** — it is
+not derived from a temp directory and it is not per-invocation. Two riscv-formal
+runs at once therefore delete each other's `engine_0/` mid-solve, and the
+symptom is not a failed check. It is sby dying inside its own error handler:
+
+    FileNotFoundError: [Errno 2] No such file or directory: 'engine_0/trace_tb.v'
+    ...
+    FileNotFoundError: [Errno 2] No such file or directory: 'reg_ch0/ERROR'
+    verdict from .../checks/reg_ch0/status: NO-STATUS (sby exit 1)
+
+`RVFORMAL_ERROR: reg_ch0=NO-STATUS` is the harness reporting honestly that it
+does not know the answer — which is exactly right, and is the reason a missing
+`status` file is not treated as a pass.
+
+A17 hit this by running riscv-formal on a **scratch copy of the tree** whose
+`toolchain/riscv-formal` was a symlink back to the real checkout, while the
+regression's `mutation_pipeline` was running its own `rvfi:` checks. The two
+trees looked independent and shared one work area. **A copy of this repo used
+for trial builds must not symlink `toolchain/riscv-formal`**, and nothing else
+may run riscv-formal while `make regress` is in flight.
+
 ### Two more ways a test can be accidentally blind
 
 Both found by mutation at A9, and both are about the *stimulus*, as at A5 and A7.
@@ -1054,6 +1078,134 @@ latches nothing when `req` is low. `done` now includes `req`: one AND gate, and
 the module's stated contract becomes literally true instead of nearly true.
 
 ---
+
+### A17 — the dedicated address adder, and an assertion that pays for itself
+
+`ex_addr_misaligned` used to be `|ex_alu_y[1:0]`, read off the **muxed** ALU
+output. So the ALU's four-level operation-select mux sat in front of the
+alignment check, which gates the trap, which gates the byte enables, which reach
+the BRAM's write enable — 33% of the critical path, spent deciding whether an
+address was aligned using a mux that had just chosen between an AND, a shift and
+a sum.
+
+A memory address is always `rs1 + imm`, and the decoder enforces it. So there is
+a second adder now:
+
+```systemverilog
+wire [31:0] ex_mem_addr = ex_rs1_fwd + id_ex_q.imm;
+```
+
+feeding `dmem_addr`, the alignment check, the store byte offset, `mtval` and
+RVFI's `mem_addr`. **26 LUTs, and Fmax went from 73.752 to 83.542 MHz.**
+
+**The whole thing rests on one equality**, and that equality is a property of the
+*decoder* — which is a file that gets edited. So it is asserted rather than
+argued:
+
+```systemverilog
+`ifdef RISCV_FORMAL
+  always_comb
+    if (id_ex_q.valid && (id_ex_q.ctrl.mem_read || id_ex_q.ctrl.mem_write))
+      a_addr_adder_matches_alu: assert (ex_mem_addr == ex_alu_y);
+`endif
+```
+
+An assert in the design is an obligation on **every** riscv-formal check, so all
+43 of them prove it at depth 14 and it costs no new check and no new runtime.
+The `RISCV_FORMAL` guard is not because the property is formal-only; it is
+because that is the only harness here that reads the core with assertions
+enabled, and an unguarded SVA block would be dead text in nine Verilator builds.
+
+**A loose constraint is not a measurement.** Lever 1 was first judged by
+re-running A16's old 73.0 MHz constraint and comparing slack: +0.111 → +0.290 ns,
+a 0.18 ns improvement, which is what it would have been reported as. The binary
+search then found the same design passing at 83.542 MHz — 1.589 ns faster. The
+router optimises to the constraint and stops; the slack it leaves is a
+measurement of when it stopped, not of how fast the design is.
+
+### A18 — the instrument, and why it is not in the core
+
+`cycles = retired + load-use stalls + multi-cycle EX stalls + 2 × redirects`,
+residual **exactly zero** on Dhrystone, CoreMark and both NTT builds. Not a
+counter in the RTL: a Verilator observer (`tb/perf/tb_profile.cpp`) built with
+`--public-flat-rw`, because hardware counters would have perturbed the design
+A17 was tuning and are not needed — this SoC is deterministic and the simulation
+reproduces the board exactly.
+
+**Two closures, not one, and the second exists because of a fault injection.**
+`--selftest` breaks the accounting five ways. Four move the residual. The fifth —
+classifying every branch as taken — leaves the residual at **exactly zero** and
+is caught only by
+
+    redirects = taken branches + JAL + JALR
+
+which also holds exactly. A19 is judged on the taken/not-taken split, so the
+split needed a check the cycle identity is structurally blind to. See
+`docs/a18-stalls.md`.
+
+### A19 — the random suite cannot see a branch predictor
+
+All eight A19 mutations escaped `random:branch` on their first run. Not one was
+caught, and the reason is structural: `gen_random_prog.py` emits **forward-only**
+branches and jumps, because that is what guarantees a generated program
+terminates. A random program is therefore a straight line in which **every
+control transfer site executes at most once**, and a predictor whose entire job
+is to remember what a site did last time is inert in every random program this
+project has ever produced.
+
+The 1000-program cosimulation still proves what it always proved — the predictor
+is architecturally invisible, byte-identical against Spike — and it is
+structurally unable to say whether the predictor works. `sw/tests/a19_bpred.S`
+is what says that: eight loop shapes, span-checked against `model/bpred.py`.
+
+**And the model had to be taught the pipeline.** Its first version applied every
+predictor update immediately and predicted a 916-cycle span where the RTL
+measured 992. An update lands in EX and cannot reach a lookup that already
+happened, so it is visible only to a transfer **four or more retire cycles
+later** — which a three-instruction loop is not. `bpred.DelayedBPred` queues
+updates on that rule and the two now agree to the cycle. The rule costs the
+benchmarks nothing (their loops are longer), which is worth knowing before anyone
+spends a mux forwarding the write.
+
+**The retire-versus-fetch error was in the MODEL, and it hid asymmetrically.**
+The visibility rule was first written on *retire* cycles; `retire - fetch` is not
+constant, because a load-use interlock holds an instruction in ID after its
+prediction has been made. Dhrystone reaches its callees through stalls and
+CoreMark does not, so the error showed up as 39 wrong mispredicts on one
+benchmark and none on the other. A front-end register mirror in `tb_profile.cpp`
+now dates each instruction by its **fetch** cycle and the two agree to the unit
+everywhere. **When a model disagrees with the RTL on one workload and not
+another, the asymmetry is the clue** — a uniformly wrong model is usually a wrong
+constant, an asymmetrically wrong one is usually a wrong *event*.
+
+**`SUPPRESS_AFTER_REDIRECT` is an architectural rule that timing forced.** The
+first bitstream failed 80 MHz by 3.886 ns because looking the BTB up with
+`pc_next` drags the forwarding mux and the whole ALU carry chain into the fetch
+path — `pc_next` contains `ex_redirect_target`. The lookup now reads only
+registered sources, so the instruction at a redirect target cannot be predicted.
+That is in `docs/a19-bpred-spec.md` and in `model/bpred.py`, not just in the RTL,
+because it changes what the machine *does* and not merely how fast: 4,002
+Dhrystone cycles, 0.33%. See `rtl/soc/CLAUDE.md` for the path and the 77.501 MHz
+it bought.
+
+**Two timing levers were added afterwards and MEASURED to be free**, not assumed:
+a dedicated `pc + imm` branch/JAL target adder, and `max_fanout` on `ex_redirect`
+(244 loads, 1.491 ns of route). Reverting only those two and re-running the
+profile gives **52 counters identical in all four regions**. The adder's equality
+with the ALU is additionally proved by `a_pc_target_matches_alu` under
+riscv-formal — over every reachable state, rather than over one benchmark.
+
+**A19 invalidated an A7 mutation anchor, and the harness said so correctly.**
+Moving the PC hold from a branch of the `pc_q` `always_ff` into an arm of the
+combinational `pc_next` mux left `stall_lets_the_pc_advance` matching nothing;
+`run_mutation.py` reported **NO-OP** rather than scoring a mutation it had not
+applied. That is the fourth stale anchor after a rename here. What made it
+expensive was not the anchor but `run_regress.py` echoing only the last 40 lines
+of a failing test: a 75-row manifest overflowed the tail, so a precise NO-OP
+message arrived as a bare `exit 1` and cost a fifteen-minute standalone re-run to
+recover. **Both are fixed, and the reporting fix is fault-injected both ways** —
+it fires on a long failing test and names the hidden row, and stays silent on a
+long passing one, a verbose passing one and a short failing one.
 
 ## Tool disagreements found the hard way
 

@@ -225,6 +225,25 @@ def discover() -> list:
                    "--design", "rvntt_muldiv", "--depth", "37"],
                   requires=["sby", "yosys"], timeout=1800))
 
+    # A19's predictor, on its own.  Cheap, because the properties are about the
+    # mechanism and the proof runs it with eight BTB entries -- see
+    # rvntt_bpred.sv's FORMAL header for why that is honest rather than
+    # convenient.  What it does NOT cover is the predictor's effect on the core:
+    # riscv-formal covers that, and it does so against an ABSTRACTED prediction
+    # so the claim is invariance under every possible prediction rather than
+    # under this one's.
+    t.append(Test("formal_bpred", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   # Depth 12, not 20.  The deepest property is the return
+                   # stack's occupancy bound, which needs RAS_ENTRIES + 2 = 6
+                   # steps to reach; 12 is double that.  Depth 20 also passes
+                   # and costs 400 seconds against 12's one, because the last
+                   # few steps are where an unrolled array gets expensive --
+                   # paying six minutes to re-prove what step 6 already settled.
+                   "--design", "rvntt_bpred", "--depth", "12",
+                   "--param", "BTB_ENTRIES=8", "--param", "RAS_ENTRIES=4"],
+                  requires=["sby", "yosys"], timeout=1800))
+
     # A4.  Builds sw/tests/a4_checksum.S, runs it on Spike for the reference,
     # then on the RTL.  Needs the RISC-V toolchain and Spike as well as
     # Verilator, so all three are listed -- a missing one must SKIP loudly
@@ -388,9 +407,13 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "tb/unit/test_bench_host.py")],
                   timeout=600))
 
+    # THREE blocks, not two, since A19.  The first runs on a cold branch
+    # predictor and is discarded from the equality check, and two must remain
+    # for the check to have anything to compare -- parse_bench_uart refuses to
+    # pass vacuously when fewer do.
     t.append(Test("bench_sim", "rtl",
                   [py, os.path.join(ROOT, "tb/unit/test_bench_verilator.py"),
-                   "--blocks", "2"],
+                   "--blocks", "3"],
                   requires=["verilator", "riscv-none-elf-gcc"], timeout=1800))
 
     # The benchmark capture parser against itself: twenty deliberately-broken
@@ -401,6 +424,34 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "tb/fpga/parse_bench_uart.py"),
                    "--selftest"],
                   timeout=120))
+
+    # A17's done-when, mechanised: two benchmark captures may differ ONLY in the
+    # clock and in the wall-clock rates derived from it.  Run here against A16's
+    # two committed captures -- which share a clock, so the comparison itself is
+    # trivial -- purely to keep the tool and its four fault injections alive.
+    # The comparison that matters is A16 against A17, in docs/a17-fmax.md.
+    t.append(Test("bench_compare", "meta",
+                  [py, os.path.join(ROOT, "tb/fpga/compare_bench_runs.py"),
+                   "--ref", os.path.join(ROOT, "fpga/build/bench_a16/a16.json"),
+                   "--new", os.path.join(ROOT, "fpga/build/bench_a16/a16_run2.json"),
+                   "--selftest"],
+                  timeout=120))
+
+    # A18's stall attribution instrument.  Small on purpose: the accounting
+    # identity either closes or it does not, and it closes at 40 Dhrystone runs
+    # for the same reason it closes at 200,000.  --selftest is the part that
+    # matters here -- it breaks the accounting five ways and requires each break
+    # to be caught, including one that leaves the cycle identity closing
+    # perfectly and is visible only to the control-transfer check.
+    #
+    # The recorded baselines are the separate long runs in docs/a18-stalls.md;
+    # this entry exists so the instrument cannot rot in a scratch directory,
+    # which is the standard tb/mutate/run_mutation.py was held to.
+    t.append(Test("stall_profile", "perf",
+                  [py, os.path.join(ROOT, "tb/perf/run_stall_profile.py"),
+                   "--dhry-runs", "40", "--iterations", "1",
+                   "--arch", "rv32im", "--selftest"],
+                  requires=["verilator", "riscv-none-elf-gcc"], timeout=1800))
 
     # A13 on real hardware, and the only place the reported scores come from.
     # Same opt-in and same SKIP rules as soc_hardware, and the same reason: this
@@ -426,6 +477,8 @@ def discover() -> list:
                    # argparse reads a value beginning with `-` as the next
                    # option and rejects the separated form.
                    "--parser-arg=--min-blocks", "--parser-arg=3",
+                   # A19: block 1 is cold.  See parse_bench_uart.py.
+                   "--parser-arg=--warmup-blocks", "--parser-arg=1",
                    "--parser-arg=--json",
                    "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a16/a16.json")],
                   timeout=1800))
@@ -518,7 +571,32 @@ def main() -> int:
         results.append(r)
         if a.verbose or r.status == FAIL:
             if r.output:
-                print("    " + "\n    ".join(r.output.rstrip().splitlines()[-40:]))
+                lines = r.output.rstrip().splitlines()
+                print("    " + "\n    ".join(lines[-40:]))
+                # A failing test whose evidence is OFF THE TOP of that tail
+                # reports FAIL and hides why.  mutation_pipeline did exactly
+                # that: 38 CAUGHT rows and "1 PROBLEM(S)" fit in 40 lines, the
+                # row that caused it did not, and the run said only "exit 1".
+                # Same shape as A10's RISCOF exit code and A11's sby exit code
+                # -- a checking mechanism whose report is not the thing it
+                # checked.  So on FAIL, also surface failure-shaped lines from
+                # the WHOLE output, wherever they are.
+                #
+                # SHARED WITH TRACK B: additive.  A test with no matching line,
+                # or one whose evidence is already inside the tail, prints
+                # exactly what it printed before.
+                if r.status == FAIL and len(lines) > 40:
+                    marks = ("FAIL", "ESCAPED", "PARTIAL", "BUILD-ERR",
+                             "NO-OP", "UNCHECKED", "MISSED", "ERROR",
+                             "Traceback", "stuck-at-fail")
+                    hits = [(i, l) for i, l in enumerate(lines[:-40], 1)
+                            if any(m in l for m in marks)]
+                    if hits:
+                        print("    --- failure-shaped lines above the tail ---")
+                        for i, l in hits[:20]:
+                            print("    %5d| %s" % (i, l.rstrip()))
+                        if len(hits) > 20:
+                            print("    ... %d more" % (len(hits) - 20))
 
     w = max(len(r.test.name) for r in results)
     print("\n" + "=" * (w + 34))

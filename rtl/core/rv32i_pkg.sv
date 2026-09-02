@@ -281,11 +281,36 @@ package rv32i_pkg;
     logic        is_illegal;
   } ctrl_t;
 
+  // ---------------------------------------------------- branch prediction
+  // The four shapes a control transfer can take, as far as the PREDICTOR is
+  // concerned.  It is not the decoder's classification: the decoder cares
+  // whether an instruction is a branch, a JAL or a JALR, and the predictor
+  // cares whether the target comes from the BTB or from the return stack.
+  // docs/a19-bpred-spec.md section 4 defines the mapping; it is computed in EX,
+  // where rd and rs1 are known, and never in IF, where only the address is.
+  //
+  // Inside a scoped waiver for the same reason as the constant block above:
+  // a package linted standalone reports every localparam as UNUSEDPARAM, and a
+  // command-line waiver would switch the check off for every file that imports
+  // the package too.
+  /* verilator lint_off UNUSEDPARAM */
+  localparam logic [1:0] BP_BRANCH = 2'd0;
+  localparam logic [1:0] BP_JUMP   = 2'd1;
+  localparam logic [1:0] BP_CALL   = 2'd2;
+  localparam logic [1:0] BP_RET    = 2'd3;
+  /* verilator lint_on UNUSEDPARAM */
+
   // -------------------------------------------------------- pipeline regs
   typedef struct packed {
     logic        valid;
     logic [31:0] pc;
     logic [31:0] insn;
+    // What the predictor said about THIS instruction's address, carried down
+    // so EX can check it.  A19: the prediction is made in IF from an address
+    // and verified in EX against an outcome, and these two fields are the only
+    // thing connecting the two.
+    logic        pred_taken;
+    logic [31:0] pred_target;
   } if_id_t;
 
   typedef struct packed {
@@ -301,6 +326,8 @@ package rv32i_pkg;
     logic [31:0] rs1_data;
     logic [31:0] rs2_data;
     logic [31:0] rs3_data;
+    logic        pred_taken;
+    logic [31:0] pred_target;
   } id_ex_t;
 
   typedef struct packed {

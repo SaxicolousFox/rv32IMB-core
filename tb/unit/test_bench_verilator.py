@@ -36,6 +36,13 @@ def main() -> int:
     # for validating A16's image before it costs a fourteen-minute Vivado run.
     ap.add_argument("--arch", choices=["rv32i", "rv32im"], default="rv32i")
     ap.add_argument("--ntt", action="store_true")
+    # A19.  Cycle counts are no longer equal between report blocks: the branch
+    # predictor carries state across them, and CoreMark was still moving by
+    # 4 cycles in 833,259 between the second and third.  ARCHITECTURAL keys are
+    # still required to be exactly equal with no tolerance at all, and the
+    # exact-cycle claim moved to bench_compare across programming passes -- see
+    # parse_bench_uart.check_reproducible.
+    ap.add_argument("--tolerance-ppm", type=float, default=50.0)
     a = ap.parse_args()
     base = a.rtl_dir or ROOT
 
@@ -104,6 +111,11 @@ def main() -> int:
     p = subprocess.run([sys.executable,
                         os.path.join(ROOT, "tb/fpga/parse_bench_uart.py"), cap,
                         "--allow-short", "--min-blocks", str(a.blocks),
+                        # A19: the first block runs on a cold predictor.  It is
+                        # discarded from the equality check and reported
+                        # separately -- see parse_bench_uart.check_reproducible.
+                        "--warmup-blocks", "1",
+                        "--tolerance-ppm", str(a.tolerance_ppm),
                         "--dhry-runs", str(a.dhry_runs),
                         "--iterations", str(a.iterations),
                         "--json", js],

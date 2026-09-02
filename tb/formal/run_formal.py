@@ -28,6 +28,16 @@ def main():
     ap.add_argument("--solver", default="bitwuzla", choices=["bitwuzla", "boolector", "z3"])
     ap.add_argument("--depth", type=int, default=20)
     ap.add_argument("--mode", default="bmc", choices=["bmc", "prove"])
+    # A19.  rvntt_bpred's properties are about the MECHANISM -- an aligned
+    # target, a saturating counter, a bounded return stack -- and none of them
+    # says anything about a particular entry, so the proof runs the module with
+    # eight BTB entries instead of 256 rather than making the solver carry
+    # 14 kbit of array it will never look at.  Shrinking a design for a proof is
+    # only honest when the property does not depend on the size; that argument
+    # is in rvntt_bpred.sv's FORMAL header, next to the properties it excuses.
+    ap.add_argument("--param", action="append", default=[],
+                    metavar="NAME=VALUE",
+                    help="override a module parameter for the proof")
     a = ap.parse_args()
 
     rtl = find_rtl(a.design)
@@ -44,6 +54,10 @@ def main():
     # a module whose port list uses a package type otherwise fails to parse.
     srcs = with_deps(rtl)
     reads = "\n".join(f"read -formal {os.path.basename(s)}" for s in srcs)
+    params = ""
+    if a.param:
+        sets = " ".join("-set %s %s" % tuple(p.split("=", 1)) for p in a.param)
+        params = f"chparam {sets} {a.design}\n" 
 
     with open(sby, "w") as f:
         f.write(f"""[options]
@@ -56,7 +70,7 @@ smtbmc {a.solver}
 [script]
 read -define FORMAL
 {reads}
-prep -top {a.design}
+{params}prep -top {a.design}
 
 [files]
 {chr(10).join(srcs)}

@@ -20,6 +20,12 @@ rather than of the design.
 
     span = (retired - 1) + stalls + flush_penalties + muldiv_stalls
 
+Once A19 lands, `flush_penalties` is `2 x mispredicts` rather than
+`2 x redirects`, and which one this function uses is the `predictor` argument.
+The predictor itself comes from `model/bpred.py`, which implements
+`docs/a19-bpred-spec.md` and reads nothing out of the RTL -- MODS_A section 3.3
+names that as the one way this model can quietly stop being a check.
+
   * `retired - 1` because a five-stage pipeline with no hazards retires one
     instruction per cycle once it is full.
   * `stalls`: one cycle for each load-use hazard at distance 1 (plan A7).
@@ -56,9 +62,10 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "model"))
 import rv32i_ref     # noqa: E402
+import bpred         # noqa: E402
 
 
-def analyse(records):
+def analyse(records, predictor=False):
     """
     `records` is the commit stream as (pc, insn, writes) triples.
 
@@ -70,6 +77,7 @@ def analyse(records):
     stalls, flushes = [], []
     muldiv_cycles = 0
     muldiv_n = 0
+    mispredicts = []
 
     # A multi-cycle instruction's bubbles sit BEFORE its own retirement, which
     # is the opposite of a load-use stall (attributed to the load, paid by its
@@ -111,6 +119,102 @@ def analyse(records):
         if nxt_pc != (pc + 4) & 0xFFFFFFFF or ctrl["jump"]:
             flushes.append(pc)
 
+    # ---- A19: the same span, with a predictor in front of the fetch ---------
+    # MODS_A section 3.3 is explicit that after A19 the flush term stops being
+    # `2 x redirects` and becomes `2 x MISPREDICTS`, and that the model has to
+    # know the difference from the predictor's SPECIFICATION rather than from
+    # its RTL.  model/bpred.py is that specification -- docs/a19-bpred-spec.md
+    # implemented from the document -- and it is driven here off the same
+    # retired stream everything else in this file reads.
+    #
+    # THE ONE THING THAT CANNOT BE READ OFF THE STREAM ALONE is *when* an
+    # update becomes visible.  A predictor update lands in EX and cannot reach
+    # a lookup that already happened, so a transfer fewer than four retire
+    # cycles after the one that would have taught the predictor about it sees
+    # the old state -- spec section 8.  That is not a detail: on a
+    # three-instruction loop it is every other iteration, and ignoring it made
+    # this model predict 916 cycles for sw/tests/a19_bpred.S where the RTL
+    # measured 992.
+    #
+    # So this walk is CYCLE-ACCURATE rather than instruction-ordered: it
+    # accumulates the same span the return value reports, one instruction at a
+    # time, and hands each transfer's retire cycle to DelayedBPred.  The
+    # dependency is feed-forward -- a mispredict costs two cycles, which pushes
+    # later transfers further from their updates, which can only make more of
+    # them visible -- so one pass is exact.
+    #
+    # A jump whose target happens to be pc + 4 is taken, and the trace cannot
+    # say so; the decoder can, and does, for the same reason the flush term
+    # above has a `jump` clause.
+    if predictor:
+        bp = bpred.DelayedBPred()
+        stall_at = set(stalls)
+        cyc = 0                      # retire cycle of records[i], relative
+        prev_mispredicted = False
+        prev_pc = None
+        prev_extra = 0
+        prev_hold = 0                # cycles records[i] was held in ID
+        pending_target = None        # pc of the instruction at a redirect target
+        for i in range(n):
+            pc, insn, _ = records[i]
+            ctrl, _ = rv32i_ref.decode(insn)
+            extra = (rv32i_ref.MULDIV_CYCLES[ctrl["muldiv_op"]] - 1
+                     if ctrl["is_muldiv"] else 0)
+            if i > 0:
+                # retire(i) = retire(i-1) + 1 + load-use stall + flush + this
+                # instruction's own extra EX occupancy.
+                stall = 1 if prev_pc in stall_at else 0
+                cyc += 1 + stall + (2 if prev_mispredicted else 0) + extra
+                # ...and the cycles THIS instruction spent held in ID, which is
+                # what separates its fetch from its retirement: a load-use
+                # interlock holds it for one, and a multi-cycle EX instruction
+                # ahead of it holds it for that instruction's extra cycles.
+                prev_hold = stall + prev_extra
+            prev_pc, prev_extra = pc, extra
+            prev_mispredicted = False
+
+            if not (ctrl["branch"] or ctrl["jump"]) or i == n - 1:
+                # A non-transfer at the redirect target uses up the unpredicted
+                # slot; the transfer after it is predicted normally.
+                if pc == pending_target:
+                    pending_target = None
+                continue
+            nxt_pc, _, _ = records[i + 1]
+            taken = bool(ctrl["jump"]) or nxt_pc != (pc + 4) & 0xFFFFFFFF
+            target = nxt_pc if taken else 0
+            # THE RULE IS ON FETCH CYCLES, NOT RETIREMENTS.  `retire - fetch` is
+            # not constant: an instruction held in ID by a load-use interlock or
+            # behind a multi-cycle EX has already had its prediction made.  See
+            # model/bpred.py's VISIBILITY_GAP -- expressing this on retirements
+            # was wrong on 39 of Dhrystone's 396 mispredicts, and right on every
+            # one of CoreMark's, which is exactly how it hid.
+            # A REDIRECT TARGET IS NOT PREDICTED.  The lookup reads only
+            # registered sources, so during the cycle a redirect fires the
+            # predictor is looking at the address the front end would otherwise
+            # have fetched -- not at the target.  See model/bpred.py's
+            # SUPPRESS_AFTER_REDIRECT and docs/a19-bpred-spec.md section 2.  The
+            # cycle model can apply this exactly, because unlike a transfer
+            # trace it sees EVERY instruction and therefore knows whether this
+            # one is the redirect's successor.
+            suppressed = bpred.SUPPRESS_AFTER_REDIRECT and pc == pending_target
+            if suppressed:
+                bp.predict(pc, cyc - prev_hold)      # drain, then ignore
+                p_taken, p_target = False, 0
+            else:
+                p_taken, p_target = bp.predict(pc, cyc - prev_hold)
+            if taken:
+                if not (p_taken and p_target == target):
+                    mispredicts.append(pc)
+                    prev_mispredicted = True
+            elif p_taken:
+                mispredicts.append(pc)
+                prev_mispredicted = True
+            bp.update(cyc - prev_hold, pc, insn, taken, target)
+            pending_target = (target if taken else (pc + 4) & 0xFFFFFFFF) \
+                             if prev_mispredicted else None
+
+    control_cycles = 2 * (len(mispredicts) if predictor else len(flushes))
+
     return {
         "retired": n,
         "stalls": len(stalls),
@@ -119,7 +223,10 @@ def analyse(records):
         "muldiv_cycles": muldiv_cycles,
         "stall_pcs": stalls,
         "flush_pcs": flushes,
-        "span": (n - 1) + len(stalls) + 2 * len(flushes) + muldiv_cycles,
+        "predictor": predictor,
+        "mispredicts": len(mispredicts),
+        "mispredict_pcs": mispredicts,
+        "span": (n - 1) + len(stalls) + control_cycles + muldiv_cycles,
     }
 
 
@@ -131,7 +238,9 @@ def explain(pred, actual_span, limit=6):
         "    %d retired -> %d baseline cycles" % (pred["retired"],
                                                   pred["retired"] - 1),
         "    %d load-use stall(s)  x1 cycle" % pred["stalls"],
-        "    %d redirect(s)        x2 cycles" % pred["flushes"],
+        ("    %d mispredict(s)      x2 cycles  (of %d redirect(s))"
+         % (pred["mispredicts"], pred["flushes"])) if pred["predictor"] else
+        ("    %d redirect(s)        x2 cycles" % pred["flushes"]),
         "    %d M instruction(s) -> %d extra EX cycle(s)"
         % (pred["muldiv"], pred["muldiv_cycles"]),
     ]
@@ -139,10 +248,13 @@ def explain(pred, actual_span, limit=6):
         shown = ", ".join("0x%08x" % p for p in pred["stall_pcs"][:limit])
         more = "" if len(pred["stall_pcs"]) <= limit else ", ..."
         lines.append("    stalls predicted after: " + shown + more)
-    if pred["flush_pcs"]:
-        shown = ", ".join("0x%08x" % p for p in pred["flush_pcs"][:limit])
-        more = "" if len(pred["flush_pcs"]) <= limit else ", ..."
-        lines.append("    redirects predicted at: " + shown + more)
+    key = "mispredict_pcs" if pred["predictor"] else "flush_pcs"
+    if pred[key]:
+        shown = ", ".join("0x%08x" % p for p in pred[key][:limit])
+        more = "" if len(pred[key]) <= limit else ", ..."
+        lines.append("    %s predicted at: %s%s"
+                     % ("mispredicts" if pred["predictor"] else "redirects",
+                        shown, more))
     lines.append("    A span that is too LARGE means the pipeline stalled where "
                  "the model did not:")
     lines.append("      a phantom stall -- most likely a hazard predicate "

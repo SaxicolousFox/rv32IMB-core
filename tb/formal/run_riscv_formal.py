@@ -87,6 +87,7 @@ RTL = [
     "rtl/core/rvntt_branch.sv",
     "rtl/core/rvntt_csr.sv",
     "rtl/core/rvntt_muldiv.sv",
+    "rtl/core/rvntt_bpred.sv",
     "rtl/core/rvntt_rvfi.sv",
     "rtl/core/rvntt_core.sv",
 ]
@@ -159,6 +160,7 @@ liveness   1  9     {live_depth}
 # says what this does and does not weaken; the arithmetic itself is proved by
 # tb/formal/rvntt_muldiv.sby, by rv32um and by cosimulation against Spike.
 `define RVNTT_ABSTRACT_MULDIV
+`define RVNTT_ABSTRACT_BPRED
 
 [verilog-files]
 {files}

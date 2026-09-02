@@ -70,7 +70,6 @@ module rvntt_rvfi (
     input  wire         ex_stall,
     input  wire [31:0]  ex_pc,
     input  wire [31:0]  ex_insn,
-    input  wire         ex_redirect,
     input  wire [31:0]  ex_redirect_target,
     input  wire         ex_uses_rs1,
     input  wire         ex_uses_rs2,
@@ -79,11 +78,13 @@ module rvntt_rvfi (
     input  wire [31:0]  ex_rs1_fwd,
     input  wire [31:0]  ex_rs2_fwd,
     input  wire         ex_mem_read,
-    // The effective address the ALU just produced.  Its low two bits are
-    // dropped on purpose -- see mem_addr below -- so UNUSEDSIGNAL is scoped to
-    // this one port rather than waived for the module.
+    // The effective address, from A17's dedicated adder rather than from the
+    // ALU result mux -- this port reports what actually went to the memory,
+    // and those are the same number by a_addr_adder_matches_alu.  Its low two
+    // bits are dropped on purpose -- see mem_addr below -- so UNUSEDSIGNAL is
+    // scoped to this one port rather than waived for the module.
     /* verilator lint_off UNUSEDSIGNAL */
-    input  wire [31:0]  ex_alu_y,
+    input  wire [31:0]  ex_mem_addr,
     /* verilator lint_on UNUSEDSIGNAL */
     input  wire [3:0]   ex_dmem_be,      // already zero on a trap or a bubble
     input  wire [31:0]  ex_dmem_wdata,
@@ -149,13 +150,19 @@ module rvntt_rvfi (
     ex_pkt.trap     = ex_valid && ex_trap;
     ex_pkt.pc_rdata = ex_pc;
 
-    // The next pc, for every shape at once.  A trap redirects to mtvec, an MRET
-    // to mepc, a taken branch or jump to its target -- and rvntt_core has
-    // already resolved all three into ex_redirect_target, so restating the
-    // priority here would be a second place to get it wrong.  RVFI wants the
-    // architectural next pc even for a trapping instruction, which is exactly
-    // the trap vector.
-    ex_pkt.pc_wdata = ex_redirect ? ex_redirect_target : (ex_pc + 32'd4);
+    // The next pc, for every shape at once.  A trap goes to mtvec, an MRET to
+    // mepc, a taken branch or jump to its target and everything else to pc + 4
+    // -- and rvntt_core has already resolved all four into ex_redirect_target,
+    // so restating the priority here would be a second place to get it wrong.
+    // RVFI wants the architectural next pc even for a trapping instruction,
+    // which is exactly the trap vector.
+    //
+    // NOT gated on ex_redirect, and A19 is why.  With a predictor, a correctly
+    // predicted taken branch does not redirect -- so `ex_redirect ? target :
+    // pc + 4` would report the branch as having fallen through, on exactly the
+    // branches the predictor got RIGHT.  ex_redirect_target is unconditional
+    // for this reason; see rvntt_core.sv.
+    ex_pkt.pc_wdata = ex_redirect_target;
 
     ex_pkt.insn      = ex_insn;
     ex_pkt.rs1_addr  = ex_uses_rs1 ? ex_rs1_addr : 5'd0;
@@ -170,7 +177,7 @@ module rvntt_rvfi (
     // because RISCV_FORMAL_ALIGNED_MEM is set: this core traps on a misaligned
     // access, so every access it performs is word-aligned by construction and
     // the spec models expect the aligned base with a byte mask.
-    ex_pkt.mem_addr  = {ex_alu_y[31:2], 2'b00};
+    ex_pkt.mem_addr  = {ex_mem_addr[31:2], 2'b00};
 
     // rvntt_ram reads the whole word on every access, so all four read-strobe
     // bits are honest for any load width; the spec model shifts the byte it

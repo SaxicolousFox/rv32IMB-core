@@ -60,6 +60,7 @@ BR    = "rtl/core/rvntt_branch.sv"
 ALU   = "rtl/core/rvntt_alu.sv"
 CSR   = "rtl/core/rvntt_csr.sv"
 MD    = "rtl/core/rvntt_muldiv.sv"
+BP    = "rtl/core/rvntt_bpred.sv"
 RF    = "rtl/core/rvntt_regfile.sv"
 RVFI  = "rtl/core/rvntt_rvfi.sv"
 MMIO    = "rtl/soc/rvntt_mmio.sv"
@@ -300,7 +301,15 @@ MUTATIONS = [
     dict(step="A7", name="stall_lets_the_pc_advance",
          why="IF is not held, so the fetch stream runs on by one during the "
              "bubble and an instruction is skipped entirely",
-         edits=[(CORE, "    else if (front_stall) pc_q <= pc_q;\n", "")],
+         # A19 MOVED THIS.  The PC hold used to be a branch of the pc_q
+         # always_ff; the predictor turned the whole thing into a combinational
+         # pc_next mux, so the hold is now an arm of that mux and the old anchor
+         # matched nothing.  The harness reported NO-OP rather than scoring a
+         # mutation it had not applied, which is the correct behaviour and the
+         # fourth time an anchor has gone stale under a rename here.  Deleting
+         # this arm still means "the fetch stream runs on during the bubble":
+         # pc_next falls through to the predicted target or pc+4.
+         edits=[(CORE, "    else if (front_stall)   pc_next = pc_q;\n", "")],
          caught=["directed:a7_loaduse", "random:loaduse"]),
 
     dict(step="A7", name="stall_forgets_the_instruction_hold",
@@ -462,7 +471,7 @@ MUTATIONS = [
              "faulting -- which is what this core did before A9, and which no "
              "test written alongside it would have questioned",
          edits=[(CORE, "      end else if (id_ex_q.ctrl.mem_read && ex_addr_misaligned) begin\n"
-                       "        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = ex_alu_y;\n", "")],
+                       "        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = ex_mem_addr;\n", "")],
          caught=["riscv:rv32mi/lw-misaligned", "riscv:rv32mi/ma_addr"]),
 
     dict(step="A9", name="faulting_store_still_writes_memory",
@@ -521,7 +530,7 @@ MUTATIONS = [
          why="the trap is taken with the right cause and the wrong mtval, so a "
              "handler that tries to emulate the access works on the wrong "
              "address",
-         edits=[(CORE, "        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = ex_alu_y;",
+         edits=[(CORE, "        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = ex_mem_addr;",
                        "        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = 32'h0;")],
          # ma_addr checks the CAUSE and the handler's ability to resume; it
          # does not read mtval back, so only the directed test sees this.
@@ -586,8 +595,8 @@ MUTATIONS = [
              "invisible there and only the sub-word accesses see it.  A "
              "reminder that picking the widest test is not picking the "
              "strongest one",
-         edits=[(RVFI, "    ex_pkt.mem_addr  = {ex_alu_y[31:2], 2'b00};",
-                       "    ex_pkt.mem_addr  = ex_alu_y;")],
+         edits=[(RVFI, "    ex_pkt.mem_addr  = {ex_mem_addr[31:2], 2'b00};",
+                       "    ex_pkt.mem_addr  = ex_mem_addr;")],
          caught=["rvfi:insn_lb_ch0"]),
 
     dict(step="A11", name="rvfi_shadow_reports_one_cycle_early",
@@ -813,6 +822,169 @@ MUTATIONS = [
                      "      quo_q <= {quo_q[30:0], 1'b1};")],
          caught=["formal:rvntt_muldiv", "directed:a14_muldiv",
                  "riscv:rv32um/div", "riscv:rv32um/divu"]),
+
+    # ---- A17: the dedicated address adder ---------------------------------
+    # The adder exists for timing, so most of what could go wrong with it is
+    # invisible to timing and visible only here.  Note what is NOT in this
+    # list: pointing the misalignment check back at ex_alu_y.  That is the
+    # fault injection MODS_A A17 asks for, and it is deliberately absent,
+    # because a_addr_adder_matches_alu proves the two are the same number --
+    # so it is a NO-OP by construction and only an implementation run can see
+    # it.  It is done as a timing experiment instead; see docs/a17-fmax.md.
+    dict(step="A17", name="addr_adder_drops_carry_into_bit2",
+         why="the address adder carries within [1:0] and within [31:2] but not "
+             "between them.  Chosen because it is nearly invisible: an aligned "
+             "base with an aligned offset never carries out of bit 1, so every "
+             "word access in the benchmarks is unaffected and only a sub-word "
+             "access at an odd offset is wrong.  It is the case where the "
+             "formal assertion earns its place over the directed tests",
+         edits=[(CORE, "  wire [31:0] ex_mem_addr = ex_rs1_fwd + id_ex_q.imm;",
+                       "  wire [31:0] ex_mem_addr = {ex_rs1_fwd[31:2] + id_ex_q.imm[31:2],\n"
+                       "                             ex_rs1_fwd[1:0] + id_ex_q.imm[1:0]};")],
+         caught=["rvfi:reg_ch0", "random:raw"]),
+
+    dict(step="A17", name="addr_adder_reads_the_register_file_not_forwarding",
+         why="the new adder takes rs1 from the ID/EX register instead of the "
+             "forwarding mux.  This is the specific mistake a second adder "
+             "invites -- the ALU's operand already went through forwarding, so "
+             "duplicating the arithmetic without duplicating the mux computes "
+             "an address from a value that is one or two instructions stale",
+         edits=[(CORE, "  wire [31:0] ex_mem_addr = ex_rs1_fwd + id_ex_q.imm;",
+                       "  wire [31:0] ex_mem_addr = id_ex_q.rs1_data + id_ex_q.imm;")],
+         caught=["rvfi:reg_ch0", "directed:a6_forward", "random:raw", "bench"]),
+
+    dict(step="A17", name="store_byte_offset_from_the_alu_low_bits",
+         why="the byte-enable shift keeps reading ex_alu_y[1:0] while the "
+             "address comes from the adder.  Today those agree, so this is the "
+             "shape of a bug that arrives LATER: it is the line that would "
+             "have to be edited too if the adder ever stopped matching, and "
+             "leaving it behind is how a store lands in the wrong byte lane.  "
+             "NOT caught by soc, and that is structural rather than a gap in "
+             "the test: every MMIO access is a word access by the register "
+             "map's own rule, and `sw` sets all four byte enables whatever the "
+             "offset says.  A byte-lane fault cannot reach the UART",
+         edits=[(CORE, "  assign ex_byte_off = ex_mem_addr[1:0];",
+                       "  assign ex_byte_off = ex_alu_y[1:0] ^ 2'b01;")],
+         caught=["bench", "random:raw"]),
+
+    # ---- A19: the branch predictor ----------------------------------------
+    # FOUR OF THESE SIX ARE ARCHITECTURALLY INVISIBLE.  The core retires the
+    # same instructions in the same order with every one of them applied, so
+    # no commit-log diff, no riscv-formal check and no compliance test can see
+    # them -- they are caught by tb/cosim/cycle_model.py's SPAN check and
+    # nowhere else.  MODS_A A19 asks for exactly that ("at least one must be
+    # caught by the cycle model rather than by a correctness check"), and it is
+    # the reason the cycle model was taught the predictor from
+    # docs/a19-bpred-spec.md rather than from this RTL.
+    dict(step="A19", name="btb_tag_compared_against_the_wrong_bits",
+         why="the stored tag is compared against the lookup tag ROTATED LEFT "
+             "by one -- an off-by-one slice, and the most ordinary way to get "
+             "a tag comparison wrong.  Rotated rather than shifted so the top "
+             "bit stays referenced: a shift leaves it unread and the harness "
+             "rejects the mutation for not compiling, correctly.  A correct entry then never matches its "
+             "own address, so every transfer misses and the predictor buys "
+             "nothing at all while still costing its LUTs.  "
+             "NOT covered by this or any other test here: a wrong tag "
+             "that MATCHES -- a false hit.  Producing one needs two hot branch "
+             "sites whose tags collide under the specific broken comparison, "
+             "which is tuning a program to a mutation rather than testing a "
+             "property.  The stimulus that would cover it is a long random "
+             "program containing loops, and gen_random_prog.py emits "
+             "forward-only branches by design.  Recorded, not papered over",
+         edits=[(BP, "  wire        lk_hit  = btb_valid_q[lk_i] && (lk_e[G_LSB +: TAG_W] == lk_t);",
+                     "  wire        lk_hit  = btb_valid_q[lk_i] && (lk_e[G_LSB +: TAG_W] == {lk_t[TAG_W-2:0], lk_t[TAG_W-1]});")],
+         caught=["directed:a19_bpred"]),
+
+    dict(step="A19", name="bpred_counter_wraps_instead_of_saturating",
+         why="a strongly-taken branch becomes strongly-not-taken on ONE "
+             "not-taken execution.  The classic two-bit-counter bug, and the "
+             "reason a 2-bit counter is worth more than a 1-bit one at all -- "
+             "with it, a loop mispredicts twice per exit instead of once",
+         edits=[(BP, "                         ? ((up_cnt == 2'b11) ? 2'b11 : up_cnt + 2'b01)",
+                     "                         ? (up_cnt + 2'b01)")],
+         caught=["directed:a19_bpred"]),
+
+    dict(step="A19", name="ras_push_condition_dropped",
+         why="calls no longer push, so the return stack is always empty and "
+             "every return falls through to its BTB entry -- which holds "
+             "whichever caller returned there last",
+         edits=[(BP, "  wire up_call = upd_valid && (upd_kind == rv32i_pkg::BP_CALL);",
+                     "  wire up_call = 1'b0;")],
+         caught=["directed:a19_bpred"]),
+
+    # THE VALID BIT HAS NO MUTATION, and the reason is worth recording rather
+    # than leaving as an eight-entry list where a reader expects nine.
+    # Dropping `btb_valid_q[lk_i]` from the hit test is a NO-OP in simulation:
+    # an entry that was never written reads as all zeros, so its tag is zero,
+    # and nothing in this project executes below address 0x400 -- the tag
+    # comparison alone rejects it.  The valid bit is therefore defence in depth
+    # against a memory that does NOT power up zeroed, which is the case the
+    # specification's section 6 reset argument is written for and the case no
+    # simulation here can produce.  A mutation that cannot fail is not evidence.
+    dict(step="A19", name="btb_never_replaces_a_live_entry",
+         why="the BTB refuses to overwrite an entry belonging to a different "
+             "address -- a plausible 'do not thrash' policy, and wrong: with a "
+             "direct-mapped array the second site to reach an index would then "
+             "never be predicted at all, forever.  ARCHITECTURALLY INVISIBLE, "
+             "and the mutation that case 8 of a19_bpred.S exists for: two hot "
+             "branches one kilobyte apart share index 0, and correct behaviour "
+             "is that they evict each other on every pass",
+         edits=[(BP, "  wire btb_we = upd_valid && (upd_taken || (up_hit && up_isbr));",
+                     "  wire btb_we = upd_valid && (upd_taken || (up_hit && up_isbr))\n"
+                     "                          && (!btb_valid_q[up_i] || up_hit);")],
+         caught=["directed:a19_bpred"]),
+
+    dict(step="A19", name="mispredict_ignores_the_target",
+         why="the check compares only the DIRECTION.  A predicted-taken "
+             "transfer whose target moved is accepted, and the wrong "
+             "instruction retires -- which makes this the one predictor "
+             "mutation the commit log can see, and the reason the target "
+             "comparison is not an optimisation",
+         edits=[(CORE, "                       ((id_ex_q.pred_taken != ex_ctrl_xfer) ||\n"
+                       "                        (ex_ctrl_xfer &&\n"
+                       "                         (id_ex_q.pred_target != ex_jump_target)));",
+                       "                       (id_ex_q.pred_taken != ex_ctrl_xfer);")],
+         caught=["directed:a19_bpred", "rvfi:pc_fwd_ch0"]),
+
+    dict(step="A19", name="prediction_outranks_the_redirect",
+         why="the PC mux prefers a prediction to an EX redirect.  IF has seen "
+             "an address; EX has seen the instruction, and it wins -- getting "
+             "that priority backwards means a mispredict is never actually "
+             "recovered from",
+         edits=[(CORE, "    if      (ex_redirect)   pc_next = ex_redirect_target;\n"
+                       "    else if (front_stall)   pc_next = pc_q;\n"
+                       "    else if (bp_pred_taken) pc_next = bp_pred_target;",
+                       "    if      (bp_pred_taken) pc_next = bp_pred_target;\n"
+                       "    else if (ex_redirect)   pc_next = ex_redirect_target;\n"
+                       "    else if (front_stall)   pc_next = pc_q;")],
+         caught=["directed:a19_bpred", "rvfi:pc_fwd_ch0"]),
+
+    dict(step="A19", name="rvfi_pc_wdata_falls_through_a_taken_branch",
+         why="pc_wdata comes from the trap vector or from pc + 4, never from "
+             "the branch target.  This is the shape of the bug A19 nearly "
+             "shipped: pc_wdata used to be gated on ex_redirect, and a "
+             "correctly predicted taken branch no longer redirects, so the old "
+             "expression would have reported a fall-through on exactly the "
+             "branches the predictor got RIGHT.  ex_redirect was deleted from "
+             "this module's port list so that expression cannot be written at "
+             "all; this mutation is what proves the property that made the "
+             "deletion necessary",
+         edits=[(RVFI, "    ex_pkt.pc_wdata = ex_redirect_target;",
+                       "    ex_pkt.pc_wdata = ex_trap ? ex_redirect_target\n"
+                       "                              : (ex_pc + 32'd4);")],
+         caught=["rvfi:pc_fwd_ch0"]),
+
+    dict(step="A19", name="bpred_allocates_only_on_branches",
+         why="jumps, calls and returns never get a BTB entry -- only branches "
+             "do.  A plausible misreading of the specification's 'allocate "
+             "only on a taken resolution', and ARCHITECTURALLY PERFECT: the "
+             "core retires exactly the same instructions in exactly the same "
+             "order.  It simply throws away most of the predictor's value, "
+             "because JAL, JALR and returns are a third of Dhrystone's "
+             "control transfers.  The span is the only thing that says so",
+         edits=[(BP, "  wire btb_we = upd_valid && (upd_taken || (up_hit && up_isbr));",
+                     "  wire btb_we = upd_valid && up_isbr && (upd_taken || up_hit);")],
+         caught=["directed:a19_bpred"]),
 ]
 
 # ------------------------------------------------------------------- the tests

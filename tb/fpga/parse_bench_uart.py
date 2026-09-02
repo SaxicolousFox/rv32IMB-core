@@ -265,29 +265,82 @@ def derive(b, args):
 
 
 def check_reproducible(blocks, args):
-    """The plan asks for results reproducible across three runs.  On this SoC
-    there is no cache, no DRAM, no interrupt source and no other master, so
-    consecutive blocks should be EXACTLY equal -- not merely close.  Requiring
-    equality makes any source of variation a failure that has to be explained
-    rather than averaged away."""
+    """What "reproducible" means on a machine with a branch predictor.
+
+    Before A19 this required consecutive report blocks to be EXACTLY equal --
+    no cache, no DRAM, no interrupt source, no other master, so any variation
+    was a failure to be explained rather than averaged away.  A19 added the
+    first piece of state that survives a timed region: the BTB and the return
+    stack are not cleared between blocks, so block 1 runs on a cold predictor
+    and later blocks run on progressively warmer ones.  Dhrystone settles after
+    one block; CoreMark, with 216 distinct transfer sites and data-dependent
+    branches, was still moving by 4 cycles in 833,259 between blocks 2 and 3.
+
+    The wrong fix is a tolerance.  A tolerance would have absorbed this and the
+    next source of variation with it, which is the exact failure the original
+    comment was written against.  So the check is SPLIT instead:
+
+      ARCHITECTURAL keys -- instruction counts, CRCs, checksums -- must be
+      EXACTLY equal across every block, cold one included.  The predictor cannot
+      touch them, and any variation there is a real bug.
+
+      TIMING keys -- cycle counts -- have their spread MEASURED and reported,
+      and are not required to be equal within one capture, because the machine
+      genuinely carries state between blocks now.
+
+    The exact-determinism claim does not disappear; it moves to where it is
+    still true and is now stronger for it.  `tb/fpga/compare_bench_runs.py`
+    requires every cycle count to be identical between PROGRAMMING PASSES, which
+    is the claim the plan actually asks for -- "reproducible across three runs"
+    -- and which a within-capture comparison never tested.
+    """
     if len(blocks) < 2:
         return {}
-    keys = ["dhry_cycles", "dhry_stat_cycles", "dhry_stat_instret",
-            "cm_cycles", "cm_instret", "crcfinal"]
+
+    arch = ["dhry_stat_instret", "cm_instret", "crcfinal", "crclist",
+            "crcmatrix", "crcstate", "dhry_check", "dhry_runs", "cm_iterations"]
+    time = ["dhry_cycles", "dhry_stat_cycles", "cm_cycles"]
     if blocks[0].get("has_ntt"):
-        keys += ["ntt_cycles_rv32i", "ntt_instret_rv32i",
-                 "ntt_cycles_rv32im", "ntt_instret_rv32im", "ntt_sum"]
+        arch += ["ntt_instret_rv32i", "ntt_instret_rv32im", "ntt_sum", "ntt_check"]
+        time += ["ntt_cycles_rv32i", "ntt_cycles_rv32im"]
+
+    for k in arch:
+        vals = [b[k] for b in blocks if k in b]
+        if vals and min(vals) != max(vals):
+            raise Fail("ARCHITECTURAL key %s varies across %d blocks: %s -- the "
+                       "predictor cannot change this, so something else did"
+                       % (k, len(blocks), vals))
+
+    cold = blocks[0] if args.warmup_blocks else None
+    warm = blocks[args.warmup_blocks:] if args.warmup_blocks else blocks
+    if len(warm) < 2:
+        # A CHECK THAT CANNOT FAIL IS NOT A CHECK.  Fewer than two blocks left
+        # after discarding warm-up means the caller captured fewer than it asked
+        # for, and reporting "no variation" would be a vacuous pass.
+        raise Fail("only %d block(s) left after discarding %d warm-up block(s); "
+                   "at least 2 are needed to compare"
+                   % (len(warm), args.warmup_blocks))
+
     spread = {}
-    for k in keys:
-        vals = [b[k] for b in blocks]
+    for k in time:
+        vals = [b[k] for b in warm if k in b]
+        if not vals:
+            continue
         lo, hi = min(vals), max(vals)
-        spread[k] = {"min": lo, "max": hi,
+        spread[k] = {"min": lo, "max": hi, "range": hi - lo,
                      "ppm": 0.0 if lo == 0 else (hi - lo) * 1e6 / lo}
-        spread[k]["range"] = hi - lo
         if hi != lo and spread[k]["ppm"] > args.tolerance_ppm:
-            raise Fail("%s varies across %d blocks by %d (%.4f ppm, limit "
-                       "%.4f): %s" % (k, len(blocks), hi - lo, spread[k]["ppm"],
+            raise Fail("%s varies across %d warm blocks by %d (%.4f ppm, limit "
+                       "%.4f): %s" % (k, len(warm), hi - lo, spread[k]["ppm"],
                                       args.tolerance_ppm, vals))
+
+    # The warm-up cost, reported rather than absorbed.  It is what a cold branch
+    # predictor costs the first time through -- and it is also the size of the
+    # timing signal left behind for whatever runs next, which is a security
+    # property and not only a performance one.
+    if cold is not None:
+        spread["_warmup"] = {k: cold[k] - warm[0][k]
+                             for k in time if k in cold and k in warm[0]}
     return spread
 
 
@@ -337,6 +390,12 @@ def report(blocks, spread, args):
                    % (b["ntt_cycle_ratio"], b["ntt_instret_ratio"]))
         out.append("           agreement : all 256 coefficients identical "
                    "(sum 0x%08x)" % b["ntt_sum"])
+    warmup = spread.pop("_warmup", None) if spread else None
+    if warmup:
+        moved = {k: v for k, v in warmup.items() if v}
+        out.append("warm-up (block 1 vs 2): " +
+                   (", ".join("%s %+d" % (k, v) for k, v in moved.items())
+                    if moved else "no difference"))
     if spread:
         worst = max(spread.values(), key=lambda s: s["ppm"])
         out.append("")
@@ -430,6 +489,11 @@ def selftest() -> int:
     class A:
         dhry_runs = None; iterations = None; allow_short = False
         functional_only = False; min_blocks = 1; tolerance_ppm = 0.0
+        # A19.  The selftest's captures are synthetic and identical, so no
+        # warm-up block is discarded here -- the cold/warm split is a property
+        # of the machine, not of the parser, and the parser's own checks are
+        # what this exercises.
+        warmup_blocks = 0
     base = good_block(0) + good_block(1) + good_block(2)
 
     ok, _ = check(base, A())
@@ -454,6 +518,17 @@ def selftest() -> int:
         return 1
 
     faults = [
+        # A19 SPLIT THE REPRODUCIBILITY CHECK, so both halves of the split need
+        # a fault of their own.  A branch predictor carries state between report
+        # blocks, so cycle counts may legitimately differ; instruction counts
+        # and CRCs may NOT, because the predictor cannot touch them.  Without
+        # these two the split would be a comment rather than a check.
+        # The blocks are identical, so `replace(..., count=1)` on the LAST one
+        # perturbs exactly one block and leaves the others alone.
+        ("arch_instret_varies",
+         lambda t: t[::-1].replace("000000351=tertsni_tats_yrhd", "100000351=tertsni_tats_yrhd", 1)[::-1]),
+        ("timing_key_varies",
+         lambda t: t[::-1].replace("000000081=selcyc_yrhd", "100000081=selcyc_yrhd", 1)[::-1]),
         # Cut before the first terminator, so NO block is complete -- half a
         # capture that still contains a whole block is legitimate and must not
         # fail, which is why this truncates to less than one.
@@ -591,6 +666,9 @@ def main() -> int:
                     help="host run: check CRCs and Dhrystone values, no timing")
     ap.add_argument("--tolerance-ppm", type=float, default=0.0,
                     help="permitted spread between blocks; 0 means exact")
+    ap.add_argument("--warmup-blocks", type=int, default=0,
+                    help="discard this many leading blocks before comparing; "
+                         "1 after A19, whose predictor is cold in the first")
     ap.add_argument("--json", default=None)
     a = ap.parse_args()
 

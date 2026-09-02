@@ -190,7 +190,7 @@ confirm it is satisfied.
 | M6 | riscv-formal checks pass | ✅ 43 checks at BMC depth 14 (`liveness` 47 since A15) |
 | M7 | Core-only bitstream: Fmax + Dhrystone + CoreMark on hardware | ✅ hardware-confirmed |
 | **M7.1** | **RV32IM core: `M` verified and the benchmark re-measured** (`MODS_A`) | ✅ **hardware-confirmed** |
-| M7.2 | Core performance: Fmax recovered and branch prediction measured (`MODS_A`) | not started — A17–A19 |
+| **M7.2** | **Core performance: Fmax recovered and branch prediction measured** (`MODS_A`) | ✅ **hardware-confirmed** |
 | M8–M16 | — | not started |
 
 **M5 is a compliance claim, and its boundaries are recorded rather than
@@ -287,9 +287,11 @@ cannot be mechanised.
 
 **What is still missing after A12 and A13**: any Xkntt execution — the decoder
 recognises the extension and LD0 red lights if one ever retires, but no stage
-runs it. Also no flash image (configuration is volatile), and no attribution of
-the 0.384 stall cycles per instruction the benchmarks measured, which would need
-branch and stall counters the core does not have (`MODS_A` A18).
+runs it. Also no flash image (configuration is volatile). *(The third item here
+was the unattributed 0.384 stall cycles per instruction; **A18 attributed it**,
+with a Verilator observer rather than the core counters this paragraph assumed
+were needed — see M7.2 below. The core still has no hardware performance
+counters, and `Zihpm` remains unimplemented.)*
 
 **M7.1 is met by A14, A15 and A16 together, and is hardware-confirmed.**
 **Fmax 73.752 MHz** (up from A12's 70.131 — see below), **DMIPS/MHz 0.7325,
@@ -297,6 +299,44 @@ CoreMark/MHz 2.4309, IPC 0.6860 (Dhrystone) and 0.7006 (CoreMark)** at
 73.750 000 MHz, over three JTAG programming passes with all twelve report blocks
 identical to the cycle. 2613 LUTs, 1148 FFs, 32 BRAM tiles, **4 DSP48E1**. See
 `docs/a16-benchmarks.md` and `docs/a16-benchmarks.json`.
+
+**M7.2 is met by A17, A18 and A19 together, and is hardware-confirmed.**
+**Fmax 77.501 MHz**, **DMIPS/MHz 0.9346, CoreMark/MHz 2.8933, IPC 0.8752
+(Dhrystone) and 0.8338 (CoreMark)** at 77.500 000 MHz, over three JTAG passes
+with all twelve report blocks identical to the cycle. 3471 LUTs, 1530 FFs, 32
+BRAM tiles, 4 DSP48E1. See `docs/a19-benchmarks.md` and `docs/a19-benchmarks.json`.
+
+**A17 raised Fmax 17.3% without changing one cycle count, and A19 gave 10.4% of
+it back on purpose.** A17 reached 86.490 MHz with a dedicated load/store address
+adder (−1.589 ns for 26 LUTs); A19's predictor costs clock and returns more than
+it costs in IPC, so **absolute Dhrystone still rises 63.35 → 72.43 DMIPS on a
+slower part**. Both IPC figures and DMIPS/MHz land inside §A13's bands for the
+first time. **§9's core-only Fmax baseline is now 77.501 MHz**, not 86.490.
+
+**A19's Fmax carries a wider band than any previous one, and the reason is
+recorded rather than averaged away.** The binary search is **not monotonic** —
+79.246 MHz failed by −1.186 ns while the tighter 80.998 MHz failed by only
+−0.676 — and one netlist's implied path delay spans 12.90–13.81 ns, **a 0.9 ns
+spread against A12's ±0.4 ns**. 77.501 MHz is the highest constraint *observed to
+pass*, not a boundary. The A17-to-A19 gap survives that; a ±1 MHz claim would not.
+
+**A18's identity closes at residual exactly zero** in all four regions —
+`cycles = retired + load-use stalls + multi-cycle EX stalls + 2 × redirects` —
+and after A19 a second closure holds too: `redirects (RTL) == mispredicts
+(model/bpred.py)`, to the unit, on both benchmarks. The gain and the not-taken
+regression decompose **exactly**: Dhrystone saves 335,934 cycles and loses
+12,000, net 323,934, which is the measured reduction to the cycle.
+
+**Two things about A19 are open or constrained, and neither is buried.**
+CoreMark now runs **2500** iterations, not A16/A17's 2200, because A19 made the
+2200-iteration run finish in 9.81 s — under CoreMark's own 10 s reporting
+minimum — so its **raw cycle counts are not comparable across those steps** while
+CoreMark/MHz and IPC are. And Dhrystone in *simulation* at 2,000 runs costs
+615.048 cycles/run where 4,000, 8,000 and this board all agree on ~609.0; the
+2,000-run point carries exactly 3 extra mispredicts per run, it is **not** the
+image configuration and **not** a fixed warm-up cost, A18 shows no such effect,
+and it is **unexplained**. Every headline figure above is from the board.
+
 
 **The dual baseline, which is the number §10 M2 and M3 actually depend on**: the
 same reference ML-KEM NTT compiled `-march=rv32i` and `-march=rv32im`, linked
