@@ -11,8 +11,12 @@ import os, re, subprocess, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LD   = os.path.join(ROOT, "sw", "tests", "link.ld")
 
-ISA_XKNTT = "rv32i_zicsr_zicntr_xkntt0p1"
-ISA_BASE  = "rv32i_zicsr_zicntr"
+# The M in these strings is A14's (MODS_A).  ISA_BASE is what the extension-
+# gating test in test_spike_xkntt.py runs against to prove an Xkntt encoding
+# traps when the extension is absent -- adding M does not weaken that, because
+# M and Xkntt occupy disjoint opcodes (MODS_A 3.1).
+ISA_XKNTT = "rv32im_zicsr_zicntr_xkntt0p1"
+ISA_BASE  = "rv32im_zicsr_zicntr"
 
 # A bare-metal program that takes a trap with no handler installed loops
 # forever re-taking it.  Every program therefore installs a handler that exits
@@ -82,7 +86,7 @@ def build(body, tmp, name="prog", data="", trap_mode="exit"):
         handler = TRAP_HANDLER if trap_mode == "exit" else TRAP_HANDLER_SKIP
         f.write(PROLOGUE + body + EPILOGUE + handler + data)
     r = subprocess.run(
-        ["riscv-none-elf-gcc", "-march=rv32i_zicsr", "-mabi=ilp32",
+        ["riscv-none-elf-gcc", "-march=rv32im_zicsr", "-mabi=ilp32",
          "-nostdlib", "-nostartfiles", "-T", LD, "-o", elf, src],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if r.returncode != 0:

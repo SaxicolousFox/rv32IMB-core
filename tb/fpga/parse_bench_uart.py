@@ -144,6 +144,30 @@ def parse_block(lines, idx, args):
             raise Fail("block %d: CoreMark printed no %s" % (idx, name))
         b[name] = int(m.group(1), 16)
 
+    # A16's dual baseline, if this image carries it.  OPTIONAL, because A13's
+    # image does not have it and its captures must keep parsing unchanged -- the
+    # RV32I numbers are preserved rather than overwritten (MODS_A A16), and a
+    # parser that could no longer read them would defeat that.
+    b["has_ntt"] = "ntt_cycles_rv32i" in d
+    if b["has_ntt"]:
+        for k in ("ntt_cycles_rv32i", "ntt_instret_rv32i",
+                  "ntt_cycles_rv32im", "ntt_instret_rv32im",
+                  "ntt_check", "ntt_sum"):
+            b[k] = num(d, k, idx)
+        # THE TWO BUILDS MUST HAVE COMPUTED THE SAME POLYNOMIAL.  Without this
+        # the "ratio" could be between two different transforms -- a -march that
+        # changed the arithmetic, or a symbol rename that left one variant
+        # calling the other's helpers, would read as a speedup rather than as an
+        # error.  ntt_check counts differing coefficients out of 256.
+        if b["ntt_check"] != 0:
+            raise Fail("block %d: the rv32i and rv32im NTT builds disagree on "
+                       "%d of 256 coefficients -- they are not computing the "
+                       "same transform, so the ratio below would be meaningless"
+                       % (idx, b["ntt_check"]))
+        if b["ntt_sum"] == 0:
+            raise Fail("block %d: ntt_sum is zero -- the transform produced an "
+                       "all-zero polynomial, which the seed cannot" % idx)
+
     if args.dhry_runs is not None and b["dhry_runs"] != args.dhry_runs:
         raise Fail("block %d: dhry_runs=%d, expected %d -- the capture is from a "
                    "different build" % (idx, b["dhry_runs"], args.dhry_runs))
@@ -208,6 +232,31 @@ def derive(b, args):
                        "in-order core; minstret or mcycle is wrong"
                        % (b["index"], name, b[name]))
 
+    if b.get("has_ntt"):
+        for k in ("ntt_cycles_rv32i", "ntt_instret_rv32i",
+                  "ntt_cycles_rv32im", "ntt_instret_rv32im"):
+            if b[k] <= 0:
+                raise Fail("block %d: %s=%d -- the counter did not advance"
+                           % (b["index"], k, b[k]))
+        b["ntt_cycle_ratio"]   = b["ntt_cycles_rv32i"] / b["ntt_cycles_rv32im"]
+        b["ntt_instret_ratio"] = b["ntt_instret_rv32i"] / b["ntt_instret_rv32im"]
+        b["ntt_ipc_rv32i"]  = b["ntt_instret_rv32i"] / b["ntt_cycles_rv32i"]
+        b["ntt_ipc_rv32im"] = b["ntt_instret_rv32im"] / b["ntt_cycles_rv32im"]
+        for name in ("ntt_ipc_rv32i", "ntt_ipc_rv32im"):
+            if not (0.0 < b[name] <= 1.0):
+                raise Fail("block %d: %s = %.4f -- impossible for a "
+                           "single-issue in-order core"
+                           % (b["index"], name, b[name]))
+        # The rv32im build must be FASTER.  If it is not, either the M unit is
+        # not being selected or the rename crossed the two variants over, and
+        # both look like a plausible number rather than like an error.
+        if b["ntt_cycle_ratio"] <= 1.0:
+            raise Fail("block %d: the rv32im NTT is not faster than the rv32i "
+                       "one (%d vs %d cycles).  Either the multiplier is not "
+                       "being used or the two builds are crossed over."
+                       % (b["index"], b["ntt_cycles_rv32im"],
+                          b["ntt_cycles_rv32i"]))
+
     if not args.allow_short and b["cm_secs"] < 10.0:
         raise Fail("block %d: CoreMark ran %.2f s; its run rules require at "
                    "least 10 s.  Raise ITERATIONS (--allow-short to override "
@@ -223,8 +272,11 @@ def check_reproducible(blocks, args):
     rather than averaged away."""
     if len(blocks) < 2:
         return {}
-    keys = ("dhry_cycles", "dhry_stat_cycles", "dhry_stat_instret",
-            "cm_cycles", "cm_instret", "crcfinal")
+    keys = ["dhry_cycles", "dhry_stat_cycles", "dhry_stat_instret",
+            "cm_cycles", "cm_instret", "crcfinal"]
+    if blocks[0].get("has_ntt"):
+        keys += ["ntt_cycles_rv32i", "ntt_instret_rv32i",
+                 "ntt_cycles_rv32im", "ntt_instret_rv32im", "ntt_sum"]
     spread = {}
     for k in keys:
         vals = [b[k] for b in blocks]
@@ -272,6 +324,19 @@ def report(blocks, spread, args):
     out.append("           CoreMark/MHz: %.4f" % b["coremark_per_mhz"])
     out.append("           instret   : %d  ->  IPC %.4f"
                % (b["cm_instret"], b["cm_ipc"]))
+    if b.get("has_ntt"):
+        out.append("")
+        out.append("ML-KEM NTT (the dual baseline -- one core, one clock, one run)")
+        out.append("           rv32i     : %d cycles, %d instructions  (IPC %.4f)"
+                   % (b["ntt_cycles_rv32i"], b["ntt_instret_rv32i"],
+                      b["ntt_ipc_rv32i"]))
+        out.append("           rv32im    : %d cycles, %d instructions  (IPC %.4f)"
+                   % (b["ntt_cycles_rv32im"], b["ntt_instret_rv32im"],
+                      b["ntt_ipc_rv32im"]))
+        out.append("           ratio     : %.3fx cycles, %.3fx instructions"
+                   % (b["ntt_cycle_ratio"], b["ntt_instret_ratio"]))
+        out.append("           agreement : all 256 coefficients identical "
+                   "(sum 0x%08x)" % b["ntt_sum"])
     if spread:
         worst = max(spread.values(), key=lambda s: s["ppm"])
         out.append("")
@@ -329,7 +394,20 @@ Correct operation validated. See README.md for run and reporting rules.
 """
 
 
-def good_block(iter_no=0):
+# A16's section, as the board prints it.  The numbers are the shape A13's Spike
+# measurement predicts -- 148,645 instructions against 23,795 -- so a selftest
+# fault that inverts the ratio has something realistic to invert.
+NTT_SECTION = (
+    "--- ntt ---\n"
+    "ntt_cycles_rv32i=201000\n"
+    "ntt_instret_rv32i=148645\n"
+    "ntt_cycles_rv32im=33000\n"
+    "ntt_instret_rv32im=23795\n"
+    "ntt_check=0x00000000\n"
+    "ntt_sum=0x5a5a1234\n")
+
+
+def good_block(iter_no=0, ntt=False):
     return (BEGIN + "\n"
             "iter=0x%08x\n" % iter_no +
             "clk_hz=70129870\n"
@@ -344,6 +422,7 @@ def good_block(iter_no=0):
             "cm_iterations=350\n"
             "cm_cycles=733000000\n"
             "cm_instret=620000000\n"
+            + (NTT_SECTION if ntt else "")
             + END + "\n")
 
 
@@ -356,6 +435,22 @@ def selftest() -> int:
     ok, _ = check(base, A())
     if len(ok) != 3:
         print("SELFTEST FAIL: the good capture did not parse as 3 blocks")
+        return 1
+    if ok[0]["has_ntt"]:
+        print("SELFTEST FAIL: a block with no `--- ntt ---` was read as having one")
+        return 1
+
+    # A16's section is OPTIONAL, so it needs its own good capture as well as its
+    # own faults: a parser that silently ignored the whole section would pass
+    # every fault below on the base capture and every check above on this one.
+    ntt_base = "".join(good_block(i, ntt=True) for i in range(3))
+    ok, _ = check(ntt_base, A())
+    if len(ok) != 3 or not ok[0]["has_ntt"]:
+        print("SELFTEST FAIL: the dual-baseline capture did not parse")
+        return 1
+    if abs(ok[0]["ntt_instret_ratio"] - 148645 / 23795) > 1e-9:
+        print("SELFTEST FAIL: ntt_instret_ratio came out as %r"
+              % ok[0]["ntt_instret_ratio"])
         return 1
 
     faults = [
@@ -399,7 +494,48 @@ def selftest() -> int:
         ("mangled_number",   lambda t: t.replace("dhry_cycles=180000000",
                                                  "dhry_cycles=18000?000")),
     ]
+    # A16's section has its own faults, injected into the capture that HAS one.
+    # Aimed at the four things that could turn a non-measurement into a
+    # plausible ratio.
+    ntt_faults = [
+        # The two builds computed different polynomials: the ratio would be
+        # between two different transforms.
+        ("ntt_disagree",     lambda t: t.replace("ntt_check=0x00000000",
+                                                 "ntt_check=0x00000007")),
+        # An all-zero result: a multiplier that returns zero is fast and wrong,
+        # and the two builds would agree perfectly about it.
+        ("ntt_all_zero",     lambda t: t.replace("ntt_sum=0x5a5a1234",
+                                                 "ntt_sum=0x00000000")),
+        # The two variants crossed over, or M never selected.  Either way the
+        # rv32im build is not faster and the headline ratio is upside down.
+        ("ntt_not_faster",   lambda t: t.replace("ntt_cycles_rv32im=33000",
+                                                 "ntt_cycles_rv32im=250000")),
+        # A counter that did not advance.
+        ("ntt_zero_cycles",  lambda t: t.replace("ntt_cycles_rv32i=201000",
+                                                 "ntt_cycles_rv32i=0")),
+        # IPC above 1 in the NTT section specifically -- the Dhrystone and
+        # CoreMark checks cannot see this one.
+        ("ntt_ipc_above_one", lambda t: t.replace("ntt_instret_rv32im=23795",
+                                                  "ntt_instret_rv32im=40000")),
+        # Blocks disagree in the NTT section only, which the existing
+        # reproducibility keys would not have looked at.
+        ("ntt_blocks_differ", lambda t: t.replace("ntt_cycles_rv32im=33000",
+                                                  "ntt_cycles_rv32im=33001", 1)),
+    ]
+
     bad = 0
+    for name, mutate in ntt_faults:
+        try:
+            check(mutate(ntt_base), A())
+        except Fail as e:
+            print("  caught %-19s : %s" % (name, str(e).split(" -- ")[0][:72]))
+            continue
+        except Exception as e:                       # noqa: BLE001
+            print("  caught %-19s : %s: %s" % (name, type(e).__name__, e))
+            continue
+        print("  ESCAPED %-18s : the parser accepted a broken capture" % name)
+        bad += 1
+
     for name, mutate in faults:
         try:
             check(mutate(base), A())
@@ -436,8 +572,9 @@ def selftest() -> int:
         print("  ESCAPED --functional-only  : accepted a real capture as a host one")
         bad += 1
 
+    total = len(faults) + len(ntt_faults) + 2
     print("SELFTEST %s: %d/%d injected faults caught"
-          % ("OK" if bad == 0 else "FAIL", len(faults) + 2 - bad, len(faults) + 2))
+          % ("OK" if bad == 0 else "FAIL", total - bad, total))
     return 1 if bad else 0
 
 

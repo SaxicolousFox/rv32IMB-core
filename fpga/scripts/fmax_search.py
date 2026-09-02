@@ -75,6 +75,14 @@ def main() -> int:
     ap.add_argument("--out", default=os.path.join(ROOT, "fpga/build/fmax"))
     a = ap.parse_args()
 
+    # ABSOLUTE, always.  build_soc.sh cds into its Windows staging directory
+    # before it copies products to $OUT, and it wipes that directory at the
+    # start of every run -- so a RELATIVE --out silently writes each iteration's
+    # reports somewhere that the next iteration deletes.  The search still
+    # produces the right number, because WNS is parsed from stdout, but the
+    # post-route timing report that says WHERE the critical path went is gone.
+    # Found the hard way at A16.
+    a.out = os.path.abspath(a.out)
     os.makedirs(a.out, exist_ok=True)
     history, best = [], None
     lo, hi = a.lo, a.hi

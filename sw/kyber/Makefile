@@ -4,6 +4,13 @@
 #   make TARGET=host BACKEND=TIER1        native, Xkntt semantics emulated in C
 #   make TARGET=rv32 BACKEND=SW           bare-metal RV32I for Spike
 #   make TARGET=rv32 BACKEND=TIER1        ditto, using the real instructions
+#   make TARGET=rv32 MARCH=rv32im         ... with the M extension (A14 onwards)
+#
+# MARCH defaults to rv32i and MUST keep doing so: it is the baseline every
+# earlier measurement in docs/ was taken against, and A16 (MODS_A) exists
+# precisely to be able to show both numbers rather than to replace one with the
+# other.  The build path carries it for the same reason NTESTS does -- otherwise
+# make hands back a stale binary built for the other ISA.
 #
 # NTESTS=n sets the iteration count; DIGEST=1 prints a SHAKE256 digest of the
 # output instead of the output itself, which is what makes a full-length run on
@@ -17,10 +24,11 @@ TARGET  ?= host
 BACKEND ?= SW
 NTESTS  ?= 10
 DIGEST  ?= 0
+MARCH   ?= rv32i
 
 # NTESTS and DIGEST change the binary, so they belong in the path;
 # otherwise make would hand back a stale build with the wrong count.
-OUT     := build/$(TARGET)-$(BACKEND)-n$(NTESTS)-d$(DIGEST)
+OUT     := build/$(TARGET)-$(BACKEND)-$(MARCH)-n$(NTESTS)-d$(DIGEST)
 GEN     := build/ntt_tier1.c
 
 REFSRC  := $(REF)/kem.c $(REF)/indcpa.c $(REF)/polyvec.c $(REF)/poly.c \
@@ -50,10 +58,10 @@ ifeq ($(TARGET),host)
   BIN     := $(OUT)/kat
 else
   CC      := riscv-none-elf-gcc
-  CFLAGS  := -march=rv32i -mabi=ilp32 -O2 -Wall -fomit-frame-pointer \
+  CFLAGS  := -march=$(MARCH) -mabi=ilp32 -O2 -Wall -fomit-frame-pointer \
              -ffreestanding $(INC) $(DEFS)
-  # -nostdlib for a bare-metal image, but rv32i has no multiply instruction, so
-  # libgcc's __mulsi3 is still required.
+  # -nostdlib for a bare-metal image.  -lgcc stays whatever MARCH is: rv32i has
+  # no multiply instruction at all, and even rv32im has no 64-bit helpers.
   LDFLAGS := -nostdlib -nostartfiles -T link.ld -lgcc
   SRC     := kat_main.c htif.c crt0.S
   BIN     := $(OUT)/kat.elf

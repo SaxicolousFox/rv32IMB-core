@@ -42,6 +42,8 @@ module rvntt_decode_flat (
     output wire logic        is_ebreak,
     output wire logic        is_mret,
     output wire logic        is_csr,
+    output wire logic        is_muldiv,
+    output wire logic [2:0]  muldiv_op,
     output wire logic        is_xkntt,
     output wire logic [3:0]  xkntt_op,
     output wire logic        is_illegal,
@@ -82,6 +84,8 @@ module rvntt_decode_flat (
   assign is_ebreak  = ctrl.is_ebreak;
   assign is_mret    = ctrl.is_mret;
   assign is_csr     = ctrl.is_csr;
+  assign is_muldiv  = ctrl.is_muldiv;
+  assign muldiv_op  = ctrl.muldiv_op;
   assign is_xkntt   = ctrl.is_xkntt;
   assign xkntt_op   = ctrl.xkntt_op;
   assign is_illegal = ctrl.is_illegal;

@@ -39,7 +39,16 @@ PARSER_DEFAULT = os.path.join(ROOT, "tb/fpga/parse_soc_uart.py")
 # stale-bitstream warning below, but it has to be complete: a source tree that is
 # newer than the .bit and is NOT listed here is precisely the case the warning
 # exists to catch, and A13 added sw/bench/ and a second generated image.
-SOURCE_DIRS = ("rtl", "sw/soc", "sw/bench", "fpga/constraints", "fpga/generated")
+SOURCE_DIRS = ("rtl", "sw/soc", "sw/bench", "fpga/constraints", "fpga/generated",
+               # A13 and A16 compile these UPSTREAM checkouts directly into the
+               # image, so they belong in a list whose stated invariant is
+               # "every directory whose contents end up inside a bitstream".
+               # They are pristine by policy and will therefore never be newer
+               # than the .bit in practice -- which is the point: the list is
+               # complete, and stays quiet.
+               "toolchain/riscv-tests/benchmarks/dhrystone",
+               "toolchain/coremark",
+               "toolchain/kyber/ref")
 
 
 def run(cmd, **kw):

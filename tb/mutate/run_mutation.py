@@ -59,6 +59,7 @@ HAZ   = "rtl/core/rvntt_hazard.sv"
 BR    = "rtl/core/rvntt_branch.sv"
 ALU   = "rtl/core/rvntt_alu.sv"
 CSR   = "rtl/core/rvntt_csr.sv"
+MD    = "rtl/core/rvntt_muldiv.sv"
 RF    = "rtl/core/rvntt_regfile.sv"
 RVFI  = "rtl/core/rvntt_rvfi.sv"
 MMIO    = "rtl/soc/rvntt_mmio.sv"
@@ -299,7 +300,7 @@ MUTATIONS = [
     dict(step="A7", name="stall_lets_the_pc_advance",
          why="IF is not held, so the fetch stream runs on by one during the "
              "bubble and an instruction is skipped entirely",
-         edits=[(CORE, "    else if (stall)       pc_q <= pc_q;\n", "")],
+         edits=[(CORE, "    else if (front_stall) pc_q <= pc_q;\n", "")],
          caught=["directed:a7_loaduse", "random:loaduse"]),
 
     dict(step="A7", name="stall_forgets_the_instruction_hold",
@@ -308,7 +309,7 @@ MUTATIONS = [
              "failure mode that makes the hold register necessary at all: "
              "holding pc_q and if_id_q is not enough, because the RAM's output "
              "register has already moved on",
-         edits=[(CORE, "      insn_held_q <= stall && !ex_redirect;",
+         edits=[(CORE, "      insn_held_q <= front_stall && !ex_redirect;",
                        "      insn_held_q <= 1'b0;")],
          caught=["directed:a7_loaduse", "random:loaduse"]),
 
@@ -316,7 +317,9 @@ MUTATIONS = [
          why="ID/EX is not cleared, so the consumer is issued twice -- a "
              "stalled cycle retires an instruction, which is exactly what plan "
              "A7's done-when forbids",
-         edits=[(CORE, "    end else if (stall || ex_redirect) begin",
+         # A14 split `stall` into id_stall and ex_stall and gave ID/EX a third
+         # arm; the interlock's bubble is now the id_stall half of the second.
+         edits=[(CORE, "    end else if (id_stall || ex_redirect) begin",
                        "    end else if (ex_redirect) begin")],
          caught=["directed:a7_loaduse", "random:loaduse"]),
 
@@ -336,8 +339,8 @@ MUTATIONS = [
     dict(step="A8", name="flush_spares_id_ex",
          why="only IF/ID is squashed, so the instruction already decoded behind "
              "the branch reaches EX and executes",
-         edits=[(CORE, "    end else if (stall || ex_redirect) begin",
-                       "    end else if (stall) begin")],
+         edits=[(CORE, "    end else if (id_stall || ex_redirect) begin",
+                       "    end else if (id_stall) begin")],
          caught=["directed:a8_control", "random:branch"]),
 
     dict(step="A8", name="branch_reads_stale_rs1",
@@ -345,7 +348,15 @@ MUTATIONS = [
              "operand, so a branch on a value computed one instruction earlier "
              "-- `sub` then `beqz`, which is how every compiler writes a "
              "comparison -- takes the wrong direction",
-         edits=[(CORE, "      .a      (ex_rs1_fwd),", "      .a      (id_ex_q.rs1_data),")],
+         # The .funct3 line is part of the anchor because A14's rvntt_muldiv is
+         # wired from the same two forwarded operands with the same port names
+         # and the same spacing.  Without it this matched TWICE and the harness
+         # silently mutated the multiplier instead of the comparator -- which is
+         # why mirror_rtl now rejects an ambiguous anchor outright.
+         edits=[(CORE, "      .funct3 (id_ex_q.insn[14:12]),\n"
+                       "      .a      (ex_rs1_fwd),",
+                       "      .funct3 (id_ex_q.insn[14:12]),\n"
+                       "      .a      (id_ex_q.rs1_data),")],
          caught=["directed:a8_control", "random:branch"]),
 
     dict(step="A8", name="branch_reads_stale_rs2",
@@ -353,7 +364,10 @@ MUTATIONS = [
              "one because a comparator wired to one forwarded and one stale "
              "source is a real shape, and a test that only exercises rs1 would "
              "call the module verified",
-         edits=[(CORE, "      .b      (ex_rs2_fwd),", "      .b      (id_ex_q.rs2_data),")],
+         edits=[(CORE, "      .b      (ex_rs2_fwd),\n"
+                       "      .taken  (ex_branch_taken)",
+                       "      .b      (id_ex_q.rs2_data),\n"
+                       "      .taken  (ex_branch_taken)")],
          caught=["directed:a8_control", "random:branch"]),
 
     dict(step="A8", name="jalr_keeps_bit0",
@@ -420,7 +434,7 @@ MUTATIONS = [
              "riscv-tests does not notice -- its own check happens to survive "
              "the off-by-two -- and the comparison against Spike's instruction "
              "count does",
-         edits=[(CORE, "      .instret_bump     (id_ex_q.valid && !ex_trap),",
+         edits=[(CORE, "      .instret_bump     (id_ex_q.valid && !ex_trap && !ex_stall),",
                        "      .instret_bump     (mem_wb_q.valid),")],
          caught=["csr:a9_minstret"]),
 
@@ -464,7 +478,11 @@ MUTATIONS = [
              "breaks three things at once: minstret counts it, the commit log "
              "gains a line Spike does not have, and the register write it was "
              "supposed to abandon happens",
-         edits=[(CORE, "    end else if (ex_trap) begin\n      ex_mem_q <= '0;\n", "")],
+         # A14 added ex_stall as a second reason to bubble here.  Deleting the
+         # whole arm would delete that too and test two things at once, so this
+         # removes only the trap term and leaves the stall bubble intact.
+         edits=[(CORE, "    end else if (ex_trap || ex_stall) begin",
+                       "    end else if (ex_stall) begin")],
          # NOT a9_minstret: that program never traps, so its counter is
          # unaffected.  A squashed-instruction bug shows up where instructions
          # actually fault -- and in every random program, whose closing ECALL
@@ -591,6 +609,210 @@ MUTATIONS = [
          edits=[(CORE, "      default:            ex_mem_fwd_data = 32'h0;",
                        "      default:            ex_mem_fwd_data = ex_mem_q.ex_result;")],
          caught=["rvfi:reg_ch0"]),
+
+    # --------------------------------------------------------------- A14 ----
+    # The M extension, and the multi-cycle EX mechanism under it.  Two of these
+    # are the interesting ones and neither changes an architectural value:
+    # `muldiv_done_one_cycle_late` is visible ONLY to the cycle model, and
+    # `minstret_counts_stalled_cycles` ONLY to a9_minstret.  Everything else in
+    # the tree -- Spike, rv32um, the commit-log differ -- is structurally blind
+    # to both, which is the same shape as A7's phantom stall.
+    dict(step="A14", name="muldiv_done_one_cycle_late",
+         why="every M instruction occupies EX for one cycle longer than the "
+             "latency contract.  Every VALUE is unchanged and every retirement "
+             "is in the right order, so Spike's log, rv32um and riscv-formal "
+             "all agree -- the span is the only thing that moves.  This is the "
+             "mutation that proves tb/cosim/cycle_model.py's Sum(latency-1) "
+             "term is doing work rather than being satisfied by construction",
+         edits=[(MD, "  assign done = req && active_q && (cnt_q == target);",
+                     "  assign done = req && active_q && (cnt_q == target + 6'd1);")],
+         caught=["directed:a14_muldiv", "random:muldiv"]),
+
+    dict(step="A14", name="muldiv_done_one_cycle_early",
+         why="the result is taken one cycle before it exists: for MUL that is "
+             "the previous operation's product still sitting in the output "
+             "register, for DIV it is 31 iterations instead of 32.  This is "
+             "the partial-result failure MODS_A A14 names, in the place it "
+             "actually lives -- the unit's own done condition rather than the "
+             "forwarding network, which never sees a partial value at all "
+             "because EX/MEM is bubbled on every stalled cycle",
+         edits=[(MD, "  assign done = req && active_q && (cnt_q == target);",
+                     "  assign done = req && active_q && (cnt_q == target - 6'd1);")],
+         caught=["directed:a14_muldiv", "random:muldiv",
+                 "riscv:rv32um/mul", "riscv:rv32um/div"]),
+
+    # THIS ENTRY REPLACED ONE THAT ESCAPED, AND THE ESCAPE WAS THE FINDING.
+    # The first version dropped the multiplier's operand-register ENABLE, so
+    # m_a_q/m_b_q reloaded from the drifting forwarding muxes on every stalled
+    # cycle.  It escaped every declared catcher -- correctly.  The multiplier is
+    # a three-deep register CHAIN whose latency equals its depth, so the value
+    # read on the done cycle is the product of the operands present on the START
+    # cycle whether or not the enable is there; the later ones are still in
+    # flight behind it.  The enable is load-bearing for the DIVIDER, whose state
+    # is a loop rather than a chain, and structurally redundant for the
+    # multiplier.  That is recorded in rvntt_muldiv.sv rather than papered over
+    # with a mutation aimed somewhere it could never bite.
+    #
+    # The bug the original entry was trying to reach lives one level up, in how
+    # the CORE feeds the unit -- and there it is real for both halves.
+    dict(step="A14", name="muldiv_reads_the_register_file_not_forwarding",
+         why="the multi-cycle unit is fed id_ex_q.rs1_data/rs2_data instead of "
+             "the forwarding muxes' outputs, which is the ordinary way a new "
+             "functional unit gets wired in.  The answer is right whenever no "
+             "producer happened to be within two instructions, so it passes "
+             "casual testing and fails on compiled code -- and rv32um does not "
+             "see it, because its operands are set up by an li several "
+             "instructions ahead",
+         # The .op line is part of the anchor because rvntt_branch is wired
+         # from the same two forwarded operands with the same port names and
+         # the same spacing, so the two-line form matches twice.
+         edits=[(CORE, "      .op     (id_ex_q.ctrl.muldiv_op),\n"
+                       "      .a      (ex_rs1_fwd),\n      .b      (ex_rs2_fwd),",
+                       "      .op     (id_ex_q.ctrl.muldiv_op),\n"
+                       "      .a      (id_ex_q.rs1_data),\n      .b      (id_ex_q.rs2_data),")],
+         caught=["directed:a14_muldiv", "random:muldiv"]),
+
+    dict(step="A14", name="divide_by_zero_quotient_is_zero",
+         why="division by zero returns 0 rather than all-ones.  Zero is the "
+             "answer an implementation gives when it simply lets the loop run "
+             "on a zero divisor and never subtracts, so this is what a MISSING "
+             "special case looks like rather than a wrong one",
+         edits=[(MD, "      div_by_zero_q ? (want_rem_q ? dividend_q : 32'hFFFF_FFFF)",
+                     "      div_by_zero_q ? (want_rem_q ? dividend_q : 32'h0000_0000)")],
+         caught=["directed:a14_muldiv", "random:muldiv",
+                 "riscv:rv32um/div", "riscv:rv32um/divu"]),
+
+    dict(step="A14", name="divide_by_zero_remainder_is_magnitude",
+         why="the remainder of a division by zero is the dividend's MAGNITUDE "
+             "rather than the dividend.  Wrong only for a negative dividend "
+             "with a zero divisor, which is a two-condition coincidence random "
+             "operands never produce -- a14_muldiv.S constructs it on purpose.\n"
+             "         rv32um/rem DOES NOT CATCH THIS, and the reason is worth "
+             "keeping: its only negative-dividend-over-zero case is "
+             "rem(-2^31, 0), and the 32-bit magnitude of -2^31 IS -2^31.  The "
+             "one value that makes the mutation invisible is the one the "
+             "external suite picked.  a14_muldiv.S uses -12345",
+         edits=[(MD, "      dividend_q    <= a;",
+                     "      dividend_q    <= a_mag;")],
+         caught=["directed:a14_muldiv"]),
+
+    dict(step="A14", name="quotient_loses_bit31",
+         why="a positive quotient's top bit is cleared.  This is the SIGNED "
+             "OVERFLOW case in the only form it can be broken here: -2^31 / -1 "
+             "is not a special case in this divider -- the magnitude loop and "
+             "the sign rule produce 0x80000000 between them -- so there is "
+             "nothing to delete, and the way to check the general path really "
+             "covers it is to break the one bit that only that case needs",
+         edits=[(MD, "  wire [31:0] quo_mag = neg_quo_q ? (~quo_q + 32'd1) : quo_q;",
+                     "  wire [31:0] quo_mag = neg_quo_q ? (~quo_q + 32'd1) : {1'b0, quo_q[30:0]};")],
+         caught=["directed:a14_muldiv", "riscv:rv32um/div", "riscv:rv32um/divu"]),
+
+    dict(step="A14", name="rem_takes_the_divisor_sign",
+         why="the remainder takes the sign of the divisor instead of the "
+             "dividend.  RISC-V rounds toward zero, so -7 % 2 is -1 and 7 % -2 "
+             "is 1; an implementation that got this backwards agrees on every "
+             "same-sign pair, which is three quarters of random operands",
+         edits=[(MD, "      neg_rem_q     <= a_neg;            // the remainder takes the DIVIDEND's sign",
+                     "      neg_rem_q     <= b_neg;            // the remainder takes the DIVIDEND's sign")],
+         caught=["directed:a14_muldiv", "random:muldiv", "riscv:rv32um/rem"]),
+
+    dict(step="A14", name="mulhsu_sign_extends_rs2",
+         why="MULHSU treats its second operand as signed, which makes it "
+             "MULH.  The three high-half multiplies differ only in how the "
+             "operands are extended, so this is invisible unless a test uses "
+             "an rs2 with its top bit set -- which is why a14_muldiv.S uses "
+             "-1 and 0xFFFFFFFF rather than small friendly numbers",
+         edits=[(MD, "  wire b_is_signed = (op[1]   == 1'b0);    // MUL and MULH only",
+                     "  wire b_is_signed = (op[1:0] != 2'b11);   // MUL and MULH only")],
+         caught=["directed:a14_muldiv", "riscv:rv32um/mulhsu"]),
+
+    dict(step="A14", name="mulh_returns_the_low_half",
+         why="all four multiplies return the low 32 bits.  MUL is unaffected, "
+             "which is the point: a suite that exercised MUL heavily and the "
+             "high-half forms once would look healthy",
+         edits=[(MD, "      m_hi_q <= (op[1:0] != 2'b00);      // everything but MUL wants the top half",
+                     "      m_hi_q <= 1'b0;                    // everything but MUL wants the top half")],
+         caught=["directed:a14_muldiv", "random:muldiv",
+                 "riscv:rv32um/mulh", "riscv:rv32um/mulhu"]),
+
+    dict(step="A14", name="minstret_counts_stalled_cycles",
+         why="minstret is bumped on every cycle a multi-cycle instruction sits "
+             "in EX, so a divide counts 34 times.  Nothing architectural moves "
+             "and no value changes, so the differ, rv32um and riscv-formal are "
+             "all blind to it -- and every IPC and DMIPS number downstream "
+             "would be wrong by a factor that depends on the workload's "
+             "multiply density, which is exactly the kind of error that gets "
+             "believed",
+         edits=[(CORE, "      .instret_bump     (id_ex_q.valid && !ex_trap && !ex_stall),",
+                       "      .instret_bump     (id_ex_q.valid && !ex_trap),")],
+         caught=["csr:a9_minstret"]),
+
+    dict(step="A14", name="idex_bubbles_instead_of_holding",
+         why="ID/EX takes a bubble on a multi-cycle stall instead of holding, "
+             "which is A7's behaviour applied to A14's stall.  The instruction "
+             "is dropped on the floor mid-operation: the unit sees req go low, "
+             "aborts, and nothing ever retires",
+         edits=[(CORE, "      id_ex_q <= id_ex_q;",
+                       "      id_ex_q <= '0;")],
+         caught=["directed:a14_muldiv", "random:muldiv", "riscv:rv32um/mul"]),
+
+    dict(step="A14", name="exmem_latches_every_stalled_cycle",
+         why="EX/MEM is not bubbled during a multi-cycle stall, so one "
+             "instruction retires once per stalled cycle -- 34 times for a "
+             "divide, each with whatever the unit's output happened to be.\n"
+             "         rv32um/mul DOES NOT CATCH THIS.  The LAST of those "
+             "retirements writes the correct value, and a self-checking test "
+             "that reads the destination register afterwards sees exactly the "
+             "right answer; the three spurious retirements before it leave no "
+             "trace it can look at.  Only a differ that compares the whole "
+             "COMMIT STREAM against Spike can see a retirement that should not "
+             "have happened -- which is the same blind spot minstret has, from "
+             "the other side",
+         edits=[(CORE, "    end else if (ex_trap || ex_stall) begin",
+                       "    end else if (ex_trap) begin")],
+         caught=["directed:a14_muldiv", "random:muldiv"]),
+
+    # --------------------------------------------------------------- A15 ----
+    # A14's own formal work found a real bug in the RVFI port and nothing else
+    # could have.  This entry is what stops it coming back.
+    dict(step="A15", name="rvfi_samples_the_last_ex_cycle",
+         why="the RVFI shadow reports the operands the forwarding muxes held on "
+             "a multi-cycle instruction's LAST EX cycle rather than its first. "
+             "By then the producers behind it have drained out of MEM and WB "
+             "and the mux has fallen back to the ID-time register value, so "
+             "rvfi_rs1_rdata names a value the register does not hold.  The "
+             "ARITHMETIC is unaffected -- the unit latched its operands when it "
+             "started -- so no commit-log diff, no rv32um test and no Spike "
+             "comparison can see it: rvfi_rs1_rdata is not an architectural "
+             "value, it is a CLAIM about one.  This is the second time `reg` "
+             "has caught something nothing else in the tree could reach",
+         edits=[(RVFI, "  assign ex_pkt_eff = ex_first ? ex_pkt : ex_hold_q;",
+                       "  assign ex_pkt_eff = ex_pkt;")],
+         caught=["rvfi:reg_ch0"]),
+
+    # ... and two that fault-inject the NEW proof, because a proof nobody has
+    # broken on purpose is a proof nobody has checked.
+    dict(step="A15", name="divider_never_restores",
+         why="the restoring step keeps the difference whether or not the "
+             "subtract fitted, so the remainder goes negative and stays wrong. "
+             "Aimed at the standalone proof's algebraic statement -- q*|b| + r "
+             "== |a| with r < |b| -- which pins q and r completely without "
+             "describing how either was produced",
+         edits=[(MD, "      rem_q <= fits ? diff[31:0] : shifted[31:0];",
+                     "      rem_q <= diff[31:0];")],
+         caught=["formal:rvntt_muldiv", "directed:a14_muldiv",
+                 "riscv:rv32um/div", "riscv:rv32um/rem"]),
+
+    dict(step="A15", name="divider_quotient_bit_always_set",
+         why="every quotient bit is 1 regardless of whether the divisor fitted. "
+             "The remainder loop still runs correctly, so a proof that checked "
+             "only `r < |b|` would pass -- it is the multiplicative identity "
+             "that fails, which is exactly the half of the property that was "
+             "expensive enough to be tempting to leave out",
+         edits=[(MD, "      quo_q <= {quo_q[30:0], fits};",
+                     "      quo_q <= {quo_q[30:0], 1'b1};")],
+         caught=["formal:rvntt_muldiv", "directed:a14_muldiv",
+                 "riscv:rv32um/div", "riscv:rv32um/divu"]),
 ]
 
 # ------------------------------------------------------------------- the tests
@@ -599,9 +821,17 @@ RANDOM_SUITES = {
     # (1000 programs) are a separate thing.  A mutation that needs more than a
     # handful of random programs to show up is a mutation the random suite
     # should not be credited with catching.
-    "raw":      dict(n=8, length=250, raw=1.0, lu=0.0, br=0.0, seed=0xA6000000),
-    "loaduse":  dict(n=8, length=250, raw=1.0, lu=1.0, br=0.0, seed=0xA7000000),
-    "branch":   dict(n=8, length=250, raw=1.0, lu=1.0, br=0.12, seed=0xA8000000),
+    "raw":      dict(n=8, length=250, raw=1.0, lu=0.0, br=0.0, mul=0.0,
+                    seed=0xA6000000),
+    "loaduse":  dict(n=8, length=250, raw=1.0, lu=1.0, br=0.0, mul=0.0,
+                    seed=0xA7000000),
+    "branch":   dict(n=8, length=250, raw=1.0, lu=1.0, br=0.12, mul=0.0,
+                    seed=0xA8000000),
+    # A14.  mul is 0.12 and not higher on purpose: a 34-cycle divide is 34
+    # cycles in which nothing else is exercised, so a denser stream would trade
+    # away the hazard coverage that makes these programs worth running at all.
+    "muldiv":   dict(n=8, length=250, raw=1.0, lu=1.0, br=0.12, mul=0.12,
+                    seed=0xA1400000),
 }
 
 
@@ -617,8 +847,22 @@ def mirror_rtl(work, name, edits):
         if not os.path.exists(fp):
             return d, f"{rel} is not in the build's source list"
         s = open(fp).read()
-        if old not in s:
+        n = s.count(old)
+        if n == 0:
             return d, f"anchor not found in {rel}"
+        # AN AMBIGUOUS ANCHOR IS WORSE THAN A MISSING ONE, and until A14 this
+        # went unchecked.  `replace(old, new, 1)` hits whichever match comes
+        # first in the file, so a second match somewhere unrelated makes the
+        # mutation silently break a DIFFERENT part of the design -- and the
+        # verdict then says something true about a bug nobody meant to inject.
+        # A14 created exactly that: rvntt_muldiv is instantiated from the same
+        # two forwarded operands, with the same port names and the same spacing,
+        # as rvntt_branch, so A8's `.a (ex_rs1_fwd),` anchor began matching the
+        # multiplier first.  It surfaced as a PARTIAL -- the right smell for
+        # entirely the wrong reason.
+        if n > 1:
+            return d, (f"anchor matches {n} times in {rel} -- ambiguous, so the "
+                       f"mutation would land on whichever comes first")
         open(fp, "w").write(s.replace(old, new, 1))
     return d, None
 
@@ -639,6 +883,15 @@ def build(work, name, rtl_dir, image):
     return os.path.join(build_dir, "Vrvntt_trace_top"), None
 
 
+# Depth is picked from the deepest property, never from a default -- the rule
+# rtl/core/CLAUDE.md states for every proof here.  rvntt_muldiv is the first
+# module whose deepest property is a LATENCY rather than a dependency distance:
+# a divide presents its result on its 34th EX cycle, so nothing about it can be
+# observed before step 34.
+FORMAL_DEPTH = {"rvntt_muldiv": 37}
+FORMAL_DEPTH_DEFAULT = 8
+
+
 def run_formal(work, name, rtl_dir, design):
     """Run SymbiYosys on the (possibly mutated) design.  True if it PASSES."""
     src = os.path.join(rtl_dir, "rtl/core", design + ".sv")
@@ -653,9 +906,10 @@ def run_formal(work, name, rtl_dir, design):
     sby = os.path.join(wd, design + ".sby")
     reads = "\n".join("read -formal %s" % os.path.basename(s) for s in srcs)
     open(sby, "w").write(
-        "[options]\nmode bmc\ndepth 8\n\n[engines]\nsmtbmc bitwuzla\n\n"
+        "[options]\nmode bmc\ndepth %d\n\n[engines]\nsmtbmc bitwuzla\n\n"
         "[script]\nread -define FORMAL\n%s\nprep -top %s\n\n[files]\n%s\n"
-        % (reads, design, "\n".join(srcs)))
+        % (FORMAL_DEPTH.get(design, FORMAL_DEPTH_DEFAULT),
+           reads, design, "\n".join(srcs)))
     r = subprocess.run(["sby", "-f", sby], cwd=wd,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return r.returncode == 0
@@ -731,7 +985,8 @@ class Fixture:
             for i in range(cfg["n"]):
                 seed = cfg["seed"] + i
                 src = gen_random_prog.generate(seed, cfg["length"], None,
-                                               cfg["raw"], cfg["lu"], cfg["br"])
+                                               cfg["raw"], cfg["lu"], cfg["br"],
+                                               cfg["mul"])
                 out.append(a5.assemble(src, self.work, "%s_%d" % (key, i)))
             self.elfs[key] = out
         return self.elfs[key]

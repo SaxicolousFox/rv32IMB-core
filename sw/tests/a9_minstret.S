@@ -14,6 +14,14 @@
 # core never executes, so the two differ by a constant that would have to be
 # hardcoded somewhere.  Counting Spike's commits at or above the load address
 # has no such constant in it.
+#
+# A14 (MODS_A) added the multi-cycle instructions in the loop.  They are the
+# sharpest thing this program checks: a DIV occupies EX for 34 cycles, and
+# `minstret` must count it EXACTLY ONCE.  A counter that bumped on every cycle
+# the instruction was in EX would over-count by 36 per iteration and 288 over
+# the loop, and a counter that skipped a stalled instruction entirely would
+# under-count by 16.  Neither changes any architectural value, so the
+# cosimulation differ cannot see either one -- this is the only check that can.
 # ============================================================================
         .section .text.init
         .globl _start
@@ -28,6 +36,9 @@ _start:
         add     t0, s0, t0
         lw      t1, 0(t0)
         add     s2, s2, t1
+        mul     t2, t1, s4              # A14: 4 EX cycles, 1 retirement
+        add     s2, s2, t2
+        div     t3, s2, s4              # A14: 34 EX cycles, 1 retirement
         addi    s3, s3, 1
         blt     s3, s4, .Lloop          # taken 7 times, then falls through
 
@@ -47,6 +58,12 @@ _start:
         # refill the pipeline, and the difference becomes visible.
         addi    s6, s6, 1
         addi    s7, s7, 1
+
+        # ... and one long instruction with NOTHING between it and the probe, so
+        # a miscount on the last multi-cycle operation cannot be absorbed by the
+        # instructions after it.  The two above still stand: they are what makes
+        # an EX-counted and a WB-counted minstret give different answers here.
+        div     s8, s2, s4
 
         .globl  probe
 probe:  csrr    s1, minstret

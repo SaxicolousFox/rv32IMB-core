@@ -17,6 +17,12 @@
 //     or a jump redirects the PC and squashes the two younger instructions
 //     already in flight.  The penalty is therefore two cycles, always.
 //   * CSRs, TRAPS AND MRET (A9) are present.  See "the trap invariant" below.
+//   * THE MULTI-CYCLE EX MECHANISM (A14, MODS_A) is present: an EX-resident
+//     functional unit holds the instruction in EX for as many cycles as it
+//     needs, the front end and ID/EX hold, and EX/MEM takes a bubble per
+//     stalled cycle.  The M extension is its first user; plan §8 I1's Xkntt
+//     Tier-1 unit is meant to be its second, which is why the handshake is
+//     generic and the latency is a property of the unit.
 //
 // The only thing left unimplemented is the Xkntt coprocessor: the decoder
 // recognises the extension but no stage executes it, so `dbg_unsupported`
@@ -132,7 +138,21 @@ module rvntt_core #(
   // IF -- program counter
   // ==========================================================================
   logic [31:0] pc_q;
-  logic        stall;                      // driven by rvntt_hazard, in ID
+  // TWO STALLS, AND THEY DO DIFFERENT THINGS TO DIFFERENT REGISTERS.
+  //
+  //   id_stall   -- A7's load-use interlock.  The consumer is in ID and has to
+  //                 wait, so ID/EX takes a BUBBLE and the front end holds.
+  //   ex_stall   -- A14's multi-cycle EX.  The producer is in EX and has not
+  //                 finished, so ID/EX HOLDS ITS CONTENTS and EX/MEM takes the
+  //                 bubble instead.  The front end holds for this one too.
+  //
+  // They are not variants of one signal: id_stall empties EX, ex_stall
+  // preserves it, and getting that backwards either loses the multi-cycle
+  // instruction or executes it twice.  ex_stall has priority on ID/EX, which
+  // is why it is tested first there.
+  logic        id_stall;                   // driven by rvntt_hazard, in ID
+  logic        ex_stall;                   // driven by an EX functional unit
+  wire         front_stall = id_stall || ex_stall;
   logic        ex_redirect;                // a control transfer, MRET or a trap
   logic [31:0] ex_redirect_target;
   logic [31:0] ex_jump_target;             // branch/JAL/JALR only
@@ -142,16 +162,16 @@ module rvntt_core #(
   logic        ex_mret;
 
   // A REDIRECT AND A STALL CANNOT COINCIDE.  Both are properties of the single
-  // instruction in EX: `stall` needs it to be a load, `ex_redirect` needs it to
-  // be a taken branch, a jump, an MRET or a faulting instruction, and no
-  // instruction is more than one of those.  The priority is still written down
-  // rather than left to chance, because "these are mutually exclusive" is
-  // exactly the kind of reasoning that stops being true when a later step adds
-  // another case.
+  // instruction in EX: `id_stall` needs the EX instruction to be a load,
+  // `ex_stall` needs it to be a multi-cycle one, `ex_redirect` needs it to be a
+  // taken branch, a jump, an MRET or a faulting instruction, and no instruction
+  // is more than one of those.  A14 made that argument load-bearing rather than
+  // decorative, so ex_redirect is now GATED on !ex_stall below instead of being
+  // left to the priority here -- see the redirect assignment.
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n)           pc_q <= RESET_PC;
     else if (ex_redirect) pc_q <= ex_redirect_target;
-    else if (stall)       pc_q <= pc_q;
+    else if (front_stall) pc_q <= pc_q;
     else                  pc_q <= pc_q + 32'd4;
   end
 
@@ -187,7 +207,7 @@ module rvntt_core #(
       // is being discarded.  A stall and a redirect cannot actually coincide
       // (see the PC mux), so this AND is defence rather than function -- but it
       // is one gate against having to re-derive that argument later.
-      insn_held_q <= stall && !ex_redirect;
+      insn_held_q <= front_stall && !ex_redirect;
     end
   end
 
@@ -206,7 +226,7 @@ module rvntt_core #(
       if_id_q.valid <= 1'b0;
       if_id_q.pc    <= pc_q;
       if_id_q.insn  <= 32'h0;
-    end else if (!stall) begin
+    end else if (!front_stall) begin
       if_id_q.valid <= 1'b1;
       if_id_q.pc    <= pc_q;
       if_id_q.insn  <= 32'h0;              // unused; insn comes from the RAM
@@ -267,7 +287,7 @@ module rvntt_core #(
       .ex_valid    (id_ex_q.valid),
       .ex_mem_read (id_ex_q.ctrl.mem_read),
       .ex_rd_addr  (id_ex_q.rd_addr),
-      .stall       (stall)
+      .stall       (id_stall)
   );
 
   // ==========================================================================
@@ -281,7 +301,16 @@ module rvntt_core #(
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       id_ex_q <= '0;
-    end else if (stall || ex_redirect) begin
+    end else if (ex_stall) begin
+      // A14: the instruction in EX has not finished.  HOLD, do not bubble --
+      // this register IS the multi-cycle unit's instruction, and clearing it
+      // would drop the operation on the floor while the unit kept running.
+      // Tested before id_stall because both can be true only if the EX
+      // instruction were a load AND multi-cycle, which no instruction is; the
+      // order is written down so that stops being an argument and starts being
+      // a rule.
+      id_ex_q <= id_ex_q;
+    end else if (id_stall || ex_redirect) begin
       id_ex_q <= '0;
     end else begin
       id_ex_q.valid    <= if_id.valid;
@@ -392,6 +421,41 @@ module rvntt_core #(
       .b  (ex_alu_b),
       .y  (ex_alu_y)
   );
+
+  // ---- the multi-cycle EX unit (A14) --------------------------------------
+  // Deliberately written as a GENERIC handshake and not as "the multiplier":
+  // plan §8 I1 needs exactly this mechanism for the Xkntt Tier-1 unit, and the
+  // reason M is built first is that it arrives with RISCOF, riscv-formal and
+  // rv32um as external references, which a custom extension does not have.
+  // The three lines below are the whole of the core's side of it.
+  //
+  // OPERANDS ARE THE FORWARDED ONES, and the unit latches them on its first
+  // cycle rather than reading them continuously -- see rvntt_muldiv.sv, which
+  // explains why a unit that re-reads them silently computes with values that
+  // are stale by two instructions.
+  //
+  // NO MULTI-CYCLE UNIT MAY ALSO BE A MEMORY OPERATION.  The store path below
+  // is gated on ctrl.mem_write and NOT on !ex_stall, because that gate would
+  // sit on the design's critical path (EX/MEM rd_addr -> forwarding mux -> ALU
+  // -> byte enables -> BRAM WEA; see rtl/soc/CLAUDE.md).  A decoder that ever
+  // set both mem_write and a multi-cycle unit would replay the store once per
+  // stall cycle.  a_muldiv_not_memory below asserts it cannot.
+  logic        ex_md_done;
+  logic [31:0] ex_md_result;
+  wire         ex_md_req = id_ex_q.valid && id_ex_q.ctrl.is_muldiv;
+
+  rvntt_muldiv u_muldiv (
+      .clk    (clk),
+      .rst_n  (rst_n),
+      .req    (ex_md_req),
+      .op     (id_ex_q.ctrl.muldiv_op),
+      .a      (ex_rs1_fwd),
+      .b      (ex_rs2_fwd),
+      .done   (ex_md_done),
+      .result (ex_md_result)
+  );
+
+  assign ex_stall = ex_md_req && !ex_md_done;
 
   // ---- data-memory request, issued from EX so the RAM's address register is
   // ---- the EX/MEM address register and rdata is valid during MEM.
@@ -507,7 +571,11 @@ module rvntt_core #(
       // here is what lets a `csrr minstret` in the very next instruction read a
       // complete value.  See rvntt_csr.sv's header for what goes wrong
       // otherwise; riscv-tests' instret_overflow found it.
-      .instret_bump     (id_ex_q.valid && !ex_trap),
+      // ... and NOT on a stalled cycle.  A 34-cycle divide would otherwise
+      // retire 34 times, which is the one thing minstret exists to be right
+      // about.  csr_traps_minstret and riscv-tests' instret_overflow both see
+      // this immediately; nothing else would.
+      .instret_bump     (id_ex_q.valid && !ex_trap && !ex_stall),
       .trap_en          (ex_trap),
       .trap_pc          (id_ex_q.pc),
       .trap_cause       (ex_trap_cause),
@@ -521,8 +589,28 @@ module rvntt_core #(
   // is why the pipeline register field is named ex_result rather than
   // alu_result -- and why a CSR read is forwarded to the next instruction for
   // free, through exactly the same path an ALU result takes.
+  //
+  // A14's product or quotient arrives here TOO, rather than through a new
+  // result_sel_e member, and that is a considered choice.  A new member would
+  // have to be added to BOTH `ex_mem_fwd_data` and `mem_result` -- two case
+  // statements over the same enum that must agree -- and the one time a member
+  // was added to those, they disagreed on it and shipped: riscv-formal's `reg`
+  // check found an Xkntt instruction forwarding its ALU output while writing
+  // zero to the register file.  Delivering the result through `ex_result`
+  // means result_sel stays RES_ALU and neither case statement changes at all,
+  // so there is nothing for them to disagree about.  It is also honest: this
+  // field is defined as the EX stage's result whatever produced it, which is
+  // exactly what a 34-cycle quotient is.
+  //
+  // The value is only correct on the cycle ex_md_done is high -- but that is
+  // the only cycle EX/MEM latches anything, because ex_stall bubbles it on
+  // every other one.
   logic [31:0] ex_result;
-  assign ex_result = id_ex_q.ctrl.is_csr ? ex_csr_rdata : ex_alu_y;
+  always_comb begin
+    if      (id_ex_q.ctrl.is_muldiv) ex_result = ex_md_result;
+    else if (id_ex_q.ctrl.is_csr)    ex_result = ex_csr_rdata;
+    else                             ex_result = ex_alu_y;
+  end
 
   // ---- traps (A9) ----------------------------------------------------------
   // ALL OF THEM RESOLVE HERE.  The misaligned-address check in particular is
@@ -569,7 +657,13 @@ module rvntt_core #(
     end
   end
 
-  assign ex_redirect = ex_trap || ex_mret || ex_ctrl_xfer;
+  // GATED ON !ex_stall.  No multi-cycle instruction is a branch, a jump, an
+  // MRET or a trapping instruction, so this term can never change the value
+  // today -- but the argument for that is a property of the current decoder,
+  // and a redirect fired while EX was held would flush the front end around an
+  // instruction that had not finished.  One AND gate, off the critical path,
+  // to make the invariant structural instead of argued.
+  assign ex_redirect = !ex_stall && (ex_trap || ex_mret || ex_ctrl_xfer);
 
   always_comb begin
     if      (ex_trap) ex_redirect_target = csr_mtvec;
@@ -587,7 +681,12 @@ module rvntt_core #(
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       ex_mem_q <= '0;
-    end else if (ex_trap) begin
+    end else if (ex_trap || ex_stall) begin
+      // A14 adds the second reason to bubble here, and it is the same whole-
+      // struct clear for the same reason: a partly-cleared bubble carrying a
+      // live mem_write is one forgotten gate away from writing memory.  Each
+      // stalled cycle inserts exactly one bubble, which is the Sum(latency - 1)
+      // term tb/cosim/cycle_model.py adds to its span prediction.
       ex_mem_q <= '0;
     end else begin
       ex_mem_q.valid      <= id_ex_q.valid;
@@ -723,6 +822,7 @@ module rvntt_core #(
 
       .ex_valid           (id_ex_q.valid),
       .ex_trap            (ex_trap),
+      .ex_stall           (ex_stall),
       .ex_pc              (id_ex_q.pc),
       .ex_insn            (id_ex_q.insn),
       .ex_redirect        (ex_redirect),

@@ -2,20 +2,29 @@
 #
 # This is the machine-readable statement of what the core claims to implement,
 # and RISCOF uses it to DECIDE WHICH TESTS TO RUN.  Overstating it is the
-# classic way to get a green compliance report that means nothing: claim M and
-# the multiply tests are selected and fail; claim Zifencei and fence_i is
-# selected and fails.  Understating it silently drops coverage instead.
+# classic way to get a green compliance report that means nothing: claim
+# Zifencei and fence_i is selected and fails.  Understating it silently drops
+# coverage instead.
 #
-# So this file says exactly rv32i_zicsr, machine mode only -- the same string
-# the toolchain, Spike and docs/RISC-V_NTT.txt 1.5 all use.
+# So this file says exactly rv32im_zicsr, machine mode only -- the same string
+# the toolchain and Spike use.  M was added by MODS_A A14, and the note this
+# file used to carry -- "claim M and the multiply tests are selected and fail"
+# -- is now the INTENT rather than the warning: the eight rv32i_m/M tests are
+# selected on purpose, and they pass.
+#
+# THE ISA STRING AND THE misa RESET VALUE MUST MOVE TOGETHER, and so must
+# rvntt_csr.sv's MISA_VALUE.  RISCOF reads this file, the core reports the
+# register, and the arch-test privilege suite compares them; a mismatch shows up
+# as a failing misa test rather than as "the wrong suites were selected", which
+# points nowhere near the cause.
 hart_ids: [0]
 hart0:
-  ISA: RV32IZicsr
+  ISA: RV32IMZicsr
   physical_addr_sz: 32
   User_Spec_Version: '2.3'
   supported_xlen: [32]
   misa:
-    reset-val: 0x40000100      # MXL = 1 (RV32), extension bit I
+    reset-val: 0x40001100      # MXL = 1 (RV32), extension bits I and M
     rv32:
       accessible: true
       mxl:
@@ -33,7 +42,7 @@ hart0:
           warl:
             dependency_fields: []
             legal:
-              - extensions[25:0] bitmask [0x0000100, 0x0000000]
+              - extensions[25:0] bitmask [0x0001100, 0x0000000]
             wr_illegal:
               - Unchanged
   # There is no PMP node.  Plan 1.5 excludes PMP, rvntt_csr.sv has neither

@@ -18,7 +18,7 @@ not need to know how long reset is held or how many cycles the pipeline takes to
 fill -- both are constants that cancel, and both are properties of the testbench
 rather than of the design.
 
-    span = (retired - 1) + stalls + flush_penalties
+    span = (retired - 1) + stalls + flush_penalties + muldiv_stalls
 
   * `retired - 1` because a five-stage pipeline with no hazards retires one
     instruction per cycle once it is full.
@@ -26,6 +26,17 @@ rather than of the design.
   * `flush_penalties`: two cycles for each instruction that redirects the PC,
     because the branch resolves in EX with two younger instructions in flight
     (plan A8).
+  * `muldiv_stalls`: `occupancy - 1` for each M instruction (MODS_A A14), which
+    holds EX for as many cycles as its unit needs and bubbles EX/MEM on each of
+    the others.  This term is only predictable because the latency is DATA-
+    INDEPENDENT: the divider runs its 32 iterations whatever the operands are,
+    so the cost is a property of the opcode and the model can read it off the
+    retired stream like everything else here.  An early-out divider would be
+    free performance and would make this model unbuildable.
+
+    The latency numbers live in `model/rv32i_ref.MULDIV_CYCLES`, duplicated from
+    `rv32i_pkg.sv` and compared by `check_pkg_agreement()` -- not read out of the
+    RTL, which would make the prediction agree with the pipeline by construction.
 
 WHERE THE INDEPENDENCE COMES FROM.  The hazards are found by decoding the
 retired instruction stream with `model/rv32i_ref.py`, which is derived from the
@@ -57,6 +68,21 @@ def analyse(records):
     """
     n = len(records)
     stalls, flushes = [], []
+    muldiv_cycles = 0
+    muldiv_n = 0
+
+    # A multi-cycle instruction's bubbles sit BEFORE its own retirement, which
+    # is the opposite of a load-use stall (attributed to the load, paid by its
+    # consumer) and of a flush (attributed to the branch, paid by its
+    # successor).  So the last retired instruction's extra cycles DO count --
+    # they delayed the retirement the span ends at -- and the FIRST one's do
+    # not, because they happened before the span began.  Hence range(1, n).
+    for i in range(1, n):
+        _pc0, insn, _ = records[i]
+        ctrl, _regs0 = rv32i_ref.decode(insn)
+        if ctrl["is_muldiv"]:
+            muldiv_cycles += rv32i_ref.MULDIV_CYCLES[ctrl["muldiv_op"]] - 1
+            muldiv_n += 1
 
     for i in range(n - 1):
         pc, insn, _ = records[i]
@@ -89,9 +115,11 @@ def analyse(records):
         "retired": n,
         "stalls": len(stalls),
         "flushes": len(flushes),
+        "muldiv": muldiv_n,
+        "muldiv_cycles": muldiv_cycles,
         "stall_pcs": stalls,
         "flush_pcs": flushes,
-        "span": (n - 1) + len(stalls) + 2 * len(flushes),
+        "span": (n - 1) + len(stalls) + 2 * len(flushes) + muldiv_cycles,
     }
 
 
@@ -104,6 +132,8 @@ def explain(pred, actual_span, limit=6):
                                                   pred["retired"] - 1),
         "    %d load-use stall(s)  x1 cycle" % pred["stalls"],
         "    %d redirect(s)        x2 cycles" % pred["flushes"],
+        "    %d M instruction(s) -> %d extra EX cycle(s)"
+        % (pred["muldiv"], pred["muldiv_cycles"]),
     ]
     if pred["stall_pcs"]:
         shown = ", ".join("0x%08x" % p for p in pred["stall_pcs"][:limit])

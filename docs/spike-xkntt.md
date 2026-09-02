@@ -31,7 +31,7 @@ The fork is `toolchain/spike-src` on branch `xkntt`, rebased onto the pin in
 
 ```sh
 source toolchain/env.sh
-spike --isa=rv32i_zicsr_zicntr_xkntt0p1 prog.elf
+spike --isa=rv32im_zicsr_zicntr_xkntt0p1 prog.elf   # m is A14's; the fork is unchanged
 ```
 
 Omit `xkntt` and every custom instruction becomes an illegal instruction —

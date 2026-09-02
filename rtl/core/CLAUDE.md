@@ -18,15 +18,17 @@ was the whole reason C1 came before this.
 | `rvntt_hazard.sv` | A7 | `formal_hazard`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
 | `rvntt_branch.sv` | A8 | `formal_branch`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
 | `rvntt_csr.sv` | A9 | `formal_csr`, `riscv_tests`, `csr_traps_minstret`, Vivado elaboration |
-| `rvntt_rvfi.sv` | A11 | `riscv_formal` (43 checks), Vivado elaboration |
-| `rvntt_core.sv` | A4, A6–A9, A11 | `core_a4_checksum`, `cosim_commit_log`, `riscv_tests`, `riscv_formal`, Vivado elaboration |
+| `rvntt_muldiv.sv` | A14, A15 | `formal_muldiv`, `riscv_tests` (`rv32um`), `cosim_directed`, `cosim_commit_log`, `synth_ooc.sh` |
+| `rvntt_rvfi.sv` | A11, A15 | `riscv_formal` (43 checks), Vivado elaboration |
+| `rvntt_core.sv` | A4, A6–A9, A11, A14 | `core_a4_checksum`, `cosim_commit_log`, `riscv_tests`, `riscv_formal`, Vivado elaboration |
 | `../soc/rvntt_ram.sv`, `../soc/rvntt_core_sim_top.sv` | A4 | `core_a4_checksum` |
 | `tb/unit/rvntt_trace.sv` + `rvntt_trace_top.sv` | A5 | `cosim_commit_log` |
 | `tb/cosim/commit_diff.py`, `gen_random_prog.py` | A5 | `cosim_commit_log` |
 | `sw/tests/a6_forward.S` | A6 | `cosim_directed` |
 | `sw/tests/a7_loaduse.S` | A7 | `cosim_directed` |
 | `sw/tests/a8_control.S` | A8 | `cosim_directed` |
-| `sw/tests/a9_csr.S`, `a9_minstret.S` | A9 | `csr_traps_minstret` |
+| `sw/tests/a9_csr.S`, `a9_minstret.S` | A9, A14 | `csr_traps_minstret` |
+| `sw/tests/a14_muldiv.S` | A14 | `cosim_directed` |
 | `tb/cosim/test_riscv_tests.py` | A9 | `riscv_tests` |
 | `tb/riscof/` (plugins, env, runner) | A10 | `riscof_arch_test` |
 | `tb/formal/rvntt_rvfi_wrapper.sv`, `run_riscv_formal.py` | A11 | `riscv_formal` |
@@ -47,7 +49,14 @@ Two conventions in it are load-bearing:
 - **`ctrl_t.mem_op` is a plain `logic [2:0]`, deliberately not an enum.** It
   carries funct3 verbatim including the reserved load/store widths, and those
   must stay representable so the LSU can reject them rather than silently
-  aliasing onto a legal width.
+  aliasing onto a legal width. `ctrl_t.muldiv_op` (A14) is a plain vector for a
+  different reason: all eight of *its* values are legal, so an enum would be a
+  second name for a field that is already total.
+- **`MULDIV_MUL_CYCLES` and `MULDIV_DIV_CYCLES` are the latency contract**, in
+  cycles of EX *occupancy*. `model/rv32i_ref.py` duplicates both and
+  `check_pkg_agreement()` compares them, so retuning the divider without
+  retuning `tb/cosim/cycle_model.py` fails a test instead of silently making the
+  independent cycle model agree by construction.
 
 `insn` is carried the full length of the pipe on purpose: A5's commit tracer
 and A11's RVFI port both need `(pc, insn, rd, wdata)` at WB. It costs 128 FFs
@@ -108,8 +117,11 @@ addresses. Compared against `model/rv32i_ref.py::decode` over 10⁶ random words
    fm/pred/succ/rs1/rd are reserved for future fences and base implementations
    *shall ignore* them. Ignoring is spec-mandated, so nonzero there is legal.
    Copying rule 1 onto FENCE would diverge from Spike, which is A5's reference.
-3. **Anything outside `rv32i_zicsr_zicntr_xkntt0p1` is illegal.** No M, so OP
-   with `funct7=0000001` is illegal. No Zifencei, so FENCE.I is illegal.
+3. **Anything outside `rv32im_zicsr_zicntr_xkntt0p1` is illegal.** M is *in*
+   it as of A14, so OP with `funct7=0000001` is legal for all eight `funct3`
+   values — and every *other* `funct7` in OP is still illegal, which is what
+   keeps the strict-reserved-field claim intact. No Zifencei, so FENCE.I is
+   still illegal.
 
 **The Python side delegates custom-0/custom-1 to `model/isa/xkntt.py`** rather
 than reimplementing the rules. That is deliberate: the four-way agreement is
@@ -383,6 +395,31 @@ JALR that ignores its own bit-0 rule. **This is the argument for keeping the
 directed tests after the external suite arrives**, not before it — they cover
 different things, and neither one subsumes the other.
 
+**5. The reference model's ISA string was hardcoded** (found at A15). The
+`spike_ref` plugin built `self.isa` as the literal `'rv32i'` plus an optional
+`_zicsr` — correct, and correct right up until A14 added M. The arch-test suite
+compiles each test from *its own* `isa` field, so the M tests were built
+`-march=rv32im` and then handed to a Spike told `--isa=rv32i_zicsr`: illegal
+instruction on the first `mul`, vector to an unset handler, **spin forever**.
+Nothing failed. The run simply stopped making progress, silently, for 25
+minutes — the same shape `-mno-relax` produces above, now for the second time.
+
+Three fixes, in increasing order of value:
+
+- The reference invocation carries a **`timeout 600`**, because *a reference
+  model that hangs must fail rather than stop the run*. 600 s is about fifty
+  times the slowest test here, so it can only fire on a real hang. This catches
+  the **symptom**, and takes ten minutes per test to do it.
+- The ISA string is **derived from `rvntt_isa.yaml`** rather than written down,
+  so the ISA lives in two places instead of three.
+- `run_riscof.py` now runs **`check_isa_consistency()` before anything else**,
+  which reconstructs `misa` from the yaml's ISA letters and compares it against
+  both the yaml's own `reset-val` and `rvntt_csr.sv`'s `MISA_VALUE`. That
+  catches the **cause**, in milliseconds, and it is the same spec-drift shape as
+  `model/rv32i_ref.py`'s `check_pkg_agreement()`. Fault-injected three ways —
+  drop M from the yaml's ISA string, from its `reset-val`, or from the RTL's
+  `MISA_VALUE` — and all three are caught.
+
 **RISCOF itself is deprecated upstream.** riscv-arch-test's default branch has
 moved to the ACT4 framework, which replaces RISCOF and needs the Sail model plus
 a UDB configuration. `toolchain/riscv-arch-test` is pinned to the maintained
@@ -396,9 +433,10 @@ with `--no-deps` because its `gitpython==3.1.17` pin predates Python 3.12.
 
 ### A11 — riscv-formal, and the bug five suites could not reach
 
-43 checks pass at **BMC depth 14**: the 36 RV32I instruction models plus `reg`,
-`pc_fwd`, `pc_bwd`, `causal`, `liveness` and `unique`. About 40 s wall on eight
-jobs, four minutes of solver time. `tb/formal/run_riscv_formal.py` generates the
+43 checks pass at **BMC depth 14** — `liveness` at 47, and `rvntt_muldiv`'s
+arithmetic abstracted, both since A15; see the A15 section below. The set is the
+36 RV32I instruction models plus `reg`, `pc_fwd`, `pc_bwd`, `causal`, `liveness`
+and `unique`, in about 35 s wall on eight jobs and five minutes of solver time. `tb/formal/run_riscv_formal.py` generates the
 configuration, drives riscv-formal's own `genchecks.py`, and runs `sby`.
 
 **Depth is counted from the first retirement, not from zero.** riscv-formal's
@@ -536,6 +574,12 @@ Stated here rather than left to be discovered from a short check list:
   model, so the proof says nothing about what custom-0 and custom-1 *should*
   compute — only, as above, that the core does not contradict itself about what
   it currently does. M13's work.
+- **What the M instructions compute** (A15). `rvntt_muldiv`'s arithmetic is
+  abstracted to a free value here. Its **sequencer is not** — `done`, and
+  therefore every stall, bubble and retirement time, is the real design's — so
+  everything these 43 checks actually depend on is unabstracted. The arithmetic
+  is proved by `formal_muldiv`, by the eight `rv32um` tests and by
+  cosimulation. See below for why.
 
 #### Three things about the wrapper
 
@@ -607,6 +651,20 @@ stop testing anything. When a step edits `rvntt_core.sv`, expect to re-anchor
 the previous step's mutations — and treat a `NO-OP` as a failure, never as
 noise.
 
+**A14 broke ten of them at once**, which is what a step that renames `stall` and
+adds an arm to two pipeline registers does. Eight were ordinary staleness. The
+other two were a different and worse thing, and the harness could not see it:
+`rvntt_muldiv` is instantiated from the same two forwarded operands, with the
+same port names and the same spacing, as `rvntt_branch` — so A8's
+`.a (ex_rs1_fwd),` anchor started matching **twice**, and `replace(old, new, 1)`
+silently mutated the *multiplier* instead of the comparator. The verdict was a
+`PARTIAL`: a true statement about a bug nobody had injected.
+
+**An ambiguous anchor is worse than a missing one**, because a missing one is
+reported and an ambiguous one is obeyed. `mirror_rtl` now requires **exactly
+one** match and reports anything else as an error, in the same spirit as the
+`NO-OP` rule it sits beside.
+
 ### A commit-log diff cannot see timing
 
 This is the A7 lesson worth carrying forward. A **phantom stall** — a bubble
@@ -620,9 +678,10 @@ distance from the first retirement to the last — as
 
     span = (retired - 1) + stalls + 2 x redirects
 
-and the testbench reports the measured span. Using the span rather than a total
-cycle count means the model needs to know neither the reset length nor the
-pipeline fill depth; both cancel. Hazards are found by decoding the *dynamic*
+and the testbench reports the measured span — plus, as of A14, a
+`Σ(occupancy − 1)` term for the multi-cycle instructions. Using the span rather
+than a total cycle count means the model needs to know neither the reset length
+nor the pipeline fill depth; both cancel. Hazards are found by decoding the *dynamic*
 retired instruction stream with `model/rv32i_ref.py` — the frozen spec-derived
 model, not the RTL and not `rvntt_hazard`'s own predicate. Redirects are not
 decoded at all: an instruction redirected iff the next retired pc is not its
@@ -705,6 +764,290 @@ the RTL retired 477:
 - **Spike also annotates `mem 0x<addr>` on loads, `mem 0x<addr> 0x<data>` on
   stores, and `c<n>_<name> 0x<val>` on CSR writes.** None are part of the A5
   format; `render()` drops them on both sides.
+
+### A14 — the multi-cycle EX mechanism, and the M extension on top of it
+
+`MODS_A` A14. The mechanism was built first and generically, because plan §8 I1
+needs exactly it for the `Xkntt` Tier-1 unit and building it twice is how you get
+a hazard bug. M is its first user because M arrives with **rv32um, RISCOF and
+riscv-formal as external references**, and a custom extension arrives with none.
+
+**Two stalls, and they do opposite things to the same register.** `id_stall`
+(A7) has the consumer in ID, so ID/EX takes a bubble. `ex_stall` (A14) has the
+producer in EX, so ID/EX **holds** and EX/MEM takes the bubble. Getting that
+backwards either drops the multi-cycle instruction on the floor or executes it
+repeatedly — both are in the mutation manifest. The front end holds for either.
+
+**The whole of the core's side of the mechanism is three lines**: a `req` that is
+high for every cycle the instruction is in EX, a `done` that is high on the last
+of them, and `ex_stall = req && !done`. The latency is a property of the unit.
+
+**The result comes back through `ex_result`, not through a new `result_sel_e`
+member.** A new member has to be added to *two* case statements that must agree
+— `ex_mem_fwd_data` and `mem_result` — and the one time a member was added to
+those, they disagreed and shipped (A11's `RES_XKNTT` bug, above). Delivering
+through `ex_result` means `result_sel` stays `RES_ALU` and neither case
+statement changes at all, so there is nothing to disagree about.
+
+**The store path is deliberately *not* gated on `ex_stall`.** That gate would sit
+on the design's critical path (`rtl/soc/CLAUDE.md`). The invariant it would
+enforce — no multi-cycle instruction is also a memory operation — is *proved*
+instead, in `rvntt_decode`'s formal property 7, which is free.
+
+**`ex_redirect` *is* gated on `!ex_stall`**, and that gate is unreachable today:
+no multi-cycle instruction is a branch, a jump, an MRET or a trapping
+instruction. It is one AND gate off the critical path, and it makes an invariant
+structural rather than argued. There is deliberately **no mutation for it** —
+removing it is a no-op, and a manifest entry that is expected to escape teaches
+nothing.
+
+**`minstret` needed `&& !ex_stall`, and nothing except `a9_minstret` can see it.**
+A 34-cycle divide would otherwise count 34 times. No architectural value moves,
+so the commit-log differ, rv32um and riscv-formal are all structurally blind;
+`a9_minstret.S` now puts a multiply and a divide inside its loop for exactly
+this. It is the same shape as A7's phantom stall, from the other side.
+
+**The RVFI shadow takes the same bubble `ex_mem_q` takes.** Without it a 34-cycle
+divide is *reported* 34 times and every check downstream of `rvfi_order` is wrong
+from there on. The load-use stall needed no equivalent, because it bubbles ID/EX
+and `ex_valid` is already low — which is why this was easy to miss.
+
+#### The datapath
+
+One 33×33 signed multiplier serves all four multiplies: extending each operand
+to 33 bits with its sign bit *or with zero* turns "signed × unsigned" into an
+ordinary signed multiply, which is the only way `MULHSU` is not a third
+datapath. Three register stages, 4 cycles of EX occupancy.
+
+The divider is radix-2 restoring on magnitudes, 32 iterations, 34 cycles, and
+**data-independent by construction**. An early-out on a small dividend would be
+free performance and would make `tb/cosim/cycle_model.py` unbuildable — the
+model predicts the span from the retired instruction stream, and a latency it
+cannot compute from the opcode alone is a latency it cannot predict. (It is also
+plan §B4's constant-time property, but that is not why.)
+
+**Divide by zero is a real special case; signed overflow is not.** The zero
+divisor is detected at capture and bypasses the loop — quotient all ones,
+remainder the *original signed* dividend. `-2³¹ / -1` falls out of the general
+path: the magnitude of `-2³¹` is `0x80000000`, dividing by 1 gives `0x80000000`,
+and the sign rule (negative iff exactly one operand is negative) says positive,
+so it is never negated. There is therefore **nothing to delete** for a mutation
+to find, which is why the manifest breaks bit 31 of a positive quotient instead
+— the one bit only that case needs.
+
+#### DSP inference: the checking script was wrong before the design was
+
+**4 × DSP48E1**, confirmed from the synthesis report and not assumed, which is
+what `MODS_A` A14 insists on. `fpga/scripts/synth_ooc.sh <module>` synthesises
+one module out of context in about a minute — `synth_design -rtl` (what
+`elab_core.sh` runs) stops at the RTL netlist and says nothing about mapping.
+
+The first version of that script reported **`DSP=0 FF=0`** over a netlist
+containing four DSP48E1s and 239 flops, because it filtered on `PRIMITIVE_TYPE`
+group names that were guessed rather than looked up. Believed, it would have
+sent someone to fix a multiplier that was already correct. It now prints a
+**histogram of every `REF_NAME` present**, filtered by nothing — a report that
+names no group cannot name one wrongly. This is the third time this exact shape
+has appeared here, after A10's RISCOF exit code and A11's sby exit code:
+**take the verdict from the artefact.**
+
+What the mapping table says, and it is worth reading rather than the count:
+`AREG` and `BREG` are absorbed, `PREG` is absorbed on the two cascade DSPs, and
+**`MREG` is not used at all** — the 33×33 is one expression, so there is no
+register in the source between the partial products and the cascade adds for
+Vivado to push into `M`. The consequence is a combinational path through two
+chained DSPs inside one clock. That is very likely still inside A12's 13.373 ns
+budget, but it is a candidate for the new critical path, and **A16's Fmax search
+is what will say** — not this paragraph.
+
+Total: 403 LUTs, 239 FFs, 53 CARRY4, 4 DSP48E1, out of 63,400 / 126,800 / 240.
+
+#### What fault injection found here
+
+Twelve mutations. Three results are worth carrying:
+
+| mutation | caught by | not caught by |
+|---|---|---|
+| M instructions occupy EX one cycle too long | `cycle_model`, via `a14_muldiv` and the random suite | **everything else** — every value and every ordering is correct |
+| `minstret` counts stalled cycles | `csr:a9_minstret` | everything else |
+| EX/MEM latches every stalled cycle (one instruction retires 34×) | the commit-log differ | **`rv32um/mul`** |
+| divide-by-zero remainder returns the magnitude | `directed:a14_muldiv` | **`rv32um/rem`** |
+
+The last two are statements about the external suite, and they are the useful
+kind. `rv32um` is self-checking on **final register values**: the last of 34
+spurious retirements writes the correct answer, so the three before it leave
+nothing it can look at. And its only negative-dividend-over-zero case is
+`rem(-2³¹, 0)` — the one value whose 32-bit magnitude *is itself*, which is
+precisely the value that makes the mutation invisible. `a14_muldiv.S` uses
+−12345.
+
+**One mutation escaped, and the escape was the finding.** Dropping the enable on
+the multiplier's operand registers — so they reload from the drifting forwarding
+muxes every stalled cycle — was caught by nothing, correctly. The multiplier is a
+three-deep register *chain* whose latency equals its depth, so the value read on
+the done cycle is the product of the operands present on the **start** cycle
+whatever the enable does; the later reloads are still in flight behind it. The
+enable is load-bearing for the **divider**, whose state is a loop rather than a
+chain. The bug that mutation was reaching for is real and lives one level up — in
+`rvntt_core` wiring the unit to `id_ex_q.rs1_data` instead of to the forwarding
+muxes — and *that* mutation is in the manifest and is caught.
+
+#### riscv-formal got very slow, and it is not a depth problem
+
+`MODS_A` §3.2 predicted trouble here and predicted the wrong cause. It expected
+the **34-cycle divider** to push the required BMC depth from 14 to ~46. What
+actually happened is that the existing 43 checks, at their existing depth of 14,
+went from about 40 s of wall time for the whole set to **several hundred seconds
+per check**.
+
+That is the multiplier, not the divider, and it is not about depth at all: a
+combinational 33×33 multiplier bit-blasted and unrolled fourteen times is the
+classic worst case for a SAT solver, and it is in the cone of the RVFI outputs
+whether or not any check reads it. Nothing about the divider's *latency* is the
+problem; nothing about depth would fix it.
+
+The fix belongs to A15 and is §3.2's route 2 in a sharper form: keep the
+sequencer, so `done` and therefore the pipeline's timing stay exactly real, and
+abstract only the **arithmetic** — a free value under `RISCV_FORMAL`. The 43
+RV32I checks do not care what M computes; they care that the pipeline is
+self-consistent around it, and that is preserved exactly. The arithmetic is then
+proved separately as a standalone module, and is already covered by rv32um and
+by Spike cosimulation.
+
+---
+
+### A15 — M compliance and formal, and two things that had to be abstracted
+
+`MODS_A` A15. RISCOF now claims `RV32IMZicsr`; `riscv-formal` needed two
+changes, and §3.2 named the wrong cause for one of them.
+
+#### riscv-formal: the problem was the multiplier, not the divider
+
+§3.2 predicted that A14's **34-cycle divider** would push the required BMC depth
+from 14 to about 46 and very likely not converge. What actually happened is that
+the existing 43 checks, at their existing depth of 14, went from about 40 s of
+wall time *for the whole set* to **250–680 s per check**. Nothing failed; it
+simply stopped finishing.
+
+That is the **multiplier**, and it is not a depth problem at all. A combinational
+33×33 multiplier bit-blasted and unrolled fourteen times is the canonical worst
+case for a SAT solver, and it sits in the cone of the RVFI outputs whether or not
+any check reads it — so every check paid for it and none benefited. Raising or
+lowering the depth would not have touched it.
+
+The fix is §3.2's route 2, placed where it pays: `RVNTT_ABSTRACT_MULDIV` replaces
+`result` with a free value and leaves the **sequencer** exactly as it is. The 43
+checks do not care what M computes; they care that the pipeline stays
+self-consistent around it, and that is preserved rather than approximated. Back
+to 281 s of solver time for the whole set.
+
+The define is deliberately **not** `RISCV_FORMAL`: `formal_muldiv` compiles the
+same file and must see the real arithmetic. Naming the abstraction after the tool
+that needs it makes it impossible to enable by accident and greppable when a
+result looks too good.
+
+#### `liveness` is the one check whose depth is a latency
+
+It genuinely did fail, and it is the only one that did. Its property is *"if
+instruction N retires at the trigger cycle, N+1 has retired by the check
+cycle"* — a gap between two **retirements**, not, as everywhere else here, a
+distance between two dependent instructions. With the trigger at 9 that gap is
+1 normally, +2 for a control-flow flush, +1 for a load-use stall, and **+33 for
+a `DIV` occupying EX for 34 cycles**. 9 + 37 = 46, so it runs at 47 and the other
+42 stay at 14 (§3.2's route 1, used only here). Raising the *global* depth to
+suit one check would cost every check; lowering it to make one fit is the thing
+§3.2 says never to do. Same argument, both directions.
+
+It proves in three seconds — but only with the multiplier abstracted. Against the
+concrete one it took eight seconds to *fail* at depth 14 and would not have
+finished at 47.
+
+#### `reg` found a real bug, again
+
+`reg_ch0` failed on the first honest run with the abstraction in place, from a
+**`MULH`**: `rvfi_rs1_rdata` reported `0xfffffff5` where the register held
+something else.
+
+The RVFI shadow sampled the forwarded operands on a multi-cycle instruction's
+**last** EX cycle. By then the producers behind it have drained out of MEM and
+WB — EX/MEM is bubbled on every stalled cycle, so `FWD_MEM` stops matching after
+the first and `FWD_WB` after the second — and the mux has fallen back to
+`id_ex_q.rs1_data`, the value the register file held at ID time. By the last
+cycle of a divide that is stale by two instructions.
+
+The **arithmetic was never affected**: the unit latches its operands when it
+starts. Only the *report* was wrong — and `rvfi_rs1_rdata` is not an
+architectural value, it is a claim about one, so no commit-log diff, no `rv32um`
+test and no Spike comparison could see it. The fix holds the whole packet from
+the instruction's first EX cycle. This is the second time `reg` has caught
+something nothing else in the tree could reach.
+
+#### RISCOF: the ISA string was in three places and one was hardcoded
+
+Claiming `RV32IMZicsr` selects eight more tests, which is the point. It also
+found a latent bug in the A10 harness: the Spike reference plugin's ISA string
+was the literal `'rv32i'`, so the M tests compiled `-march=rv32im` and ran on a
+Spike told `rv32i`. It hung rather than failing. See A10's trap 5 above; the
+string is now derived from the yaml, and the reference invocation has a timeout.
+
+#### The divider, proved — and the property that would not solve
+
+`formal_muldiv` runs at **depth 37**, the first proof here whose depth is set by
+a latency rather than a dependency distance: a divide presents its result on its
+34th EX cycle, so nothing about it is observable before step 34.
+
+**The obvious property does not solve.** The natural statement of correctness is
+`quotient × divisor + remainder == dividend` with `remainder < divisor`, which
+pins the answer completely. Written that way it asks the solver to prove a
+32-step shift-and-subtract loop equivalent to a symbolic 32×32 multiply —
+multiplier equivalence, the canonical hard SAT instance. bitwuzla reached step 34
+in five seconds and then sat on that one query for a quarter of an hour. Depth,
+solver and patience were all irrelevant: **the shape of the query was the
+problem, not its size.**
+
+**The same statement with no multiplication anywhere.** Track the algebra
+alongside the loop in ghost registers whose recurrences are shifts and adds, and
+assert an *invariant after every iteration* rather than a conclusion after the
+last. With `D` the dividend magnitude, `V` the divisor and `k` the iteration
+count, the loop maintains `rem + Q_k·V == D >> (32−k)`, `rem < V` and
+`quo == (D << k) | Q_k`. Carrying `Q_k·V`, `D >> (32−k)`, `D << k` and `Q_k` as
+ghosts turns both lines into 64-bit comparisons. At `k = 32` the low half of
+`D << k` is zero and they collapse to the original identity — **derived rather
+than asserted**. It passes in **4m13s**.
+
+Generalise it: when a property asks a solver to relate two different circuits
+that compute the same arithmetic, state the *invariant they both maintain*
+instead of the *conclusion they both reach*.
+
+**What that is and is not a proof of**, stated rather than left to be discovered:
+it is a complete proof of the **magnitude loop** — 32 cycles of subtle state, and
+the only part a directed test cannot enumerate. It says nothing about the sign
+fixup or the quotient/remainder selection, which are a handful of combinational
+gates covered by `rv32um`, by `a14_muldiv.S`'s four-way sign matrix, and by 1000
+random programs against Spike.
+
+Two things about writing the properties, both of which cost a run:
+
+- **A standalone proof of this module needs `initial assume (!rst_n)`.** Its
+  multiplier registers are deliberately unreset so Vivado can pack them into the
+  DSP, so with `rst_n` free the solver starts from a state the hardware cannot
+  reach — a `done` on step 0 over arbitrary register contents — and every
+  property becomes a claim about nothing. The first run failed at step 0 before
+  reaching any arithmetic.
+- **A property true of only half the operations it is asserted over is a wrong
+  property, not a found bug.** `a_rem_sign` ("the remainder agrees with the
+  dividend in sign") failed at step 34 on a `DIVU` with a dividend above 2³¹ —
+  where the top bit is a magnitude bit, not a sign. It needed a `signed`
+  flag it had no other use for.
+
+And one real, if benign, finding: `done` was `active_q && cnt_q == target`, so a
+request that dropped on the exact cycle the counter reached its target — an abort
+arriving at the finish line — raised `done` for an instruction no longer in EX.
+The core would not act on it, because it computes `ex_stall = req && !done` and
+latches nothing when `req` is low. `done` now includes `req`: one AND gate, and
+the module's stated contract becomes literally true instead of nearly true.
+
+---
 
 ## Tool disagreements found the hard way
 
@@ -823,6 +1166,13 @@ The `riscv_formal` check set is the exception that proves the rule: it runs at
 depth 14 over the whole pipeline, 64-bit counters included, in seconds. Width is
 cheap for a bit-blasting solver; **unrolling a memory is what is expensive**, and
 that is what the numbers below are about.
+
+`formal_muldiv` is the exception in the other direction: **depth 37**, because
+its deepest property is a *latency* — a divide presents its result on its 34th
+cycle, so nothing about it can be observed before step 34. It is also the one
+proof here whose natural formulation had to be abandoned: see A15 above for why
+`quotient × divisor + remainder == dividend` does not solve and a per-iteration
+invariant does.
 
 `formal_regfile` runs at **depth 8, not the `run_formal.py` default of 20**.
 Every regfile property is combinational except storage-stability, which spans

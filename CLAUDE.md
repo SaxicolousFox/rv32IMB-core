@@ -1,7 +1,10 @@
 # riscv-ntt
 
-An RV32I pipeline, an ML-KEM-768 NTT coprocessor, and the `Xkntt` custom ISA
+An RV32IM pipeline, an ML-KEM-768 NTT coprocessor, and the `Xkntt` custom ISA
 extension that binds them, targeting a Digilent Arty A7-100T.
+
+> **`M` is A14's, from `docs/RISC-V_NTT_MODS_A.txt`, and it OVERRIDES §1.5's
+> `RV32I`.** Read that document's §2 before trusting the original on ISA scope.
 
 ---
 
@@ -69,7 +72,10 @@ performed at all. R-type, not R4 — `c1` needs no zeta, and encoding an unused
 `rs3` would burn a register-file read port.
 
 **3. Reserved encoding fields are strict.** A nonzero reserved field is an
-illegal instruction, not "ignored". Do not relax this. Plan A3 compares the RTL
+illegal instruction, not "ignored". Do not relax this. A14 added exactly one
+legal `funct7` to `OP` — `0000001`, the M extension, for all eight `funct3`
+values — and every other `funct7` there is still illegal, which is what keeps
+this rule intact rather than eroded. Plan A3 compares the RTL
 decoder against the Python decoder over 10⁶ random words; a lax and a strict
 decoder disagree on exactly those words, and the divergence would surface
 during cosimulation as an unexplained mismatch.
@@ -267,7 +273,28 @@ cannot be mechanised.
 recognises the extension and LD0 red lights if one ever retires, but no stage
 runs it. Also no flash image (configuration is volatile), and no attribution of
 the 0.384 stall cycles per instruction the benchmarks measured, which would need
-branch and stall counters the core does not have.
+branch and stall counters the core does not have (`MODS_A` A18).
+
+**A14 and A15 are done: the core is RV32IM.** A generic multi-cycle EX handshake
+— built for plan §8 I1's Xkntt Tier-1 unit and exercised first by a standard
+extension that comes with external references — plus `rvntt_muldiv.sv`: one
+33×33 multiplier on **4 DSP48E1** at 4 cycles of EX occupancy, and a radix-2
+restoring divider at 34, data-independent by construction because
+`tb/cosim/cycle_model.py` is unbuildable otherwise. `misa` now reads
+`0x40001100`. All 8 `rv32um` tests pass, RISCOF selects and passes the `M`
+suite, riscv-formal still proves 43/43, and the divider has a standalone proof
+of its own at depth 37. Fifteen mutations, all caught as declared.
+
+Two findings from it are worth carrying beyond Track A. **A checking script that
+guesses is worse than none**: the first version of `fpga/scripts/synth_ooc.sh`
+reported `DSP=0` over a netlist containing four DSP48E1s, because it filtered on
+`PRIMITIVE_TYPE` group names that were guessed rather than looked up — the third
+time this shape has appeared here after A10's RISCOF exit code and A11's sby exit
+code. And **when a property asks a solver to relate two circuits that compute the
+same arithmetic, state the invariant they both maintain rather than the
+conclusion they both reach**: the divider's obvious correctness statement is
+multiplier equivalence and did not return in fifteen minutes; the same statement
+as a per-iteration invariant proves in four.
 
 **C6 is only partially done**, which gates more than it appears to: there is no
 TIER2 backend, no RTL verification, and no `make KAT` target. Any milestone
