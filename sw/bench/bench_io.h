@@ -32,6 +32,25 @@ int  printf(const char *fmt, ...);
 unsigned int bench_mcycle(void);
 unsigned int bench_minstret(void);
 
+/* A20 (MODS_A2).  The six Zihpm counters, read at exactly the points where
+ * mcycle and minstret are already read, so a region's counter deltas describe
+ * the same window its cycle delta does.
+ *
+ * BENCH_HPM is a build-time switch and defaults OFF, for the reason A13's
+ * numbers are still reproducible from A13's image: arming the counters adds CSR
+ * writes to the startup path and reading them adds six csrr's to each timer
+ * hook.  Neither lands inside a timed region -- setStats is called immediately
+ * OUTSIDE Dhrystone's own timer, which is the whole reason that hook exists --
+ * but "outside the timed region" is a claim that should be checkable rather
+ * than asserted, and the way to check it is to build both ways and diff the
+ * cycle counts.  A23 does exactly that. */
+#define BENCH_HPM_N 6
+unsigned int bench_mhpmcounter(int n);        /* n = 0..5 -> mhpmcounter3..8 */
+void bench_hpm_arm(void);                     /* program the six selectors */
+void bench_hpm_read(unsigned int *dst);       /* snapshot all six */
+extern unsigned int bench_hpm_dhry0[BENCH_HPM_N], bench_hpm_dhry1[BENCH_HPM_N];
+extern unsigned int bench_hpm_cm0[BENCH_HPM_N],   bench_hpm_cm1[BENCH_HPM_N];
+
 /* Dhrystone's platform hook, called immediately outside its own timer. */
 void setStats(int enable);
 extern unsigned int bench_stat_cyc0, bench_stat_cyc1;

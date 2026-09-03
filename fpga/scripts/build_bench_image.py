@@ -88,7 +88,7 @@ def incs():
 
 
 def build(out_elf, objdir, core_hz, dhry_runs, iterations, gap_cycles,
-          host=False, arch="rv32i", ntt=False):
+          host=False, arch="rv32i", ntt=False, hpm=False):
     os.makedirs(objdir, exist_ok=True)
     ARCH = arch_flags(arch)
     # What goes into `flags=` on the wire and into CoreMark's own "Compiler
@@ -136,6 +136,15 @@ def build(out_elf, objdir, core_hz, dhry_runs, iterations, gap_cycles,
     # A16's dual baseline.  These four translation units do NOT take `arch`:
     # their whole purpose is that one pair is rv32i and the other rv32im, in the
     # same binary, on the same silicon, timed by the same counter.
+    # A20 (MODS_A2).  Off by default, for the same reason BENCH_NTT is: A13's
+    # and A16's numbers must stay reproducible from their own images, and this
+    # adds CSR writes to the startup path and six csrr's to each timer hook.
+    # They land outside every timed region by construction -- setStats is called
+    # immediately outside Dhrystone's timer -- but A23 checks that by building
+    # both ways and diffing the cycle counts rather than trusting the sentence.
+    if hpm:
+        common = common + ["-DBENCH_HPM"]
+
     if ntt:
         common = common + ["-DBENCH_NTT"]
         units = units + [(os.path.join(BENCH, "ntt_bench.c"), [])]
@@ -206,6 +215,8 @@ def main() -> int:
                     help="A16: which ISA Dhrystone and CoreMark are built for")
     ap.add_argument("--ntt", action="store_true",
                     help="A16: add the reference NTT built BOTH ways")
+    ap.add_argument("--hpm", action="store_true",
+                    help="A20: arm and report the six Zihpm counters")
     a = ap.parse_args()
 
     core_hz = a.core_hz
@@ -223,7 +234,7 @@ def main() -> int:
     elf = a.elf or os.path.join(outdir, "bench_image.elf")
     objdir = os.path.join(outdir, "bench_obj")
     flags = build(elf, objdir, core_hz, a.dhry_runs, a.iterations, a.gap_cycles,
-                  arch=a.arch, ntt=a.ntt)
+                  arch=a.arch, ntt=a.ntt, hpm=a.hpm)
 
     mem = bytearray(a.words * 4)
     used = 0

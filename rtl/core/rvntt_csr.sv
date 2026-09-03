@@ -65,6 +65,14 @@ module rvntt_csr (
     // header for why this is not the WB-stage retirement signal.
     input  wire         instret_bump,
 
+    // ---- A20: Zihpm event bus -----------------------------------------
+    // One bit per countable event, asserted for one cycle each time the event
+    // occurs.  The mapping from bit position to event number is fixed and is
+    // documented at HPM_EV_* below; rvntt_core.sv drives it and nothing here
+    // knows what the events MEAN, which is what keeps the counter block
+    // independent of the microarchitecture it is counting.
+    input  wire  [5:0]  hpm_event,
+
     // ---- trap entry and return ----------------------------------------
     input  wire         trap_en,
     // trap_pc's low two bits are dropped: IALIGN is 32, so mepc[1:0] read as
@@ -105,6 +113,25 @@ module rvntt_csr (
   localparam logic [11:0] CSR_CYCLEH    = 12'hC80;
   localparam logic [11:0] CSR_INSTRETH  = 12'hC82;
 
+  // ---- A20: Zihpm ---------------------------------------------------------
+  // mcountinhibit is at 0x320; mhpmevent3..31 at 0x323..0x33F; mhpmcounter3..31
+  // at 0xB03..0xB1F with their high halves at 0xB83..0xB9F, and the read-only
+  // user shadows hpmcounter* at 0xC03..0xC1F / 0xC83..0xC9F.
+  //
+  // SIX counters are implemented, mhpmcounter3..mhpmcounter8.  The privileged
+  // spec permits any subset, requiring only that unimplemented counters and
+  // their event selectors read as ZERO and do not trap -- so 9..31 are decoded,
+  // are writable without error, and hold nothing.  That is a different thing
+  // from "not decoded", which would trap, and the distinction is what the
+  // csr_traps directed tests check.
+  localparam logic [11:0] CSR_MCOUNTINHIBIT = 12'h320;
+  localparam int          HPM_FIRST = 3;    // mhpmcounter3
+  localparam int          HPM_N     = 6;    // ... through mhpmcounter8
+  localparam int          HPM_LAST  = HPM_FIRST + HPM_N - 1;
+
+  // The event numbering lives in rv32i_pkg as HPM_EV_*, so the core, this
+  // block and the testbenches name one constant rather than three copies.
+
   localparam logic [11:0] CSR_MVENDORID = 12'hF11;
   localparam logic [11:0] CSR_MARCHID   = 12'hF12;
   localparam logic [11:0] CSR_MIMPID    = 12'hF13;
@@ -132,6 +159,13 @@ module rvntt_csr (
   logic [63:0] mcycle_q;
   logic [63:0] minstret_q;
 
+  // A20 state.  mcountinhibit's bit 1 (TM) is read-only zero: there is no
+  // mtime in this design, so there is nothing to inhibit.
+  logic [63:0] mhpmcounter_q [HPM_N];
+  logic [3:0]  mhpmevent_q   [HPM_N];
+  logic        inhibit_cy_q, inhibit_ir_q;
+  logic [HPM_N-1:0] inhibit_hpm_q;
+
   // MPP is read-only 11.  With only M-mode implemented there is no other legal
   // value, and the privileged spec's own way of discovering that is to write a
   // mode to MPP and read it back -- so hardwiring it is the correct answer, not
@@ -148,6 +182,25 @@ module rvntt_csr (
   // than on the way out means a read-back after `csrw mepc` sees the masked
   // value, which is what the spec requires and what riscv-tests checks.
   assign mepc_o = {mepc_q, 2'b00};
+
+  // ---- A20: Zihpm address decode ------------------------------------------
+  // The counter index lives in addr[4:0] for all four of the counter address
+  // ranges (0xB03 -> 3, 0xB1F -> 31, and the same in 0xB8x / 0xCxx), so one
+  // slice serves them all.
+  wire [4:0] hpm_idx   = addr[4:0];
+  wire       hpm_impl  = (hpm_idx >= HPM_FIRST[4:0]) && (hpm_idx <= HPM_LAST[4:0]);
+  // Only meaningful when hpm_impl; guarded at every use.
+  wire [2:0] hpm_sel   = hpm_idx[2:0] - HPM_FIRST[2:0];
+
+  wire hpm_mlo = (addr >= 12'hB03) && (addr <= 12'hB1F);   // mhpmcounter3..31
+  wire hpm_mhi = (addr >= 12'hB83) && (addr <= 12'hB9F);   // mhpmcounter3..31h
+  wire hpm_ulo = (addr >= 12'hC03) && (addr <= 12'hC1F);   // hpmcounter3..31
+  wire hpm_uhi = (addr >= 12'hC83) && (addr <= 12'hC9F);   // hpmcounter3..31h
+  wire hpm_evt = (addr >= 12'h323) && (addr <= 12'h33F);   // mhpmevent3..31
+  wire hpm_any = hpm_mlo || hpm_mhi || hpm_ulo || hpm_uhi || hpm_evt;
+
+  wire [31:0] mcountinhibit_rd =
+      {{(32-HPM_N-3){1'b0}}, inhibit_hpm_q, inhibit_ir_q, 1'b0, inhibit_cy_q};
 
   // ---------------------------------------------------------------- read
   logic known;
@@ -170,9 +223,18 @@ module rvntt_csr (
       CSR_MINSTRET,  CSR_INSTRET:   rdata = minstret_q[31:0];
       CSR_MINSTRETH, CSR_INSTRETH:  rdata = minstret_q[63:32];
       CSR_MVENDORID, CSR_MARCHID, CSR_MIMPID, CSR_MHARTID: rdata = 32'h0;
+      CSR_MCOUNTINHIBIT: rdata = mcountinhibit_rd;
       default: begin
         rdata = 32'h0;
-        known = 1'b0;
+        // A20.  Decoded but ZERO for the unimplemented indices 9..31: the spec
+        // requires them to read zero and NOT to trap, which is why this arm
+        // sets known even when hpm_impl is low.
+        known = hpm_any;
+        if (hpm_impl) begin
+          if      (hpm_mlo || hpm_ulo) rdata = mhpmcounter_q[hpm_sel][31:0];
+          else if (hpm_mhi || hpm_uhi) rdata = mhpmcounter_q[hpm_sel][63:32];
+          else if (hpm_evt)            rdata = {28'b0, mhpmevent_q[hpm_sel]};
+        end
       end
     endcase
   end
@@ -199,6 +261,12 @@ module rvntt_csr (
   wire minstret_written = do_write &&
                           (addr == CSR_MINSTRET || addr == CSR_MINSTRETH);
 
+  // A20, and the same rule for the same reason: an explicit write to either
+  // half of an HPM counter suppresses that cycle's event increment, so the
+  // value read back is the value written.  hpm_ulo/hpm_uhi are read-only
+  // (addr[11:10] == 11), so do_write can never be true for them.
+  wire hpm_written = do_write && hpm_impl && (hpm_mlo || hpm_mhi);
+
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       mstatus_mie_q  <= 1'b0;
@@ -211,9 +279,30 @@ module rvntt_csr (
       mie_q          <= 32'h0;
       mcycle_q       <= 64'h0;
       minstret_q     <= 64'h0;
+      inhibit_cy_q   <= 1'b0;
+      inhibit_ir_q   <= 1'b0;
+      inhibit_hpm_q  <= '0;
+      for (int i = 0; i < HPM_N; i++) begin
+        mhpmcounter_q[i] <= 64'h0;
+        mhpmevent_q[i]   <= rv32i_pkg::HPM_EV_NONE;
+      end
     end else begin
-      mcycle_q <= mcycle_q + 64'd1;
-      if (instret_bump && !minstret_written) minstret_q <= minstret_q + 64'd1;
+      if (!inhibit_cy_q) mcycle_q <= mcycle_q + 64'd1;
+      if (instret_bump && !minstret_written && !inhibit_ir_q)
+        minstret_q <= minstret_q + 64'd1;
+
+      // A20.  One 6:1 selection per counter, so any event can be routed to any
+      // counter -- the alternative, hardwiring counter N to event N, is a WARL
+      // stretch and buys nothing at this size.  Event 0 counts nothing, which
+      // is the reset value.
+      for (int i = 0; i < HPM_N; i++) begin
+        if (!inhibit_hpm_q[i] &&
+            mhpmevent_q[i] != rv32i_pkg::HPM_EV_NONE &&
+            mhpmevent_q[i] <= rv32i_pkg::HPM_EV_MAX &&
+            hpm_event[3'(mhpmevent_q[i] - 4'd1)] &&
+            !(hpm_written && hpm_sel == i[2:0]))
+          mhpmcounter_q[i] <= mhpmcounter_q[i] + 64'd1;
+      end
 
       // Trap entry and MRET come FIRST in this if-chain, and an explicit write
       // to the same register in the same cycle cannot happen: a trap is taken
@@ -248,9 +337,29 @@ module rvntt_csr (
           // simply holds.  Writing the low half must not disturb the high one.
           CSR_MINSTRET:  minstret_q[31:0]  <= wdata;
           CSR_MINSTRETH: minstret_q[63:32] <= wdata;
+          CSR_MCOUNTINHIBIT: begin
+            inhibit_cy_q  <= wdata[0];
+            // wdata[1] is TM and is dropped: there is no mtime to inhibit, and
+            // a WARL field may legally refuse a value it cannot represent.
+            inhibit_ir_q  <= wdata[2];
+            inhibit_hpm_q <= wdata[HPM_LAST:HPM_FIRST];
+          end
           // MISA, MIP and the read-only group: WARL, and every value this core
-          // supports is the one it already has.
-          default: ;
+          // supports is the one it already has.  A20's counters land here too,
+          // because their addresses are ranges rather than constants.
+          default: begin
+            if (hpm_impl) begin
+              // Partial assignment, exactly as minstret does it: writing one
+              // half must not disturb the other.
+              if      (hpm_mlo) mhpmcounter_q[hpm_sel][31:0]  <= wdata;
+              else if (hpm_mhi) mhpmcounter_q[hpm_sel][63:32] <= wdata;
+              // The selector is WARL over 0..rv32i_pkg::HPM_EV_MAX.  An out-of-range write
+              // leaves it unchanged rather than programming a counter to count
+              // an event that does not exist.
+              else if (hpm_evt && wdata[3:0] <= rv32i_pkg::HPM_EV_MAX && wdata[31:4] == '0)
+                mhpmevent_q[hpm_sel] <= wdata[3:0];
+            end
+          end
         endcase
       end
     end

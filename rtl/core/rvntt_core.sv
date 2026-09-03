@@ -178,6 +178,7 @@ module rvntt_core #(
   // go INTO it from the EX stage's resolution.
   logic        bp_pred_taken;
   logic [31:0] bp_pred_target;
+  logic        bp_pred_hit;               // A20, observational only
   logic        ex_bp_upd;
   logic [1:0]  ex_bp_kind;
 
@@ -238,6 +239,7 @@ module rvntt_core #(
       .flush       (ex_redirect),
       .pred_taken  (bp_pred_taken),
       .pred_target (bp_pred_target),
+      .pred_hit    (bp_pred_hit),
       .upd_valid   (ex_bp_upd),
       .upd_pc      (id_ex_q.pc),
       .upd_kind    (ex_bp_kind),
@@ -294,12 +296,14 @@ module rvntt_core #(
       if_id_q.insn  <= 32'h0;
       if_id_q.pred_taken  <= 1'b0;
       if_id_q.pred_target <= 32'h0;
+      if_id_q.pred_hit    <= 1'b0;
     end else if (ex_redirect) begin
       if_id_q.valid <= 1'b0;
       if_id_q.pc    <= pc_q;
       if_id_q.insn  <= 32'h0;
       if_id_q.pred_taken  <= 1'b0;
       if_id_q.pred_target <= 32'h0;
+      if_id_q.pred_hit    <= 1'b0;
     end else if (!front_stall) begin
       if_id_q.valid <= 1'b1;
       if_id_q.pc    <= pc_q;
@@ -309,6 +313,7 @@ module rvntt_core #(
       // instruction it is about arrive together.
       if_id_q.pred_taken  <= bp_pred_taken;
       if_id_q.pred_target <= bp_pred_target;
+      if_id_q.pred_hit    <= bp_pred_hit;
     end
   end
 
@@ -406,6 +411,7 @@ module rvntt_core #(
       id_ex_q.rs3_data <= id_rs3_data;
       id_ex_q.pred_taken  <= if_id.pred_taken;
       id_ex_q.pred_target <= if_id.pred_target;
+      id_ex_q.pred_hit    <= if_id.pred_hit;
     end
   end
 
@@ -709,6 +715,35 @@ module rvntt_core #(
     endcase
   end
 
+  // ---- A20: the Zihpm event bus -------------------------------------------
+  // The bit positions are rv32i_pkg::HPM_EV_* minus one -- event 0 is "count
+  // nothing" and has no wire.
+  //
+  // THESE PREDICATES ARE A18's, DELIBERATELY AND EXACTLY, so that the hardware
+  // counters and tb/perf/tb_profile.cpp can be required to agree TO THE COUNT.
+  //
+  // `&& !ex_stall` on the load-use event mirrors the instrument's `else if`,
+  // which charges a cycle where both stalls assert to the multi-cycle unit.
+  // MEASURED: THERE IS NO SUCH CYCLE.  id_stall requires a load in EX and
+  // ex_stall requires a multiply or divide there, so the two are disjoint by
+  // construction -- a_stalls_are_disjoint proves it at depth 14, and dropping
+  // the guard was injected and changed no count anywhere.  It is kept as an
+  // explicit statement of that disjointness, not as a tie-break that does
+  // work.
+  wire [rv32i_pkg::HPM_EV_COUNT-1:0] hpm_event;
+  assign hpm_event[rv32i_pkg::HPM_EV_LOADUSE    - 1] = id_stall && !ex_stall;
+  assign hpm_event[rv32i_pkg::HPM_EV_EXSTALL    - 1] = ex_stall;
+  assign hpm_event[rv32i_pkg::HPM_EV_REDIRECT   - 1] = ex_redirect;
+  // A redirect has three causes -- trap, MRET and misprediction.  This one
+  // isolates the third, so that REDIRECT minus MISPREDICT is the trap-and-MRET
+  // term.  A19's second closure said those are zero on both benchmarks; this is
+  // the counter that lets that be checked on the board instead of assumed.
+  assign hpm_event[rv32i_pkg::HPM_EV_MISPREDICT - 1] = !ex_stall && ex_mispredict;
+  // ex_bp_upd is already "a control transfer is resolving in EX, not stalled and
+  // not trapping", which is exactly the population these two want to count over.
+  assign hpm_event[rv32i_pkg::HPM_EV_BTB_HIT    - 1] = ex_bp_upd && id_ex_q.pred_hit;
+  assign hpm_event[rv32i_pkg::HPM_EV_XFER_TAKEN - 1] = ex_bp_upd && ex_ctrl_xfer;
+
   rvntt_csr u_csr (
       .clk              (clk),
       .rst_n            (rst_n),
@@ -727,6 +762,7 @@ module rvntt_core #(
       // about.  csr_traps_minstret and riscv-tests' instret_overflow both see
       // this immediately; nothing else would.
       .instret_bump     (id_ex_q.valid && !ex_trap && !ex_stall),
+      .hpm_event        (hpm_event),
       .trap_en          (ex_trap),
       .trap_pc          (id_ex_q.pc),
       .trap_cause       (ex_trap_cause),
@@ -1049,6 +1085,25 @@ module rvntt_core #(
   always_comb begin
     if (id_ex_q.valid && (id_ex_q.ctrl.mem_read || id_ex_q.ctrl.mem_write))
       a_addr_adder_matches_alu: assert (ex_mem_addr == ex_alu_y);
+
+    // ---- A20: the two stalls are MUTUALLY EXCLUSIVE, and that is proved
+    // ---- here rather than assumed by the counter that depends on it.
+    //
+    // `id_stall` requires the instruction in EX to be a LOAD (rvntt_hazard's
+    // ex_pending_load); `ex_stall` requires it to be a multiply or a divide.
+    // One instruction cannot be both, so they can never assert together.
+    //
+    // THIS WAS WRITTEN AS A COMMENT FIRST AND THE COMMENT WAS WRONG IN THE
+    // OTHER DIRECTION.  The counter for load-use cycles was written as
+    // `id_stall && !ex_stall` to "break the tie", and A20's own fault injection
+    // showed that dropping the guard changes nothing at all -- because there is
+    // no tie to break.  A guard against an impossible case is harmless; a
+    // guard that is BELIEVED to be load-bearing is not, because it makes the
+    // next person reason about an overlap that does not exist.  So the fact is
+    // asserted, the guard stays as documentation of the disjointness, and if a
+    // future multi-cycle unit ever does overlap with a load this fires at
+    // depth 14 instead of silently double-counting.
+    a_stalls_are_disjoint: assert (!(id_stall && ex_stall));
   end
 
   // ---- A19: the other half of rvntt_bpred's interface contract ------------

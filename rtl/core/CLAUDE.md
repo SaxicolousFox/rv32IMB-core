@@ -17,7 +17,7 @@ was the whole reason C1 came before this.
 | `rvntt_forward.sv` | A6 | `formal_forward`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
 | `rvntt_hazard.sv` | A7 | `formal_hazard`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
 | `rvntt_branch.sv` | A8 | `formal_branch`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
-| `rvntt_csr.sv` | A9 | `formal_csr`, `riscv_tests`, `csr_traps_minstret`, Vivado elaboration |
+| `rvntt_csr.sv` | A9, **A20** | `formal_csr`, `riscv_tests`, `csr_traps_minstret`, **`hpm_counters`**, Vivado elaboration |
 | `rvntt_muldiv.sv` | A14, A15 | `formal_muldiv`, `riscv_tests` (`rv32um`), `cosim_directed`, `cosim_commit_log`, `synth_ooc.sh` |
 | `rvntt_rvfi.sv` | A11, A15 | `riscv_formal` (43 checks), Vivado elaboration |
 | `rvntt_core.sv` | A4, A6–A9, A11, A14 | `core_a4_checksum`, `cosim_commit_log`, `riscv_tests`, `riscv_formal`, Vivado elaboration |
@@ -28,6 +28,7 @@ was the whole reason C1 came before this.
 | `sw/tests/a7_loaduse.S` | A7 | `cosim_directed` |
 | `sw/tests/a8_control.S` | A8 | `cosim_directed` |
 | `sw/tests/a9_csr.S`, `a9_minstret.S` | A9, A14 | `csr_traps_minstret` |
+| `sw/tests/a20_hpm.S` | **A20** | `hpm_counters` |
 | `sw/tests/a14_muldiv.S` | A14 | `cosim_directed` |
 | `tb/cosim/test_riscv_tests.py` | A9 | `riscv_tests` |
 | `tb/riscof/` (plugins, env, runner) | A10 | `riscof_arch_test` |
@@ -1379,3 +1380,56 @@ from the first cycle and the diagnostic points nowhere useful.
   cases — start-while-busy, aperture access mid-operation — can only be
   exercised here in RTL.
 - `rtl/common/` is shared with Track B. Coordinate before editing it.
+
+---
+
+## A20 — the counters, and the two things that made them worth building
+
+`MODS_A2` A20. Six `Zihpm` counters. The full write-up is
+`docs/a20-counters.md`; two findings belong here because they are about how this
+project checks things rather than about the counters.
+
+**A comparison that passes on the first run has not been shown to work.** The
+hardware-counter-against-A18 comparison failed immediately, on Dhrystone, by
+exactly 1 — and passed on CoreMark. **Neither side was wrong.** The instrument
+delays its redirect count by three cycles *on purpose*, so a redirect's two lost
+cycles are charged to the region that actually lost them; a counter in silicon
+increments on the pulse and cannot do that. The two therefore disagree, per
+region, by the number of pulses in flight across a boundary.
+
+The tempting fix was a tolerance. The right fix was to make the instrument keep
+**both** counts — the delayed one for the cycle identity, the raw one for this
+comparison — so the check stays exact. **A ±1 tolerance would have passed this
+and also passed a genuinely miscounting predicate**, which is the entire class of
+bug the comparison exists to find.
+
+**Constant versus proportional is the whole test for instrumentation
+overhead.** The third validation path has software read the counters through
+`csrr`, and it reads *high* — the six `csrr`s and their loop fall inside the
+counted window and outside the timed one, by the same convention `minstret`
+already uses here. The first version of that check used a relative bound and
+failed the small region while passing the large one, which is exactly backwards:
+**a snapshot footprint is a constant, and a miscounting predicate is a
+proportion.** Doubling the Dhrystone region doubled every event count and left
+all four excesses identical to the event (+6, +0, +16, +23). That measurement is
+the justification for an absolute bound, and it is recorded rather than assumed.
+
+**A guard believed to be load-bearing, which was not.** The load-use event is
+written `id_stall && !ex_stall`, mirroring the instrument's tie-break, and the
+comment beside it said that was the line the whole step was won or lost on.
+Injecting the obvious mutation — drop the guard — changed **no count anywhere on
+either benchmark**, because the two stalls are disjoint by construction:
+`id_stall` needs a load in EX and `ex_stall` needs a multiply or divide there.
+The claim was wrong, fault injection is what showed it, and the fix was to turn
+the real fact into `a_stalls_are_disjoint`, proved by every riscv-formal check at
+depth 14. **A guard against an impossible case is harmless; a guard mistakenly
+believed to be doing work is not**, because it makes the next reader model an
+overlap that cannot happen.
+
+**One gap is recorded rather than papered over.** `hpm_btbhit` has no
+counterpart in the retired instruction stream — nothing there says whether the
+BTB held an entry — so it is *reported, not checked*, and the mutation that would
+exploit that (`pred_hit` ignoring `flush`) is listed in
+`tb/mutate/run_mutation.py` as uncatchable with the reason, rather than given a
+catcher that does not catch it. Closing it needs an assertion in
+`rvntt_bpred`'s own formal run relating `pred_hit` to the previous cycle's flush.

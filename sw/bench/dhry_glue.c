@@ -40,11 +40,21 @@ void setStats(int enable)
     if (enable) {
         /* minstret first on entry and last on exit, so the instruction window
          * strictly contains the cycle window rather than straddling it. */
+        /* A20: the HPM snapshot goes OUTSIDE the cycle window on entry and
+         * outside it on exit, for the same reason minstret does -- six csrr's
+         * are six cycles, and they must not land inside the region they are
+         * describing. */
+#ifdef BENCH_HPM
+        bench_hpm_read(bench_hpm_dhry0);
+#endif
         bench_stat_ins0 = bench_minstret();
         bench_stat_cyc0 = bench_mcycle();
     } else {
         bench_stat_cyc1 = bench_mcycle();
         bench_stat_ins1 = bench_minstret();
+#ifdef BENCH_HPM
+        bench_hpm_read(bench_hpm_dhry1);
+#endif
         snap_ptr   = *Ptr_Glob;
         snap_next  = *Next_Ptr_Glob;
         snap_taken = 1;

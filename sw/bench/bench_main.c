@@ -78,6 +78,15 @@ int main(void)
 {
     unsigned int iter = 0;
 
+#ifdef BENCH_HPM
+    /* A20.  Armed once, before the first block, and never touched again --
+     * mcountinhibit stays clear and the selectors stay programmed, so every
+     * block's deltas are taken from freely running counters.  Arming inside the
+     * loop would reprogram them between blocks and make the reproducibility
+     * check across blocks weaker rather than stronger. */
+    bench_hpm_arm();
+#endif
+
     for (;;) {
         unsigned int bad;
 
@@ -104,12 +113,32 @@ int main(void)
         bench_printf("dhry_stat_cycles=%u\r\n", bench_stat_cyc1 - bench_stat_cyc0);
         bench_printf("dhry_stat_instret=%u\r\n", bench_stat_ins1 - bench_stat_ins0);
         bench_printf("dhry_check=0x%08x\r\n", bad);
+#ifdef BENCH_HPM
+        /* A20.  Deltas only, and raw -- nothing derived, for the same reason
+         * every other counter here is printed raw: the parser owns the
+         * arithmetic because 32-bit overflow in this program has already once
+         * produced a plausible wrong number. */
+        bench_printf("dhry_hpm_loaduse=%u\r\n",    bench_hpm_dhry1[0] - bench_hpm_dhry0[0]);
+        bench_printf("dhry_hpm_exstall=%u\r\n",    bench_hpm_dhry1[1] - bench_hpm_dhry0[1]);
+        bench_printf("dhry_hpm_redirect=%u\r\n",   bench_hpm_dhry1[2] - bench_hpm_dhry0[2]);
+        bench_printf("dhry_hpm_mispredict=%u\r\n", bench_hpm_dhry1[3] - bench_hpm_dhry0[3]);
+        bench_printf("dhry_hpm_btbhit=%u\r\n",     bench_hpm_dhry1[4] - bench_hpm_dhry0[4]);
+        bench_printf("dhry_hpm_xfertaken=%u\r\n",  bench_hpm_dhry1[5] - bench_hpm_dhry0[5]);
+#endif
 
         bench_printf("--- coremark ---\r\n");
         (void)coremark_main();
         bench_printf("cm_iterations=%u\r\n", (unsigned int)ITERATIONS);
         bench_printf("cm_cycles=%u\r\n", cm_cycles_stop - cm_cycles_start);
         bench_printf("cm_instret=%u\r\n", cm_instret_stop - cm_instret_start);
+#ifdef BENCH_HPM
+        bench_printf("cm_hpm_loaduse=%u\r\n",    bench_hpm_cm1[0] - bench_hpm_cm0[0]);
+        bench_printf("cm_hpm_exstall=%u\r\n",    bench_hpm_cm1[1] - bench_hpm_cm0[1]);
+        bench_printf("cm_hpm_redirect=%u\r\n",   bench_hpm_cm1[2] - bench_hpm_cm0[2]);
+        bench_printf("cm_hpm_mispredict=%u\r\n", bench_hpm_cm1[3] - bench_hpm_cm0[3]);
+        bench_printf("cm_hpm_btbhit=%u\r\n",     bench_hpm_cm1[4] - bench_hpm_cm0[4]);
+        bench_printf("cm_hpm_xfertaken=%u\r\n",  bench_hpm_cm1[5] - bench_hpm_cm0[5]);
+#endif
 
 #ifdef BENCH_NTT
         bench_printf("--- ntt ---\r\n");

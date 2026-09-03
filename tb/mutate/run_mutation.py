@@ -99,8 +99,14 @@ MUTATIONS = [
              "that IPC comes out at a perfectly plausible 1.00.  Every cycle "
              "count, every score and every derived second would be wrong "
              "together, with nothing in the output looking odd",
-         edits=[(CSR, "      mcycle_q <= mcycle_q + 64'd1;",
-                      "      if (instret_bump) mcycle_q <= mcycle_q + 64'd1;")],
+         # A20 MOVED THIS.  mcountinhibit put a guard in front of the
+         # increment, so the bare statement this used to match no longer
+         # exists.  FIFTH time an anchor has gone stale under an edit here --
+         # and this one was only visible because the A19 session fixed
+         # run_regress.py's 40-line output truncation, which had been hiding
+         # exactly these lines above the tail.
+         edits=[(CSR, "      if (!inhibit_cy_q) mcycle_q <= mcycle_q + 64'd1;",
+                      "      if (!inhibit_cy_q && instret_bump) mcycle_q <= mcycle_q + 64'd1;")],
          caught=["bench"]),
 
     dict(step="A13", name="minstret_counts_twice",
@@ -108,8 +114,13 @@ MUTATIONS = [
              "-- impossible for a single-issue in-order pipeline, which is the "
              "only reason it is detectable at all from a number with no "
              "independent reference",
-         edits=[(CSR, "      if (instret_bump && !minstret_written) minstret_q <= minstret_q + 64'd1;",
-                      "      if (instret_bump && !minstret_written) minstret_q <= minstret_q + 64'd2;")],
+         # A20 MOVED THIS TOO -- mcountinhibit's IR bit joined the condition and
+         # the statement wrapped onto a second line.  Same cause as the row
+         # above; see its note.
+         edits=[(CSR, "      if (instret_bump && !minstret_written && !inhibit_ir_q)\n"
+                      "        minstret_q <= minstret_q + 64'd1;",
+                      "      if (instret_bump && !minstret_written && !inhibit_ir_q)\n"
+                      "        minstret_q <= minstret_q + 64'd2;")],
          caught=["bench"]),
 
     # Not a counter bug: a datapath bug, checked by the benchmarks' OWN output
@@ -985,8 +996,69 @@ MUTATIONS = [
          edits=[(BP, "  wire btb_we = upd_valid && (upd_taken || (up_hit && up_isbr));",
                      "  wire btb_we = upd_valid && up_isbr && (upd_taken || up_hit);")],
          caught=["directed:a19_bpred"]),
-]
 
+    # ---------------------------------------------------------------- A20
+    # The counters are OBSERVATIONAL: nothing in the datapath reads them, so
+    # every mutation here is architecturally perfect by construction and the
+    # commit log is byte-identical with all of them applied.  What catches them
+    # is either the directed CSR contract test or -- for the two that get the
+    # ATTRIBUTION wrong rather than the plumbing -- the comparison against A18's
+    # instrument, which is the reason that comparison exists.
+    dict(step="A20", name="mcountinhibit_does_not_inhibit_mcycle",
+         why="the inhibit bit is stored, and reads back correctly, and does "
+             "nothing.  The plausible version of this bug: the register is "
+             "implemented as a register and nobody wires it to the counter.  "
+             "Every test that reads mcountinhibit passes; only one that "
+             "inhibits and then watches the counter can see it",
+         edits=[(CSR, "      if (!inhibit_cy_q) mcycle_q <= mcycle_q + 64'd1;",
+                      "      mcycle_q <= mcycle_q + 64'd1;")],
+         caught=["csr:a20_hpm"]),
+
+    dict(step="A20", name="unimplemented_counters_trap_instead_of_reading_zero",
+         why="mhpmcounter9..31 become illegal instructions rather than "
+             "read-only zero.  The spec requires an unimplemented counter to "
+             "read zero and NOT to fault, and the difference only shows when "
+             "software probes for how many counters exist -- which is exactly "
+             "what software does with this extension",
+         edits=[(CSR, "        known = hpm_any;", "        known = hpm_any && hpm_impl;")],
+         caught=["csr:a20_hpm"]),
+
+    dict(step="A20", name="the_event_selector_is_not_warl",
+         why="an out-of-range write to mhpmevent lands, so a counter can be "
+             "programmed to count an event number that does not exist.  The "
+             "increment then indexes the event bus out of range",
+         edits=[(CSR, "              else if (hpm_evt && wdata[3:0] <= rv32i_pkg::HPM_EV_MAX && wdata[31:4] == '0)",
+                      "              else if (hpm_evt)")],
+         caught=["csr:a20_hpm"]),
+
+    # TWO A20 MUTATIONS ARE DELIBERATELY NOT IN THIS MANIFEST, and both are
+    # recorded here rather than left out silently.
+    #
+    # "the stall tie is broken the wrong way" -- hpm_event[LOADUSE] made
+    # `id_stall` instead of `id_stall && !ex_stall`.  IT IS NOT HERE BECAUSE IT
+    # IS NOT A MUTATION: it was injected, the counters came back identical on
+    # both benchmarks, and the reason is that the two stalls are DISJOINT BY
+    # CONSTRUCTION -- id_stall requires a load in EX, ex_stall requires a
+    # multiply or divide there, and one instruction cannot be both.  The guard
+    # is a semantically-equivalent rewrite, so removing it mutates nothing and
+    # the harness would rightly call it a NO-OP.
+    #
+    # The disjointness is now asserted in rvntt_core.sv
+    # (a_stalls_are_disjoint) and proved by every riscv-formal check at depth
+    # 14, which is a stronger statement than any mutation of it could be.  This
+    # note is kept because the ORIGINAL comment in the core claimed the guard
+    # was load-bearing, and fault injection is what showed it was not.
+    #
+    # "BTB hit counted when the prediction was suppressed" -- pred_hit ignoring
+    # `flush`, so the instruction at a redirect target is recorded as a hit even
+    # though no lookup described its address.  NOTHING HERE CATCHES IT, and that
+    # is a real gap rather than an oversight: the retired instruction stream
+    # contains no evidence about whether the BTB held an entry, so no check
+    # built on it can see the difference.  run_stall_profile.py reports the hit
+    # count rather than checking it, and says so.  Closing this needs an RTL
+    # assertion relating pred_hit to the previous cycle's flush, which is
+    # rvntt_bpred's formal job and not a mutation's.
+]
 # ------------------------------------------------------------------- the tests
 RANDOM_SUITES = {
     # Small on purpose: these run once per mutation, and the acceptance runs
@@ -1267,6 +1339,10 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--step", default=None, help="only mutations for this step")
     ap.add_argument("--only", default=None, help="one mutation by name")
+    ap.add_argument("--check-anchors", action="store_true",
+                    help="verify every edit's search text still matches its "
+                         "file exactly once, and stop.  Takes a tenth of a "
+                         "second; the full run takes a quarter of an hour.")
     a = ap.parse_args()
 
     muts = [m for m in MUTATIONS
@@ -1275,6 +1351,45 @@ def main():
     if not muts:
         print("no mutations selected")
         return 2
+
+    # ---- the anchor pre-flight.
+    #
+    # WHY THIS EXISTS, AND WHY IT IS SEPARATE FROM THE RUN.  A mutation whose
+    # search text no longer appears in the file mutates nothing, and the harness
+    # correctly reports it as NO-OP -- but only after building and running
+    # everything else, a quarter of an hour later, in a report long enough that
+    # the two NO-OP lines landed above run_regress.py's output tail and were
+    # invisible until that truncation was fixed.
+    #
+    # ANCHORS HAVE NOW GONE STALE FIVE TIMES IN THIS PROJECT, every time for the
+    # same reason: a later step edited the line a mutation was anchored to.  The
+    # check is a string search.  It costs a tenth of a second and it is the
+    # difference between "your rename broke two mutations" arriving now and
+    # arriving after the next full regression.
+    stale = []
+    srcs = {}
+    for m in muts:
+        for path, old_text, _new_text in m["edits"]:
+            full = os.path.join(ROOT, path)
+            if path not in srcs:
+                srcs[path] = io.open(full, encoding="utf-8").read()
+            n = srcs[path].count(old_text)
+            if n != 1:
+                stale.append((m["name"], path, n))
+    if a.check_anchors or stale:
+        print("anchor check: %d edit(s) across %d mutation(s)"
+              % (sum(len(m["edits"]) for m in muts), len(muts)))
+        for name, path, n in stale:
+            print("  STALE  %-46s %s matches %d time(s)" % (name, path, n))
+        if stale:
+            print("\n%d STALE ANCHOR(S) -- these mutations would mutate nothing "
+                  "and be reported as NO-OP after a full run.  A later step "
+                  "almost certainly edited the line they anchor to; re-read the "
+                  "file and refresh the search text." % len(stale))
+            return 1
+        print("  all anchors match exactly once")
+        if a.check_anchors:
+            return 0
 
     work = tempfile.mkdtemp(prefix="mutate_")
     problems = 0
