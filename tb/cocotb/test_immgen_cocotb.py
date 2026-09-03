@@ -69,7 +69,11 @@ async def apply_and_check(dut, insn, fmt, tag, failures):
 async def test_pkg_agreement(dut):
     """The model's enum encodings still match rtl/core/rv32i_pkg.sv."""
     n = ref.check_pkg_agreement()
-    assert n == len(ref.ALU_OPS) + len(ref.IMM_FMTS), \
+    # ref.PKG_MEMBERS_CHECKED, not a local copy of the sum.  This assertion
+    # used to spell the sum out here, went stale the moment A14 added the two
+    # multi-cycle latency constants to the guard, and stayed wrong through A21
+    # -- invisibly, because run_cocotb.py returned 0 whatever cocotb said.
+    assert n == ref.PKG_MEMBERS_CHECKED, \
         f"spec-drift guard checked only {n} members"
     dut._log.info(f"package agreement OK ({n} enum members)")
 

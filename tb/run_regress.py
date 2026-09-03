@@ -164,6 +164,14 @@ def discover() -> list:
                   cwd=os.path.join(ROOT, "tb/cocotb"),
                   requires=["verilator"], timeout=1200))
 
+    # A21.  29 bit-manipulation operations, each checked against a SECOND,
+    # independently-written expression in rvntt_bitmanip.sv's FORMAL block --
+    # the idiom rvntt_alu established.  Depth 2: the unit is combinational.
+    t.append(Test("formal_bitmanip", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_bitmanip", "--depth", "2"],
+                  requires=["sby", "yosys"], timeout=600))
+
     t.append(Test("formal_decode", "formal",
                   [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
                    "--design", "rvntt_decode", "--depth", "2"],
@@ -280,7 +288,12 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "tb/cosim/test_cosim_a5.py"),
                    "-n", "100", "--len", "300",
                    "--raw-density", "1.0", "--load-use-density", "1.0",
-                   "--branch-density", "0.12", "--mul-density", "0.10"],
+                   "--branch-density", "0.12", "--mul-density", "0.10",
+                   # A21.  B and Zbkb at the same kind of density M gets.  The
+                   # generator constructs rotate-by-0 and rotate-by-31 rather
+                   # than waiting for a uniform draw to produce them, for the
+                   # same reason it constructs the divide edge cases.
+                   "--bm-density", "0.15"],
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=1800))
 

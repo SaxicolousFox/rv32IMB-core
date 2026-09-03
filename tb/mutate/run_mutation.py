@@ -60,6 +60,8 @@ BR    = "rtl/core/rvntt_branch.sv"
 ALU   = "rtl/core/rvntt_alu.sv"
 CSR   = "rtl/core/rvntt_csr.sv"
 MD    = "rtl/core/rvntt_muldiv.sv"
+BM    = "rtl/core/rvntt_bitmanip.sv"
+DEC   = "rtl/core/rvntt_decode.sv"
 BP    = "rtl/core/rvntt_bpred.sv"
 RF    = "rtl/core/rvntt_regfile.sv"
 RVFI  = "rtl/core/rvntt_rvfi.sv"
@@ -1031,6 +1033,75 @@ MUTATIONS = [
                       "              else if (hpm_evt)")],
          caught=["csr:a20_hpm"]),
 
+    # ---------------------------------------------------------------- A21
+    # B (Zba+Zbb+Zbs) and Zbkb.  Every one of these is architecturally VISIBLE
+    # -- a wrong bit-manipulation result is a wrong register value -- so the
+    # catchers are the ones that compare architectural state: RISCOF's B suite,
+    # the random cosim against Spike, and rvntt_bitmanip's own proof.
+    dict(step="A21", name="rev8_and_brev8_swapped",
+         why="rev8 reverses BYTES and brev8 reverses BITS WITHIN each byte. "
+             "They sound alike, they are adjacent in the encoding (imm[11:5] "
+             "0110100 for both, differing only in the rs2 field), and swapping "
+             "them is the ordinary mistake.  Both are involutions, so a "
+             "round-trip test would pass with them swapped",
+         # BOTH arms are swapped.  Pointing rev8 at brev8_v alone leaves
+         # rev8_v unreferenced and Verilator rejects the build -- and a
+         # mutation that does not compile proves nothing.
+         edits=[(BM,
+                 "      rv32i_pkg::BM_REV8:   y = rev8_v;",
+                 "      rv32i_pkg::BM_REV8:   y = brev8_v;"),
+                (BM,
+                 "      rv32i_pkg::BM_BREV8:  y = brev8_v;",
+                 "      rv32i_pkg::BM_BREV8:  y = rev8_v;")],
+         caught=["formal:rvntt_bitmanip", "random:bitmanip"]),
+
+    dict(step="A21", name="ctz_of_zero_returns_31",
+         why="the specification DEFINES clz(0) = ctz(0) = 32.  31 is the "
+             "off-by-one an implementation reaches by counting positions "
+             "instead of naming the absent bit, and it is wrong for exactly "
+             "one input out of 2^32 -- which random stimulus will not find",
+         edits=[(BM, "    ctz_v = 6'd32;", "    ctz_v = 6'd31;")],
+         caught=["formal:rvntt_bitmanip"]),
+
+    dict(step="A21", name="rotate_complement_off_by_one",
+         why="the complementary shift becomes 31 - shamt instead of -shamt, so "
+             "every rotate is off by one bit.  THE FIRST VERSION OF THIS "
+             "MUTATION WAS `6'd32 - shamt` AND IT ESCAPED -- correctly, "
+             "because on a 32-bit target `a << 32` is zero and that "
+             "formulation is a valid alternative implementation, not a bug.  "
+             "Worth recording: an escaped mutation is sometimes evidence that "
+             "the mutation was wrong, not that the checks are weak.  This one "
+             "is genuinely wrong, and rotate-by-zero -- which gen_random_prog "
+             "constructs rather than waits for -- is where it shows first",
+         edits=[(BM, "  wire [4:0] rshamt = 5'd0 - shamt;",
+                     "  wire [4:0] rshamt = 5'd31 - shamt;")],
+         caught=["formal:rvntt_bitmanip", "random:bitmanip"]),
+
+    dict(step="A21", name="bitmanip_result_never_reaches_writeback",
+         why="the EX result mux ignores is_bitmanip, so every B instruction "
+             "writes back the ALU's output instead.  The unit is correct, the "
+             "decoder is correct, and the answer is wrong -- which is what the "
+             "separate-result-lane design of MODS_A2 section 3.4 costs if the "
+             "lane is not actually selected",
+         edits=[(CORE, "    else if (id_ex_q.ctrl.is_bitmanip) ex_result = ex_bm_result;",
+                       "    else if (1'b0) ex_result = ex_bm_result;")],
+         caught=["random:bitmanip"]),
+
+    dict(step="A21", name="unary_group_ignores_the_rs2_field",
+         why="clz, ctz, cpop, sext.b and sext.h share opcode, funct3 AND "
+             "imm[11:5] and differ ONLY in the rs2 field.  Treating that field "
+             "as a don't-care makes the decoder accept rs2 = 3, 6 and 7, which "
+             "are RESERVED and must trap.  ARCHITECTURALLY INVISIBLE to every "
+             "functional test, because no functional test emits a reserved "
+             "encoding -- this is the exact class A3's 10^6-word sweep exists "
+             "for, and the only thing here that catches it",
+         edits=[(DEC,
+                 "          rv32i_pkg::RS2_SEXTH: bm_op_i = rv32i_pkg::BM_SEXTH;\n"
+                 "          default:              bm_op_i = rv32i_pkg::BM_NONE;",
+                 "          rv32i_pkg::RS2_SEXTH: bm_op_i = rv32i_pkg::BM_SEXTH;\n"
+                 "          default:              bm_op_i = rv32i_pkg::BM_CLZ;")],
+         caught=["cocotb:decode"]),
+
     # TWO A20 MUTATIONS ARE DELIBERATELY NOT IN THIS MANIFEST, and both are
     # recorded here rather than left out silently.
     #
@@ -1074,6 +1145,11 @@ RANDOM_SUITES = {
     # A14.  mul is 0.12 and not higher on purpose: a 34-cycle divide is 34
     # cycles in which nothing else is exercised, so a denser stream would trade
     # away the hazard coverage that makes these programs worth running at all.
+    # A21.  B and Zbkb at a density that makes them the majority of the
+    # program, because the mutations here are single-operation bugs and a
+    # 29-way choice means each operation appears rarely at a low density.
+    "bitmanip": dict(n=8, length=250, raw=1.0, lu=1.0, br=0.10, mul=0.0,
+                     bm=0.35, seed=0xB1000000),
     "muldiv":   dict(n=8, length=250, raw=1.0, lu=1.0, br=0.12, mul=0.12,
                     seed=0xA1400000),
 }
@@ -1230,7 +1306,7 @@ class Fixture:
                 seed = cfg["seed"] + i
                 src = gen_random_prog.generate(seed, cfg["length"], None,
                                                cfg["raw"], cfg["lu"], cfg["br"],
-                                               cfg["mul"])
+                                               cfg["mul"], cfg.get("bm", 0.0))
                 out.append(a5.assemble(src, self.work, "%s_%d" % (key, i)))
             self.elfs[key] = out
         return self.elfs[key]
@@ -1324,6 +1400,23 @@ def _run_test(kind, fx, exe, rtl_dir, work, mut_name):
             extra = ["--expect", str(fx.elfs["a9_minstret_expect"]), "--reg", "9"]
         ok, _out = ct.run(exe, elf, work, fx.image, extra)
         return ok
+    if kind.startswith("cocotb:"):
+        # A21.  The A3 decoder equivalence sweep -- 10^6 random words, RTL
+        # against model/rv32i_ref.py -- is the ONLY thing here that can see a
+        # reserved-field mutation, because no functional test ever emits a
+        # reserved encoding.  It costs about 45 seconds, which is why exactly
+        # one mutation names it.
+        #
+        # It runs against the MUTATED rtl dir, which means the flat wrapper and
+        # the package have to come from there too.
+        design = kind.split(":", 1)[1]
+        r = subprocess.run([sys.executable,
+                            os.path.join(ROOT, "tb/cocotb/run_cocotb.py"),
+                            "--design", design, "--rtl-dir", rtl_dir],
+                           cwd=os.path.join(ROOT, "tb/cocotb"),
+                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        return r.returncode == 0
+
     if kind == "a4":
         return run_program_test(exe, fx.a4_elf(), work, fx.image, "a4")
     if kind.startswith("random:"):

@@ -5,6 +5,9 @@ extension that binds them, targeting a Digilent Arty A7-100T.
 
 > **`M` is A14's, from `docs/RISC-V_NTT_MODS_A.txt`, and it OVERRIDES §1.5's
 > `RV32I`.** Read that document's §2 before trusting the original on ISA scope.
+> **`docs/RISC-V_NTT_MODS_A2.txt` OVERRIDES it again** — A20–A30 add `Zihpm`,
+> B (Zba+Zbb+Zbs), Zbkb, Zicond, `Zkr` and `Zkt`. Read its §2 as well; the two
+> modification documents are additive and neither is ever edited by the other.
 
 ---
 
@@ -40,6 +43,7 @@ Two environment constraints that will otherwise waste a cycle each:
 |---|---|
 | `docs/RISC-V_NTT.txt` | **The plan document** — the source of truth for scope, sequencing and milestones. Read §12 before claiming any milestone. **Never edit it**; corrections go in the file below or in "Known errors" here. |
 | `docs/RISC-V_NTT_MODS_A.txt` | **Track A modifications** — A14–A18 and milestones M7.1/M7.2, adding RV32IM and branch prediction. It **OVERRIDES §1.5's `RV32I`** and §A13's expected IPC/DMIPS bands; read its §2 before trusting the original on ISA scope. |
+| `docs/RISC-V_NTT_MODS_A2.txt` | **Track A modifications, round 2** — A20–A30 and milestones M7.3/M7.4/M7.5: hardware performance counters, B + Zbkb, Zicond, a 2-cycle multiply, an Fmax push, `Zkr` and `Zkt`. **OVERRIDES §1.5 a second time.** Its Appendix A is a mechanically-generated encoding table. |
 | `docs/isa-spec.md` | The frozen `Xkntt` contract: encodings, semantics, latency, exceptions. |
 | `docs/spike-xkntt.md` | The Spike fork. **Track A needs this** — Spike is the cosim reference. |
 | `docs/insn-bridge.md` | How to emit `Xkntt` instructions from C or a testbench. |
@@ -191,6 +195,9 @@ confirm it is satisfied.
 | M7 | Core-only bitstream: Fmax + Dhrystone + CoreMark on hardware | ✅ hardware-confirmed |
 | **M7.1** | **RV32IM core: `M` verified and the benchmark re-measured** (`MODS_A`) | ✅ **hardware-confirmed** |
 | **M7.2** | **Core performance: Fmax recovered and branch prediction measured** (`MODS_A`) | ✅ **hardware-confirmed** |
+| **M7.3** | **The ISA round: B, Zicond and hardware counters** (`MODS_A2`) | 🔨 A20 ✅, A21 ✅, A22–A23 to do |
+| **M7.4** | **A faster multiply and the Fmax the coprocessor can inherit** (`MODS_A2`) | not started |
+| **M7.5** | **The cryptographic guarantees: `Zkr` and `Zkt`** (`MODS_A2`) | not started |
 | M8–M16 | — | not started |
 
 **M5 is a compliance claim, and its boundaries are recorded rather than
@@ -422,3 +429,46 @@ every commit, and never leave a completed milestone unpushed. `origin` is
 > `toolchain/upstream-pins.txt` refers to **riscv-isa-sim's** default branch,
 > which really is `master`. Do not "fix" those — it would break
 > `patches.sh rebase`.
+
+**A20 and A21 are done (`MODS_A2`), and M7.3 needs A22 and A23 to close.**
+
+**A20 — six `Zihpm` counters**, validated against A18's simulation instrument
+**to the count** on both benchmarks. Before it, three of the four terms in A18's
+identity came from a Verilator observer. `mhpmcounter3–8` plus selectors,
+`mcountinhibit` and the user shadows; 9–31 decoded, read-zero, non-trapping.
+Software arming is behind `BENCH_HPM`, **off by default**, so A13/A16/A19 images
+stay reproducible. See `docs/a20-counters.md`.
+
+**A21 — B (Zba+Zbb+Zbs) and Zbkb, 34 instructions in `rvntt_bitmanip.sv`.**
+**RISCOF 118/118** (29/29 ratified-B with 3 `Zbc` tests excluded by name, 5/5
+Zbkb, 38 `I`, 8 `M`, 22 hints, 16 privilege); **riscv-formal 77/77 at depth 14**,
+up from 43 and with the depth unchanged; cosim 30/30 byte-identical against
+Spike at 25% B density. See `docs/a21-bitmanip.md`.
+
+**The unit is deliberately NOT in the ALU**, and that is the step's central
+decision: `MODS_A2` §3.4 measures the ALU result mux at a third of the critical
+path with `ex_alu_y` feeding `ex_jump_target`, so B joins at `ex_result` instead.
+`rvntt_alu.sv` is untouched.
+
+**`misa.B` is deliberately NOT set, and it is a recorded boundary.**
+riscv-config 3.18.3 cannot express the `B` letter in an ISA string at all and
+derives `misa` from single-letter extensions only, so asserting bit 1 makes the
+RISCOF config invalid and the whole compliance run vanishes. arch-test selects
+suites by **regex on the ISA string**, not from `misa`, so nothing is lost. The
+canonical string is `RV32IMZicsr_Zba_Zbb_Zbkb_Zbs` — `Zbs` must come **after**
+`Zbkb`, which riscv-config enforces and which is not alphabetical.
+
+**Two checkers were found reporting green over nothing, and both are fixed.**
+`tb/cocotb/run_cocotb.py` ended in a bare `return 0` since A1, so **every cocotb
+test reported PASS unconditionally** — which had been hiding two real failures
+since A14. And `riscof_spike_ref.py` dropped every `Z` extension from the
+reference's ISA string for the **second time**, making Spike trap on the first
+`clz` and spin to a 600 s timeout while reporting nothing. Counting A10, A11,
+A14, A19 and A20, that is **six instances of the same shape**: a report whose
+green was not about the thing it named. Both fixes put the check *in the runner*
+and were fault-injected.
+
+`tb/mutate/run_mutation.py` now has a **`--check-anchors` pre-flight** — a string
+search, 0.03 s against the full run's fourteen minutes — because mutation anchors
+have gone stale five times, always because a later step edited the line they
+point at.

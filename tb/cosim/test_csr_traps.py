@@ -42,7 +42,7 @@ def compile_s(path, tmp, name):
     r = subprocess.run(
         # rv32im as of A14: a9_minstret.S puts a multiply and a divide in its
         # loop so that minstret has to count a multi-cycle instruction once.
-        ["riscv-none-elf-gcc", "-march=rv32im_zicsr", "-mabi=ilp32",
+        ["riscv-none-elf-gcc", "-march=" + spike_asm.MARCH, "-mabi=ilp32",
          "-nostdlib", "-nostartfiles", "-T", t4.LD, "-o", elf, path],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if r.returncode != 0:

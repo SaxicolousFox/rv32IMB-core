@@ -44,6 +44,8 @@ module rvntt_decode_flat (
     output wire logic        is_csr,
     output wire logic        is_muldiv,
     output wire logic [2:0]  muldiv_op,
+    output wire logic        is_bitmanip,
+    output wire logic [4:0]  bm_op,
     output wire logic        is_xkntt,
     output wire logic [3:0]  xkntt_op,
     output wire logic        is_illegal,
@@ -65,6 +67,8 @@ module rvntt_decode_flat (
       .rs3_addr (rs3_addr)
   );
 
+  assign is_bitmanip = ctrl.is_bitmanip;
+  assign bm_op       = ctrl.bm_op;
   assign reg_write  = ctrl.reg_write;
   assign mem_read   = ctrl.mem_read;
   assign mem_write  = ctrl.mem_write;

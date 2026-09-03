@@ -17,6 +17,7 @@ was the whole reason C1 came before this.
 | `rvntt_forward.sv` | A6 | `formal_forward`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
 | `rvntt_hazard.sv` | A7 | `formal_hazard`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
 | `rvntt_branch.sv` | A8 | `formal_branch`, `cosim_directed`, `cosim_commit_log`, Vivado elaboration |
+| `rvntt_bitmanip.sv` | **A21** | `formal_bitmanip`, `riscof_arch_test` (B, Zbkb), `riscv_formal`, `cosim_commit_log`, `cocotb_decode` |
 | `rvntt_csr.sv` | A9, **A20** | `formal_csr`, `riscv_tests`, `csr_traps_minstret`, **`hpm_counters`**, Vivado elaboration |
 | `rvntt_muldiv.sv` | A14, A15 | `formal_muldiv`, `riscv_tests` (`rv32um`), `cosim_directed`, `cosim_commit_log`, `synth_ooc.sh` |
 | `rvntt_rvfi.sv` | A11, A15 | `riscv_formal` (43 checks), Vivado elaboration |
@@ -1433,3 +1434,49 @@ exploit that (`pred_hit` ignoring `flush`) is listed in
 `tb/mutate/run_mutation.py` as uncatchable with the reason, rather than given a
 catcher that does not catch it. Closing it needs an assertion in
 `rvntt_bpred`'s own formal run relating `pred_hit` to the previous cycle's flush.
+
+---
+
+## A21 — B and Zbkb, and the sixth green tick that was not about anything
+
+`MODS_A2` A21. 34 instructions; full write-up in `docs/a21-bitmanip.md`. Three
+things belong here because they are about how this project checks itself.
+
+**A new functional unit went beside the ALU, not into it, and the reason is
+measured.** `MODS_A2` §3.4 puts the ALU result mux at a third of the critical
+path, with `ex_alu_y` feeding `ex_jump_target`. `rvntt_bitmanip.sv` joins at
+`ex_result` instead — where `rvntt_muldiv` and the Zicsr read already join — so
+`alu_op_e` stays 4 bits and `rvntt_alu.sv` stays exactly as verified. **When a
+new class of instruction arrives, the question is not "where does it fit" but
+"what is it in front of".**
+
+**`tb/cocotb/run_cocotb.py` ended in `return 0` and had since A1.**
+`cocotb_tools`' `runner.test()` runs the tests, writes `results.xml`, and returns
+normally whether they passed or failed. **Every cocotb test in this project
+reported PASS unconditionally**, and it surfaced only because a broken wrapper
+printed `TESTS=6 PASS=1 FAIL=5` and a green regression row on the same run.
+Fixing it exposed two real failures hidden since A14: `test_alu_cocotb` and
+`test_immgen_cocotb` each kept their own copy of the spec-drift member count, and
+both went stale when the two multi-cycle latency constants were added. The count
+is now exported once as `ref.PKG_MEMBERS_CHECKED`.
+
+**Sixth time.** A10's RISCOF exit code, A11's sby exit code, A14's
+`synth_ooc.sh` reporting `DSP=0` over four DSPs, A19's `bench_hardware` pointing
+at a three-step-old bitstream, A20's stale mutation anchors, and now this. The
+rule earned by all six: **a tool's exit code is not its verdict unless you have
+checked that it is** — and the check belongs in the runner, not in the reader.
+
+**The Spike reference plugin dropped every Z extension, for the second time.**
+It built its ISA string from the single letters plus the literal `_zicsr`, so B's
+tests compiled `-march=rv32izbb` while Spike was told `rv32im_zicsr`, trapped on
+the first `clz`, and **spun to a 600-second timeout reporting nothing**. Its own
+header already described A14's identical bug with `mul`. It now carries all Z
+extensions and then *reassembles the string and compares it to the yaml*,
+refusing to run on any mismatch — because a reference with a smaller ISA than the
+DUT does not fail, it hangs.
+
+**And one mutation escaped for the right reason.** The first "rotate by zero"
+mutation was `6'd32 - shamt`, which is a valid alternative implementation — on a
+32-bit target `a << 32` is zero. It escaped because it was not a bug. Together
+with A20's stall-tie guard, that is twice in two steps: **an escaped mutation is
+sometimes evidence about the mutation, not about the checks.**
