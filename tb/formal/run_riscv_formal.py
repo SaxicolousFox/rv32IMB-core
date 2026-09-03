@@ -71,7 +71,13 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RF = os.path.join(ROOT, "toolchain/riscv-formal")
 CORE_NAME = "rvntt"
-CORE_DIR = os.path.join(RF, "cores", CORE_NAME)
+# H1: the core directory is settable, because the mutation harness now runs
+# mutations IN PARALLEL and each one invokes this script against its own
+# mirrored tree.  A single shared cores/rvntt would have every worker writing
+# the same checks.cfg and the same generated .sby files on top of each other --
+# which does not fail cleanly, it produces a check that describes some other
+# worker's design.  Set by --core-name; the default is unchanged.
+CORE_DIR = os.path.join(RF, "cores", CORE_NAME)   # rebound by --core-name
 WRAPPER = os.path.join(ROOT, "tb/formal/rvntt_rvfi_wrapper.sv")
 
 # Read in this order: rv32i_pkg must precede anything whose port list uses its
@@ -140,7 +146,13 @@ ISA_PARTS  = ("rv32ib", "rv32iZbkb")
 
 
 def write_isa_bundle():
-    """Generate insns/isa_rv32ib_Zbkb.txt as the union of its two parts."""
+    """Generate insns/isa_rv32ib_Zbkb.txt as the union of its two parts.
+
+    WRITTEN ATOMICALLY.  Parallel invocations all generate byte-identical
+    content, but two of them writing the same path at once can still be read
+    by a third as a truncated file.  Write-then-rename makes the observable
+    file always complete.
+    """
     insns_dir = os.path.join(RF, "insns")
     union = []
     for part in ISA_PARTS:
@@ -153,8 +165,10 @@ def write_isa_bundle():
             union += [l.strip() for l in f if l.strip()]
     union = sorted(set(union))
     dst = os.path.join(insns_dir, "isa_%s.txt" % ISA_BUNDLE)
-    with open(dst, "w") as f:
+    tmp = "%s.tmp.%d" % (dst, os.getpid())
+    with open(tmp, "w") as f:
         f.write("\n".join(union) + "\n")
+    os.replace(tmp, dst)
     return len(union)
 
 
@@ -277,10 +291,17 @@ def main():
     ap.add_argument("--jobs", "-j", type=int, default=os.cpu_count() or 4)
     ap.add_argument("--list", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--core-name", default=CORE_NAME,
+                    help="riscv-formal cores/<name> working directory. The "
+                         "mutation harness gives each parallel worker its own, "
+                         "so they cannot overwrite each other's generated "
+                         "checks.")
     ap.add_argument("--rtl-dir", default=None,
                     help="read the core from this mirrored RTL tree instead of "
                          "rtl/ (used to fault-inject this harness)")
     a = ap.parse_args()
+    global CORE_DIR
+    CORE_DIR = os.path.join(RF, "cores", a.core_name)
 
     if not os.path.isdir(RF):
         print("RVFORMAL_SKIP: toolchain/riscv-formal is not checked out.\n"

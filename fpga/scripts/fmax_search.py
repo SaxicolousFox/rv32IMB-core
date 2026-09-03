@@ -79,6 +79,22 @@ def main() -> int:
     # under the same thing.  It is recorded in the summary for that reason.
     ap.add_argument("--strategy", default="default",
                     choices=["default", "explore_postroute"])
+    # H1.  ONE implementation run at one constraint, and no search.
+    #
+    # The question "did this lever help?" does not need a converged Fmax -- it
+    # needs one point compared against a known one, and a search spends six to
+    # eight runs answering it.  A23 used this to test whether registering the
+    # HPM event bus recovered the clock (it did, by 3.58 MHz) before committing
+    # to a three-hour search, and that instinct is worth making a flag rather
+    # than a remembered trick with --max-iters 1.
+    #
+    # What it does NOT produce is an Fmax.  A single passing point is a lower
+    # bound and a single failing point is an upper bound; the plan's method is
+    # a binary search on post-route WNS and this does not replace it.  The
+    # output says so, so a probe result cannot be quoted as a measurement.
+    ap.add_argument("--probe", type=float, default=None, metavar="MHZ",
+                    help="implement once at this frequency and report "
+                         "PASS/fail with WNS.  Not a search and not an Fmax.")
     a = ap.parse_args()
 
     # ABSOLUTE, always.  build_soc.sh cds into its Windows staging directory
@@ -90,6 +106,28 @@ def main() -> int:
     # Found the hard way at A16.
     a.out = os.path.abspath(a.out)
     os.makedirs(a.out, exist_ok=True)
+
+    if a.probe is not None:
+        d = run_one(a.probe, os.path.join(a.out, "mhz_%.2f" % a.probe),
+                    a.strategy)
+        if d is None:
+            print("PROBE_FAIL: implementation did not complete at %.2f MHz"
+                  % a.probe)
+            return 1
+        ok = d["wns"] >= 0 and d["whs"] >= 0
+        print("  probe %7.3f MHz (period %.3f ns): WNS %+.3f  WHS %+.3f  %s  "
+              "[%.0fs]" % (d["mhz"], d["period"], d["wns"], d["whs"],
+                          "PASS" if ok else "fail", d["seconds"]))
+        print("  LUTs %d  FFs %d  BRAM %d  DSP %s  strategy %s"
+              % (d["luts"], d["ffs"], d["bram"], d.get("dsp", "?"), a.strategy))
+        json.dump(d, open(os.path.join(a.out, "probe.json"), "w"), indent=1)
+        print("\nPROBE_%s at %.3f MHz -- THIS IS NOT AN Fmax.  A passing probe "
+              "is a lower bound and a failing one is an upper bound; the "
+              "plan's method is a binary search on post-route WNS.  Use it to "
+              "decide whether a lever helped, then search."
+              % ("PASS" if ok else "FAIL", d["mhz"]))
+        return 0 if ok else 1
+
     history, best = [], None
     lo, hi = a.lo, a.hi
 

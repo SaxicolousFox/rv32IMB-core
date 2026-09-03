@@ -138,6 +138,56 @@ bugs than any other habit in this project, including the `kbfgs` sign error, a
 UART banner repeating 15× too fast, and a spec-drift check that would otherwise
 have passed vacuously.
 
+### Which checks to run, and when (H1)
+
+**Three tests are 84% of the regression** — `mutation_pipeline`,
+`riscv_formal` and `formal_muldiv`. Every figure below is measured on this
+machine (8 cores), not estimated:
+
+| When | What | Cost | Drops |
+|---|---|---|---|
+| Tight edit loop | `RVNTT_FAST=1 python3 tb/run_regress.py` | **249 s** | the three heavy tests |
+| After an RTL change | `RVNTT_NO_MUTATE=1 …` | **793 s** | the mutation set only |
+| Step boundary | full run | **1230–1470 s** | nothing |
+| Milestone | full, plus `RVNTT_HW=1 … -k fpga` | +~250 s | nothing |
+
+**The full-run figure is a range on purpose.** Two clean runs of the same tree
+measured 1226 s and 1468 s, with `mutation_pipeline` at 563 s and 678 s — a 20%
+spread that did not exist when it was serial, because a parallel run's wall
+clock now depends on what else the machine is doing. Quote the range, and do
+not read a slower run as a regression in the harness.
+
+`RVNTT_FAST=1` **announces itself in the summary** — "this was the EDIT-LOOP
+TIER … it is not a regression result" — because the hazard of a tier is
+somebody quoting its green line as a regression. Both 20-millisecond
+pre-flights run in every tier.
+
+**The two pre-flights are the model to copy.** `mutation_anchors` (0.03 s) and
+`isa_consistency` (0.02 s) each catch a class of failure that the expensive run
+would otherwise reveal much later or not at all — a stale anchor becomes a
+`NO-OP` after fourteen minutes, and a narrowed ISA string does not fail, it
+**hangs**. Both classes have bitten this project repeatedly (anchors five times,
+ISA strings twice). **A cheap check that fails fast reduces total time; it does
+not add to it.** When you add a checker, ask what its cheapest possible
+pre-flight is.
+
+**H1 made the mutation set 2.1× faster rather than smaller**: 1151 s → 547 s,
+by running mutations, and the baseline's 44 independent checks, in parallel
+(`-j`, default half the cores). The serial and parallel reports are
+**byte-identical** — verified — because results are printed in manifest order,
+never completion order.
+
+**Do not tier the mutation set by `--step` as a default.** `--step` is right for
+an edit loop and wrong as a policy: an escape in an untouched step would hide
+indefinitely, and a partial default is only honest with a scheduled full run,
+which this project does not have. H1 made the whole set cheap instead.
+
+**For Fmax, probe before you search.** `fmax_search.py --probe MHZ` is one
+implementation run against a known number and answers "did this lever help?".
+A full search is 6–8 runs and answers "what is Fmax?" — A23's took over three
+hours. Ask the first question first; a probe is a bound, not a measurement, and
+says so in its own output.
+
 **Background anything over ~5 minutes** and poll rather than blocking. A full
 Spike rebuild is ~15 minutes; touching `riscv/xkntt.h`, `riscv/xkntt_encoding.h`
 or `riscv/insn_template.h` triggers one, while a single `riscv/insns/*.h` or
