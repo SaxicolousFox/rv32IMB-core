@@ -55,6 +55,12 @@ module rvntt_bpred #(
     input  wire         flush,
     output wire         pred_taken,
     output wire  [31:0] pred_target,
+    // A20: did the lookup FIND an entry, regardless of what the counter then
+    // said?  `pred_taken` conflates "no entry" with "entry says not-taken", and
+    // those are different things to a performance counter: the first is a BTB
+    // capacity or warm-up problem and the second is a direction-prediction
+    // problem.  Purely observational -- nothing in the datapath reads it.
+    output wire         pred_hit,
 
     // ---- update, from a control transfer RESOLVING in EX.  Nothing else in
     // ---- the design writes either structure -- spec section 4, and section 8
@@ -185,14 +191,22 @@ module rvntt_bpred #(
 
   logic        pred_taken_q;
   logic [31:0] pred_target_q;
+  logic        pred_hit_q;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       pred_taken_q  <= 1'b0;
       pred_target_q <= 32'h0;
+      pred_hit_q    <= 1'b0;
     end else begin
       pred_taken_q  <= taken_c && !flush;
       pred_target_q <= target_c;
+      // `!flush` for the same reason pred_taken has it: after a redirect the
+      // lookup did not describe the address that will actually be fetched, so
+      // there was no lookup to hit.  Counting one here would report BTB hits
+      // for instructions that were never predicted, which is precisely the
+      // distinction this signal exists to make.
+      pred_hit_q    <= lk_hit && !flush;
     end
   end
 
@@ -217,11 +231,17 @@ module rvntt_bpred #(
   // ==========================================================================
   (* anyseq *) logic        f_pred_taken;
   (* anyseq *) logic [31:0] f_pred_target;
+  (* anyseq *) logic        f_pred_hit;
   assign pred_taken  = f_pred_taken;
   assign pred_target = f_pred_target;
+  // Free too.  A performance counter must not be able to change what retires,
+  // and leaving this abstracted is what makes riscv-formal prove that rather
+  // than assume it.
+  assign pred_hit    = f_pred_hit;
 `else
   assign pred_taken  = pred_taken_q;
   assign pred_target = pred_target_q;
+  assign pred_hit    = pred_hit_q;
 `endif
 
 `ifdef FORMAL

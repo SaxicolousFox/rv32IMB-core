@@ -300,6 +300,18 @@ def discover() -> list:
                   requires=["verilator", "riscv-none-elf-gcc", "spike"],
                   timeout=900))
 
+    # A20 (MODS_A2).  The Zihpm counters' CSR-level contract: the registers
+    # exist, are WARL where the spec says, read zero for the unimplemented
+    # indices 9..31 WITHOUT trapping, and mcountinhibit actually inhibits.
+    # Deliberately NOT the check that the six events are attributed correctly --
+    # that is A20's real done-when and it is the cross-validation against A18's
+    # simulation instrument over the benchmarks, to the count.  This one makes
+    # sure the registers are real; that one makes sure they mean what they say.
+    t.append(Test("hpm_counters", "cosim",
+                  [py, os.path.join(ROOT, "tb/cosim/test_hpm_a20.py")],
+                  requires=["verilator", "riscv-none-elf-gcc", "spike"],
+                  timeout=900))
+
     # A9, plus A14's rv32um.  The first externally authored suite the core has
     # faced: everything before it was written alongside the design and shares
     # its blind spots.  A14 added the eight M tests, and fault injection has
@@ -498,6 +510,23 @@ def discover() -> list:
                    "--parser-arg=--json",
                    "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a19/a19_regress.json")],
                   timeout=1800))
+
+    # A20 (MODS_A2).  The mutation manifest's anchors, checked as a string
+    # search in a twentieth of a second.
+    #
+    # This is separate from mutation_pipeline below ON PURPOSE.  A mutation
+    # whose search text no longer matches its file mutates nothing; the harness
+    # does report it, but only after a fourteen-minute run, in a report long
+    # enough that the NO-OP lines land above this file's own output tail.
+    # ANCHORS HAVE GONE STALE FIVE TIMES IN THIS PROJECT -- every time because a
+    # later step edited the line a mutation was anchored to, and A20 did it
+    # twice at once by putting mcountinhibit in front of the mcycle and minstret
+    # increments.  Running the check here means a rename is reported in the same
+    # second it is made, and it stays useful even with RVNTT_NO_MUTATE=1.
+    t.append(Test("mutation_anchors", "meta",
+                  [py, os.path.join(ROOT, "tb/mutate/run_mutation.py"),
+                   "--check-anchors"],
+                  timeout=120))
 
     # Mutation testing (A6+).  ON by default, at about 3m45s -- it rebuilds the
     # simulator once per mutation, and A11's entries add a riscv-formal check

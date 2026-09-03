@@ -37,6 +37,9 @@ void
 start_time(void)
 {
     cm_instret_start = bench_minstret();
+#ifdef BENCH_HPM
+    bench_hpm_read(bench_hpm_cm0);
+#endif
     cm_cycles_start  = bench_mcycle();
 }
 
@@ -44,6 +47,9 @@ void
 stop_time(void)
 {
     cm_cycles_stop  = bench_mcycle();
+#ifdef BENCH_HPM
+    bench_hpm_read(bench_hpm_cm1);
+#endif
     cm_instret_stop = bench_minstret();
 }
 

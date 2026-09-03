@@ -198,6 +198,32 @@ package rv32i_pkg;
     SRCB_IMM = 1'd1
   } alu_src_b_e;
 
+  // ------------------------------------------------------- A20: Zihpm events
+  // THIS CORE'S event numbering, not an architectural one -- the privileged
+  // spec leaves mhpmevent's encoding entirely to the implementation.  It lives
+  // in the package rather than in rvntt_csr so that the core, the counter block
+  // and the testbenches all name the same constant instead of keeping three
+  // copies of the same magic number.
+  //
+  // Event 0 counts nothing and is the reset value, so a counter software never
+  // programmed reads zero forever rather than accumulating something arbitrary.
+  // The six were chosen to close A18's identity on hardware:
+  //     mcycle = minstret + load-use + multi-cycle EX + 2 x redirects
+  // Same reason as the block at the top of this file: rvntt_csr consumes the
+  // numbering and rvntt_core consumes the bus width, so any compilation of a
+  // module that is neither reports all seven as unused.
+  /* verilator lint_off UNUSEDPARAM */
+  localparam logic [3:0] HPM_EV_NONE       = 4'd0;
+  localparam logic [3:0] HPM_EV_LOADUSE    = 4'd1;  // load-use interlock cycles
+  localparam logic [3:0] HPM_EV_EXSTALL    = 4'd2;  // multi-cycle EX stall cycles
+  localparam logic [3:0] HPM_EV_REDIRECT   = 4'd3;  // fetch redirects, all causes
+  localparam logic [3:0] HPM_EV_MISPREDICT = 4'd4;  // redirects caused by a misprediction
+  localparam logic [3:0] HPM_EV_BTB_HIT    = 4'd5;  // control transfers that hit in the BTB
+  localparam logic [3:0] HPM_EV_XFER_TAKEN = 4'd6;  // taken control transfers retired
+  localparam logic [3:0] HPM_EV_MAX        = HPM_EV_XFER_TAKEN;
+  localparam int         HPM_EV_COUNT      = 6;     // width of the event bus
+  /* verilator lint_on UNUSEDPARAM */
+
   // What the WB stage writes back.
   typedef enum logic [2:0] {
     RES_ALU   = 3'd0,
@@ -311,6 +337,11 @@ package rv32i_pkg;
     // thing connecting the two.
     logic        pred_taken;
     logic [31:0] pred_target;
+    // A20, observational only.  "The BTB had an entry for this address" is a
+    // different fact from "the predictor said taken", and separating them is
+    // what lets a mispredict be attributed to a cold/evicted entry rather than
+    // to a wrong direction.  Nothing in the datapath reads it.
+    logic        pred_hit;
   } if_id_t;
 
   typedef struct packed {
@@ -328,6 +359,7 @@ package rv32i_pkg;
     logic [31:0] rs3_data;
     logic        pred_taken;
     logic [31:0] pred_target;
+    logic        pred_hit;      // A20, observational only
   } id_ex_t;
 
   typedef struct packed {

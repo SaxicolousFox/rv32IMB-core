@@ -144,6 +144,28 @@ def parse_block(lines, idx, args):
             raise Fail("block %d: CoreMark printed no %s" % (idx, name))
         b[name] = int(m.group(1), 16)
 
+    # A20's Zihpm counters, if this image carries them.  OPTIONAL, and for
+    # exactly the reason the dual baseline below is: A13's, A16's and A19's
+    # images do not have them, and their captures must keep parsing unchanged.
+    # Present or absent as a GROUP -- a capture carrying three of the six is a
+    # truncated or corrupted capture, not a partial feature, and saying so here
+    # is cheaper than discovering it as a KeyError three functions away.
+    hpm_names = ("loaduse", "exstall", "redirect",
+                 "mispredict", "btbhit", "xfertaken")
+    for region in ("dhry", "cm"):
+        keys = ["%s_hpm_%s" % (region, n) for n in hpm_names]
+        present = [k for k in keys if k in d]
+        if present and len(present) != len(keys):
+            raise Fail("block %d: %d of the %d %s_hpm_* counters are present "
+                       "(%s) -- a capture with some of the group is truncated, "
+                       "not a different build"
+                       % (idx, len(present), len(keys), region,
+                          ", ".join(sorted(set(keys) - set(present)))))
+        for k in keys:
+            if k in d:
+                b[k] = num(d, k, idx)
+    b["has_hpm"] = "dhry_hpm_loaduse" in b
+
     # A16's dual baseline, if this image carries it.  OPTIONAL, because A13's
     # image does not have it and its captures must keep parsing unchanged -- the
     # RV32I numbers are preserved rather than overwritten (MODS_A A16), and a

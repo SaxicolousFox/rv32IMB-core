@@ -42,14 +42,32 @@ static const int BIT_CYCLES = 34;     // CORE_HZ / BAUD = 4e6 / 115200 -> 34
 
 #define SIG(n) (dut->rootp->rvntt_soc_sim_top__DOT__u_soc__DOT__u_core__DOT__##n)
 
+// A20.  The core's OWN Zihpm counters, read straight out of the CSR block so
+// that the hardware counters and this instrument's software counters can be
+// compared over the same region of the same run.
+//
+// WHY THIS IS DONE HERE RATHER THAN BY PROGRAMMING THE BENCHMARK.  A18's whole
+// value is that the instrument does not perturb what it measures.  Adding CSR
+// writes to the benchmark to arm the counters would change the instruction
+// stream, and then the number being validated would come from a different
+// program than the number validating it.  Forcing the event selectors from the
+// testbench arms the counters without the software knowing they exist, so both
+// sides describe the identical run.
+#define CSRSIG(n) (dut->rootp->rvntt_soc_sim_top__DOT__u_soc__DOT__u_core__DOT__u_csr__DOT__##n)
+
+// rv32i_pkg::HPM_EV_* minus one -- the index into the counter array this
+// testbench programs each counter to.  Kept in the same order as the enum.
+static const int HPM_N = 6;
+
 // `csrr rd, mcycle` is CSRRS rd, 0xB00, x0.  Everything but rd is fixed.
 static const unsigned MCYCLE_INSN = 0xB0002073u;
 static const unsigned RD_MASK     = 0x00000F80u;
 
 struct Snap {
     unsigned long long mcycle;
-    long long cycle, retired, id_stall, ex_stall, redirect;
+    long long cycle, retired, id_stall, ex_stall, redirect, redirect_raw;
     long long br_taken, br_ntaken, jal, jalr;
+    unsigned long long hpm[HPM_N];      // A20: the core's own counters
 };
 
 int main(int argc, char** argv) {
@@ -88,6 +106,22 @@ int main(int argc, char** argv) {
     size_t last_len = 0;
 
     long long n_cycle = 0, n_retired = 0, n_id = 0, n_ex = 0, n_redir = 0;
+    // A20.  THE SAME EVENT, COUNTED AT A DIFFERENT INSTANT, AND BOTH ARE RIGHT.
+    //
+    // n_redir above is deliberately delayed by redir_delay cycles so that a
+    // redirect's two lost cycles are charged to the region that actually lost
+    // them -- without that, the cycle identity is wrong by exactly 2 whenever a
+    // redirect fires near a region boundary.  The hardware counter has no such
+    // delay: it increments on the ex_redirect pulse, which is the only thing a
+    // counter in silicon can do.
+    //
+    // So the two disagree, per region, by the number of pulses in flight across
+    // a boundary -- measured at 1 over Dhrystone and 0 over CoreMark the first
+    // time this comparison was run.  Neither is wrong; they are answers to
+    // slightly different questions.  This raw count is the one that asks the
+    // hardware counter's question, so the cross-validation can be an EXACT
+    // match rather than a tolerance, and the delayed count keeps the identity.
+    long long n_redir_raw = 0;
     std::vector<int> redir_pipe(redir_delay > 0 ? redir_delay : 1, 0);
     long long n_bt = 0, n_bn = 0, n_jal = 0, n_jalr = 0;
     // The previous retirement, kept so a branch can be classified taken or
@@ -142,9 +176,19 @@ int main(int argc, char** argv) {
     static const char END[] = "=== end A13 ===\r\n";
     const size_t ENDN = sizeof(END) - 1;
 
+    // A20.  Arm the six counters once, after reset has released, by writing the
+    // event selectors directly.  Counter N is programmed to event N+1, matching
+    // rv32i_pkg::HPM_EV_* in order, so the array index and the event number
+    // differ by exactly one everywhere in this file.
+    bool hpm_armed = false;
+
     long c;
     for (c = 0; c < max_cycles; c++) {
         if (c == 50) dut->ck_rst = 1;
+        if (!hpm_armed && SIG(rst_n)) {
+            for (int k = 0; k < HPM_N; k++) CSRSIG(mhpmevent_q)[k] = k + 1;
+            hpm_armed = true;
+        }
 
         // Settle on the CURRENT register state, then sample: this is what the
         // cycle looks like to the logic when the coming edge fires, which is
@@ -159,6 +203,7 @@ int main(int argc, char** argv) {
             // actually holding ID/EX; id_stall would have bubbled it anyway.
             if (SIG(ex_stall))       n_ex++;
             else if (SIG(id_stall))  n_id++;
+            if (SIG(ex_redirect)) n_redir_raw++;
             if (redir_delay == 0) {
                 if (SIG(ex_redirect)) n_redir++;
             } else {
@@ -198,9 +243,11 @@ int main(int argc, char** argv) {
                     s.mcycle   = SIG(commit_wdata);
                     s.cycle    = n_cycle;   s.retired  = n_retired;
                     s.id_stall = n_id;      s.ex_stall = n_ex;
-                    s.redirect = n_redir;
+                    s.redirect = n_redir;   s.redirect_raw = n_redir_raw;
                     s.br_taken = n_bt;      s.br_ntaken = n_bn;
                     s.jal      = n_jal;     s.jalr      = n_jalr;
+                    for (int k = 0; k < HPM_N; k++)
+                        s.hpm[k] = CSRSIG(mhpmcounter_q)[k];
                     snaps.push_back(s);
                 }
             }
@@ -258,12 +305,18 @@ int main(int argc, char** argv) {
 
     FILE* p = fopen(prof_path, "w");
     if (!p) { fprintf(stderr, "cannot write %s\n", prof_path); return 1; }
-    fprintf(p, "mcycle,cycle,retired,id_stall,ex_stall,redirect,"
-               "br_taken,br_ntaken,jal,jalr\n");
-    for (const Snap& s : snaps)
-        fprintf(p, "%llu,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld\n",
+    fprintf(p, "mcycle,cycle,retired,id_stall,ex_stall,redirect,redirect_raw,"
+               "br_taken,br_ntaken,jal,jalr,"
+               "hpm_loaduse,hpm_exstall,hpm_redirect,"
+               "hpm_mispredict,hpm_btbhit,hpm_xfertaken\n");
+    for (const Snap& s : snaps) {
+        fprintf(p, "%llu,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld,%lld",
                 s.mcycle, s.cycle, s.retired, s.id_stall, s.ex_stall,
-                s.redirect, s.br_taken, s.br_ntaken, s.jal, s.jalr);
+                s.redirect, s.redirect_raw,
+                s.br_taken, s.br_ntaken, s.jal, s.jalr);
+        for (int k = 0; k < HPM_N; k++) fprintf(p, ",%llu", s.hpm[k]);
+        fprintf(p, "\n");
+    }
     fclose(p);
     if (tr) fclose(tr);
 

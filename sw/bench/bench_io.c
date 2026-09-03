@@ -33,6 +33,12 @@ unsigned int bench_mcycle(void)
 }
 unsigned int bench_minstret(void) { return 0; }
 
+/* No counters on the build host.  bench_main.c prints host=1 and the parser
+ * refuses to derive anything from a host run, so zeros here cannot be mistaken
+ * for measurements. */
+unsigned int bench_mhpmcounter(int n) { (void)n; return 0; }
+void bench_hpm_arm(void) { }
+
 #else
 
 #define MMIO_BASE   0x40000000u
@@ -52,6 +58,39 @@ unsigned int bench_mcycle(void)
     unsigned int v;
     __asm__ volatile ("csrr %0, mcycle" : "=r"(v));
     return v;
+}
+
+/* mhpmcounter3..8 are 0xB03..0xB08.  A switch rather than a computed CSR
+ * address because the CSR number is an immediate field in the instruction --
+ * there is no `csrr rd, reg` form -- so the six cases are the encoding, not a
+ * style choice. */
+unsigned int bench_mhpmcounter(int n)
+{
+    unsigned int v = 0;
+    switch (n) {
+    case 0: __asm__ volatile ("csrr %0, 0xB03" : "=r"(v)); break;
+    case 1: __asm__ volatile ("csrr %0, 0xB04" : "=r"(v)); break;
+    case 2: __asm__ volatile ("csrr %0, 0xB05" : "=r"(v)); break;
+    case 3: __asm__ volatile ("csrr %0, 0xB06" : "=r"(v)); break;
+    case 4: __asm__ volatile ("csrr %0, 0xB07" : "=r"(v)); break;
+    case 5: __asm__ volatile ("csrr %0, 0xB08" : "=r"(v)); break;
+    default: break;
+    }
+    return v;
+}
+
+/* Counter N counts event N+1, matching rv32i_pkg::HPM_EV_* in order:
+ * 1 load-use, 2 multi-cycle EX, 3 redirects, 4 mispredicts, 5 BTB hits,
+ * 6 taken transfers.  mcountinhibit is cleared so nothing is frozen. */
+void bench_hpm_arm(void)
+{
+    __asm__ volatile ("csrw 0x320, zero");     /* mcountinhibit = 0 */
+    __asm__ volatile ("csrw 0x323, %0" :: "r"(1u));
+    __asm__ volatile ("csrw 0x324, %0" :: "r"(2u));
+    __asm__ volatile ("csrw 0x325, %0" :: "r"(3u));
+    __asm__ volatile ("csrw 0x326, %0" :: "r"(4u));
+    __asm__ volatile ("csrw 0x327, %0" :: "r"(5u));
+    __asm__ volatile ("csrw 0x328, %0" :: "r"(6u));
 }
 
 unsigned int bench_minstret(void)
@@ -231,3 +270,17 @@ int printf(const char *fmt, ...)
     return n;
 }
 #endif
+
+/* A20 (MODS_A2).  The snapshot buffers and the reader, outside the host/target
+ * split because both sides need the storage -- the host build fills it with
+ * zeros through bench_mhpmcounter()'s stub and bench_main.c prints host=1, so
+ * a host capture cannot be mistaken for a measurement. */
+unsigned int bench_hpm_dhry0[BENCH_HPM_N], bench_hpm_dhry1[BENCH_HPM_N];
+unsigned int bench_hpm_cm0[BENCH_HPM_N],   bench_hpm_cm1[BENCH_HPM_N];
+
+void bench_hpm_read(unsigned int *dst)
+{
+    int i;
+    for (i = 0; i < BENCH_HPM_N; i++)
+        dst[i] = bench_mhpmcounter(i);
+}
