@@ -59,6 +59,21 @@ static const int BIT_CYCLES = 34;     // CORE_HZ / BAUD = 4e6 / 115200 -> 34
 // testbench programs each counter to.  Kept in the same order as the enum.
 static const int HPM_N = 6;
 
+// HOW MANY CYCLES AFTER A SNAPSHOT THE COUNTERS ARE READ, and it is derived
+// rather than tuned.  Reading during cycle T sees the value latched at the end
+// of T-1, and A23 registered the event bus, so that value counts pulses through
+// T-2.  This instrument's own counters, at the same instant, already include
+// cycle T.  Two cycles of skew -- so the hardware counters are read two cycles
+// after the snapshot that records everything else, and the two windows describe
+// exactly the same cycles.
+//
+// It was ONE before A23 registered the events, and the difference showed up as
+// `fetch redirects` disagreeing by exactly +1 in both regions while the other
+// six pairs stayed exact: a single redirect pulse in the boundary cycle.  Six
+// exact and one off-by-one is the signature of a window alignment problem rather
+// than a counting problem, which is why the fix is here and not a tolerance.
+static const int HPM_SAMPLE_DELAY = 2;
+
 // `csrr rd, mcycle` is CSRRS rd, 0xB00, x0.  Everything but rd is fixed.
 static const unsigned MCYCLE_INSN = 0xB0002073u;
 static const unsigned RD_MASK     = 0x00000F80u;
@@ -134,6 +149,8 @@ int main(int argc, char** argv) {
     unsigned  prev_pc = 0, prev_insn = 0;
     long long prev_cycle = 0, prev_fetch = -1;
     std::vector<Snap> snaps;
+    // (cycle at which to sample, index into snaps)
+    std::vector<std::pair<long long,int> > hpm_pending;
 
     // The retired control-transfer trace, for A19's predictor model.
     //
@@ -186,7 +203,20 @@ int main(int argc, char** argv) {
     for (c = 0; c < max_cycles; c++) {
         if (c == 50) dut->ck_rst = 1;
         if (!hpm_armed && SIG(rst_n)) {
-            for (int k = 0; k < HPM_N; k++) CSRSIG(mhpmevent_q)[k] = k + 1;
+            // BOTH the selector AND the one-hot watch mask.  A23 restructured
+            // the counter enable to read hpm_watch_q -- a registered one-hot
+            // mask maintained alongside mhpmevent_q -- so that only a single
+            // AND-OR sits between ex_redirect and the counter's clock enable.
+            // Forcing the selector alone stopped arming anything, and the
+            // hardware-against-instrument comparison read every counter as 0
+            // and said so.  That is the fixture going stale under a design
+            // change, which is the same shape as A19's bench_hardware and
+            // A20's mutation anchors; it was caught here because the check is
+            // an EXACT equality and a silent zero cannot pass it.
+            for (int k = 0; k < HPM_N; k++) {
+                CSRSIG(mhpmevent_q)[k] = k + 1;
+                CSRSIG(hpm_watch_q)[k] = 1u << k;
+            }
             hpm_armed = true;
         }
 
@@ -197,6 +227,17 @@ int main(int argc, char** argv) {
 
         if (SIG(rst_n)) {
             n_cycle++;
+            // Fill in any snapshot whose HPM sample is due this cycle.
+            for (size_t q = 0; q < hpm_pending.size(); ) {
+                if (hpm_pending[q].first == n_cycle) {
+                    Snap& t = snaps[hpm_pending[q].second];
+                    for (int k = 0; k < HPM_N; k++)
+                        t.hpm[k] = CSRSIG(mhpmcounter_q)[k];
+                    hpm_pending.erase(hpm_pending.begin() + q);
+                } else {
+                    q++;
+                }
+            }
             // The two stalls can be asserted together -- a load-use interlock
             // in ID behind a multiply in EX -- and that is ONE lost cycle, not
             // two.  ex_stall wins the attribution because it is the one
@@ -246,9 +287,13 @@ int main(int argc, char** argv) {
                     s.redirect = n_redir;   s.redirect_raw = n_redir_raw;
                     s.br_taken = n_bt;      s.br_ntaken = n_bn;
                     s.jal      = n_jal;     s.jalr      = n_jalr;
-                    for (int k = 0; k < HPM_N; k++)
-                        s.hpm[k] = CSRSIG(mhpmcounter_q)[k];
+                    // The HPM fields are filled in HPM_SAMPLE_DELAY cycles
+                    // from now; see the constant's derivation above.
+                    for (int k = 0; k < HPM_N; k++) s.hpm[k] = 0;
                     snaps.push_back(s);
+                    hpm_pending.push_back(
+                        std::make_pair(n_cycle + HPM_SAMPLE_DELAY,
+                                       (int)snaps.size() - 1));
                 }
             }
         }

@@ -195,7 +195,7 @@ confirm it is satisfied.
 | M7 | Core-only bitstream: Fmax + Dhrystone + CoreMark on hardware | ✅ hardware-confirmed |
 | **M7.1** | **RV32IM core: `M` verified and the benchmark re-measured** (`MODS_A`) | ✅ **hardware-confirmed** |
 | **M7.2** | **Core performance: Fmax recovered and branch prediction measured** (`MODS_A`) | ✅ **hardware-confirmed** |
-| **M7.3** | **The ISA round: B, Zicond and hardware counters** (`MODS_A2`) | 🔨 A20 ✅, A21 ✅, A22–A23 to do |
+| **M7.3** | **The ISA round: B, Zicond and hardware counters** (`MODS_A2`) | ✅ **hardware-confirmed** |
 | **M7.4** | **A faster multiply and the Fmax the coprocessor can inherit** (`MODS_A2`) | not started |
 | **M7.5** | **The cryptographic guarantees: `Zkr` and `Zkt`** (`MODS_A2`) | not started |
 | M8–M16 | — | not started |
@@ -472,3 +472,51 @@ and were fault-injected.
 search, 0.03 s against the full run's fourteen minutes — because mutation anchors
 have gone stale five times, always because a later step edited the line they
 point at.
+
+**M7.3 is met by A20, A21, A22 and A23 together, and is hardware-confirmed.**
+**Fmax 74.577 MHz**, **DMIPS/MHz 0.9361, CoreMark/MHz 3.1866, IPC 0.8734
+(Dhrystone) and 0.8168 (CoreMark)** at 74.576 271 MHz, over three JTAG passes
+with **all 44 integer counters identical across all three**. 5770 LUTs, 2027 FFs,
+32 BRAM tiles, 4 DSP48E1. See `docs/a23-benchmarks.md` and `.json`.
+
+**The number this round exists for: B makes Keccak 1.1953× faster.** SHAKE128,
+the same `fips202.c` compiled twice into one image, both builds with `M`, the
+only variable being B and Zbkb — 373,407 → 312,402 cycles, digests identical.
+That is plan §10 M3's *other* term, the half a hardware NTT never touches, and
+it is why B was added. **The compiler's use of B was verified rather than
+assumed**: the `rv32imzb` copy of `KeccakF1600_StatePermute` holds 100 B
+instructions and the `rv32im` copy holds 0, established by following the call
+graph after an address-range attribution got it backwards.
+
+**CoreMark/MHz rose 10.1% while its IPC FELL 2.0%**, which is `MODS_A2` §3.6's
+pre-committed P4 arriving exactly as written — B replaces sequences with single
+instructions, so retired count falls faster than cycles. Absolute CoreMark is up
+6.0% **on a slower part**. Dhrystone barely moves; its profile is string and
+branch work B has little to offer.
+
+**Fmax fell 3.8% from M7.2's 77.501 MHz, and the first search blamed the wrong
+thing.** 72 MHz failed by −0.943 ns and A21's stop rule points at the new
+bit-manipulation unit — but the post-route destination was
+`mhpmcounter_q[2][25]/CE`. **The cost was A20's counters**, whose 6:1 event mux
+sat after `ex_redirect`. A registered one-hot mask got 70.998 MHz; registering
+the event bus as well got **74.577** and moved the endpoint back onto the core's
+own redirect path. Both fixes are **provably cycle-neutral** — 32 and 36 counters
+compared, 0 differing. The residual 2.92 MHz is B's placement cost, and §3.4's
+A26 levers target that exact path; pulling them forward was deliberately
+declined, because A26's discipline is that cycle-neutral Fmax work gets its own
+before/after.
+
+**M7.3's done-when was revised once, and the revision is recorded in
+`MODS_A2` §6.** "The identity closes with residual exactly zero on hardware" is
+structurally unachievable: A18's instrument samples every counter at one instant
+and software cannot, because each counter is read by its own instruction and the
+windows nest. Measured residual is **−40 on Dhrystone — exactly the snapshot
+code's independently-measured footprint, 6 + 0 + 2×17** — and −48 on CoreMark.
+CoreMark's was −168 until its glue was made to nest the reads in the same order
+Dhrystone's does; **that difference between two regions was the finding.**
+Residual exactly zero remains the standard for the simulation instrument, where
+it still holds.
+
+**`redirects − mispredicts = 1` on both benchmarks, measured rather than
+assumed** — A19's second closure said the trap-and-MRET term was negligible, and
+the board now says it is the single `ECALL` that ends the program.

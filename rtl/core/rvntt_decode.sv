@@ -111,6 +111,11 @@ module rvntt_decode
       // in this table even though the operation exists in the unit.
       {rv32i_pkg::F7_ZBKB_PACK,  3'b100}: bm_op_r = rv32i_pkg::BM_PACK;
       {rv32i_pkg::F7_ZBKB_PACK,  3'b111}: bm_op_r = rv32i_pkg::BM_PACKH;
+      // Zicond (A22).  One funct7, two funct3 values; 000-100 and 110 under
+      // this funct7 stay illegal, which is what keeps the reserved-field rule
+      // intact for the newest extension as well as the older ones.
+      {rv32i_pkg::F7_ZICOND,     3'b101}: bm_op_r = rv32i_pkg::BM_CZEQZ;
+      {rv32i_pkg::F7_ZICOND,     3'b111}: bm_op_r = rv32i_pkg::BM_CZNEZ;
       default: bm_op_r = rv32i_pkg::BM_NONE;
     endcase
   end

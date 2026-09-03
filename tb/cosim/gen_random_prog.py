@@ -68,7 +68,12 @@ MULDIV = ["mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"]
 # A21 (MODS_A2).  B (Zba + Zbb + Zbs) and Zbkb, split by operand shape.
 BM_RR = ["sh1add", "sh2add", "sh3add", "andn", "orn", "xnor",
          "min", "minu", "max", "maxu", "rol", "ror",
-         "bset", "bclr", "binv", "bext", "pack", "packh"]
+         "bset", "bclr", "binv", "bext", "pack", "packh",
+         # Zicond (A22).  R-type, and its interesting case is rs2 == 0, which
+         # _any_src() supplies through P_X0_SOURCE -- the same mechanism that
+         # already covers x0 as an operand everywhere else.  Without a zero rs2
+         # every czero.eqz simply returns rs1 and the instruction is untested.
+         "czero.eqz", "czero.nez"]
 BM_RI = ["rori", "bseti", "bclri", "binvi", "bexti"]      # rd, rs1, shamt
 BM_UN = ["clz", "ctz", "cpop", "sext.b", "sext.h", "zext.h",
          "orc.b", "rev8", "brev8", "zip", "unzip"]        # rd, rs1
@@ -201,6 +206,13 @@ class Gen:
         if kind == 0:
             op = self.rng.choice(BM_RR)
             rs2 = self._any_src()
+            # Zicond's ONLY interesting operand is a zero rs2 -- with a nonzero
+            # one czero.eqz just returns rs1 and the instruction is untested.
+            # P_X0_SOURCE alone gave 1 zero-rs2 czero in 400 instructions, which
+            # is not coverage, so it is constructed here the way the divide edge
+            # cases and the rotate amounts are.
+            if op.startswith("czero.") and self.rng.random() < self.P_BM_EDGE:
+                rs2 = 0
             self._pad_for([rs1, rs2])
             self._emit(f"{op:<6} x{rd}, x{rs1}, x{rs2}")
         elif kind == 1:

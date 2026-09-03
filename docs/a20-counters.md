@@ -204,7 +204,40 @@ simulation plus the directed test. A23 programs the part and reports the six
 counters from hardware; until then the software path is validated but not
 exercised on silicon.
 
-**No Fmax measurement has been taken since the counters were added.** The event
-wires are derived from `ex_mispredict` and `ex_redirect`, which `MODS_A2` §3.4
-shows are on the critical path, so a cost is expected rather than assumed to be
-zero. A23 measures it.
+**The Fmax cost was measured at A23, and it was not small.** This section
+originally said only that a cost was expected. It is now known:
+
+**A23's first Fmax search failed 72 MHz by −0.943 ns**, against A19's
+77.501 MHz — and the post-route report named the destination:
+`u_core/u_csr/mhpmcounter_q_reg[2][25]/CE`. **The critical path had moved its
+endpoint into a performance counter's clock enable.**
+
+The cause is exactly where this document said to look. A20 selected each
+counter's event with a **6:1 mux indexed by `mhpmevent_q`**, and that mux sits
+*after* the event bus — two of whose six members, `REDIRECT` and `MISPREDICT`,
+are derived from `ex_redirect` and `ex_mispredict`, which `MODS_A2` §3.4
+measures at the very end of the critical path. So the counters added roughly two
+LUT levels past the point where the path already ended.
+
+**The fix is a registered one-hot mask, `hpm_watch_q`.** It is a function of
+`mhpmevent_q` and `inhibit_hpm_q` only — both registered, both written by CSR
+instructions, neither on any path that matters — and it is written **at the same
+clock edge** as the selector, so behaviour is unchanged. What remains between
+`ex_redirect` and the counter enable is a single AND-OR reduction.
+
+**A20's own stop rule offered a different fix — "register the events one stage
+later" — and it was rejected.** Delaying the events would shift every counter by
+a cycle relative to the `mcycle` read that brackets a region, and A20's
+done-when is agreement with the instrument *to the count*. The restructuring
+changes no cycle and no count: **32 counters compared across both benchmarks,
+0 differ.**
+
+**And the fix broke the instrument's fixture, which is how the check proved
+itself.** `tb_profile.cpp` armed the counters by forcing `mhpmevent_q`; once the
+enable read `hpm_watch_q` instead, forcing the selector armed nothing and every
+hardware counter read **zero**. The exact-equality comparison reported eight
+`NO`s immediately. A tolerance-based check would have reported nothing at all,
+because zero is not close to 52,000 — but a check that only warned on *large*
+disagreements would have needed someone to read it. This is the same
+fixture-goes-stale shape as A19's `bench_hardware` and A20's own mutation
+anchors, caught in seconds because the check is an equality.

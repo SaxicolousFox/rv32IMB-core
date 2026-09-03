@@ -436,9 +436,14 @@ def discover() -> list:
     # predictor and is discarded from the equality check, and two must remain
     # for the check to have anything to compare -- parse_bench_uart refuses to
     # pass vacuously when fewer do.
+    # A23 adds --keccak: the SHAKE128 dual baseline, built with and without B.
+    # It is INDEPENDENT of --arch -- both Keccak variants get M, and the only
+    # variable between them is B and Zbkb -- so it costs this test nothing but
+    # image size and keeps the two builds' digest-equality check running on
+    # every regression rather than only when someone remembers to ask.
     t.append(Test("bench_sim", "rtl",
                   [py, os.path.join(ROOT, "tb/unit/test_bench_verilator.py"),
-                   "--blocks", "3"],
+                   "--blocks", "3", "--keccak"],
                   requires=["verilator", "riscv-none-elf-gcc"], timeout=1800))
 
     # The benchmark capture parser against itself: twenty deliberately-broken
@@ -466,8 +471,8 @@ def discover() -> list:
     # have been run locally first.
     t.append(Test("bench_compare", "meta",
                   [py, os.path.join(ROOT, "tb/fpga/compare_bench_runs.py"),
-                   "--ref", os.path.join(ROOT, "fpga/build/bench_a19/a19_run1.json"),
-                   "--new", os.path.join(ROOT, "fpga/build/bench_a19/a19_run2.json"),
+                   "--ref", os.path.join(ROOT, "fpga/build/bench_a23/a23_run1.json"),
+                   "--new", os.path.join(ROOT, "fpga/build/bench_a23/a23_run2.json"),
                    "--selftest"],
                   timeout=120))
 
@@ -506,12 +511,27 @@ def discover() -> list:
                    # is the worst kind of green: it programs a real board, gets
                    # byte-perfect UART and reproducible counters, and certifies
                    # a design the repository no longer contains.
-                   "--bit", os.path.join(ROOT, "fpga/build/bench_a19/rvntt_soc_top.bit"),
-                   # 75 s, not 60: CoreMark needs 2500 iterations to clear its
-                   # own ten-second minimum -- A19's predictor made the 2200 the
-                   # M extension had called for finish in 9.81 s -- so a block is
-                   # ~13.5 s and three of them do not fit in 60.
-                   "--seconds", "75", "--send-byte", "-1",
+                   "--bit", os.path.join(ROOT, "fpga/build/bench_a23/rvntt_soc_top.bit"),
+                   # 150 s, and the number is derived rather than guessed.
+                   # CoreMark needs 2500 iterations to clear its own ten-second
+                   # minimum (A19's predictor made the M extension's 2200 finish
+                   # in 9.81 s), and A23's image runs 2,000,000 Dhrystone
+                   # iterations rather than A19's 200,000 -- ten times the run
+                   # length, for ten times the resolution on a per-run figure
+                   # that had been quoted to four significant figures off 1.6
+                   # seconds of measurement.
+                   #
+                   # At 74.576 MHz that makes a block Dhrystone 16.3 s +
+                   # CoreMark 10.5 s + NTT and Keccak + the inter-block gap,
+                   # about 27 s.  --min-blocks 3 with --warmup-blocks 1 needs
+                   # FOUR blocks, so 108 s of payload, and 150 s leaves room for
+                   # the partial block a capture always starts in the middle of.
+                   #
+                   # THIS FIXTURE FAILED AT 75 s WHEN A23 FIRST RAN IT, which is
+                   # why the derivation is written down: the image is the
+                   # measured artefact and the capture window has to accommodate
+                   # it, not the other way round.
+                   "--seconds", "150", "--send-byte", "-1",
                    "--out-name", "bench_uart.log",
                    "--parser", os.path.join(ROOT, "tb/fpga/parse_bench_uart.py"),
                    # `--parser-arg=--flag` rather than `--parser-arg --flag`:
@@ -521,7 +541,7 @@ def discover() -> list:
                    # A19: block 1 is cold.  See parse_bench_uart.py.
                    "--parser-arg=--warmup-blocks", "--parser-arg=1",
                    "--parser-arg=--json",
-                   "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a19/a19_regress.json")],
+                   "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a23/a23_regress.json")],
                   timeout=1800))
 
     # A20 (MODS_A2).  The mutation manifest's anchors, checked as a string

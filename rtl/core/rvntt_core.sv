@@ -730,19 +730,48 @@ module rvntt_core #(
   // the guard was injected and changed no count anywhere.  It is kept as an
   // explicit statement of that disjointness, not as a tie-break that does
   // work.
-  wire [rv32i_pkg::HPM_EV_COUNT-1:0] hpm_event;
-  assign hpm_event[rv32i_pkg::HPM_EV_LOADUSE    - 1] = id_stall && !ex_stall;
-  assign hpm_event[rv32i_pkg::HPM_EV_EXSTALL    - 1] = ex_stall;
-  assign hpm_event[rv32i_pkg::HPM_EV_REDIRECT   - 1] = ex_redirect;
+  wire [rv32i_pkg::HPM_EV_COUNT-1:0] hpm_event_c;
+  assign hpm_event_c[rv32i_pkg::HPM_EV_LOADUSE    - 1] = id_stall && !ex_stall;
+  assign hpm_event_c[rv32i_pkg::HPM_EV_EXSTALL    - 1] = ex_stall;
+  assign hpm_event_c[rv32i_pkg::HPM_EV_REDIRECT   - 1] = ex_redirect;
   // A redirect has three causes -- trap, MRET and misprediction.  This one
   // isolates the third, so that REDIRECT minus MISPREDICT is the trap-and-MRET
   // term.  A19's second closure said those are zero on both benchmarks; this is
   // the counter that lets that be checked on the board instead of assumed.
-  assign hpm_event[rv32i_pkg::HPM_EV_MISPREDICT - 1] = !ex_stall && ex_mispredict;
+  assign hpm_event_c[rv32i_pkg::HPM_EV_MISPREDICT - 1] = !ex_stall && ex_mispredict;
   // ex_bp_upd is already "a control transfer is resolving in EX, not stalled and
   // not trapping", which is exactly the population these two want to count over.
-  assign hpm_event[rv32i_pkg::HPM_EV_BTB_HIT    - 1] = ex_bp_upd && id_ex_q.pred_hit;
-  assign hpm_event[rv32i_pkg::HPM_EV_XFER_TAKEN - 1] = ex_bp_upd && ex_ctrl_xfer;
+  assign hpm_event_c[rv32i_pkg::HPM_EV_BTB_HIT    - 1] = ex_bp_upd && id_ex_q.pred_hit;
+  assign hpm_event_c[rv32i_pkg::HPM_EV_XFER_TAKEN - 1] = ex_bp_upd && ex_ctrl_xfer;
+
+  // A23: THE EVENT BUS IS REGISTERED, AND THAT IS A MEASURED TIMING FIX.
+  //
+  // Two of the six events are derived from ex_redirect and ex_mispredict, which
+  // MODS_A2 section 3.4 puts at the very end of the critical path, and each
+  // drives six counter clock enables that fan out to 64 flops apiece.  A23's
+  // Fmax search found the critical path's DESTINATION had become
+  // mhpmcounter_q[..]/CE and the core had lost 8% of its clock to counters that
+  // nothing in the datapath reads.
+  //
+  // Restructuring the selection into a registered one-hot mask (rvntt_csr.sv's
+  // hpm_watch_q) recovered part of it and was not enough: 72 MHz went from
+  // -0.943 ns to -0.355, and the endpoint stayed the same.  So the events
+  // themselves are registered here, which is A20's own stop rule --
+  // "a counter does not care when it is incremented as long as it is
+  // incremented exactly once".
+  //
+  // WHAT THIS COSTS, STATED PRECISELY: every counter now lags its event by one
+  // cycle.  Totals are unaffected -- one pulse in, one increment out -- and the
+  // only visible difference is at a region boundary, where an event in the
+  // final cycle before a `csrr` lands in the next region instead.  A18's
+  // instrument is taught the same one-cycle skew (tb_profile.cpp), so the
+  // hardware-against-instrument comparison stays an EXACT equality rather than
+  // becoming a tolerance.
+  logic [rv32i_pkg::HPM_EV_COUNT-1:0] hpm_event_q;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) hpm_event_q <= '0;
+    else        hpm_event_q <= hpm_event_c;
+  end
 
   rvntt_csr u_csr (
       .clk              (clk),
@@ -762,7 +791,7 @@ module rvntt_core #(
       // about.  csr_traps_minstret and riscv-tests' instret_overflow both see
       // this immediately; nothing else would.
       .instret_bump     (id_ex_q.valid && !ex_trap && !ex_stall),
-      .hpm_event        (hpm_event),
+      .hpm_event        (hpm_event_q),
       .trap_en          (ex_trap),
       .trap_pc          (id_ex_q.pc),
       .trap_cause       (ex_trap_cause),

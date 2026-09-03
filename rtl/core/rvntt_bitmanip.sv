@@ -159,7 +159,14 @@ module rvntt_bitmanip
       rv32i_pkg::BM_ZIP:    y = zip_v;
       rv32i_pkg::BM_UNZIP:  y = unzip_v;
 
-      // BM_NONE and the two unused five-bit codes.  Unreachable by
+      // Zicond (A22).  `b` is rs2 here, never an immediate -- both forms are
+      // R-type -- so the zero test is on the whole operand and not on b[4:0].
+      // That is the one way to get these wrong that still passes a casual
+      // test, because a small nonzero rs2 has b[4:0] nonzero too.
+      rv32i_pkg::BM_CZEQZ:  y = (b == 32'd0) ? 32'd0 : a;
+      rv32i_pkg::BM_CZNEZ:  y = (b != 32'd0) ? 32'd0 : a;
+
+      // BM_NONE and the unused six-bit codes.  Unreachable by
       // construction -- the decoder only ever assigns a named member -- but a
       // default arm is still required, because without one this always_comb
       // infers a latch on those codes and `unique` only warns in simulation.
@@ -265,6 +272,19 @@ module rvntt_bitmanip
       for (int i = 0; i < 4; i++)
         for (int j = 0; j < 8; j++)
           assert (y[i*8 + j] == a[i*8 + 7 - j]);
+
+    // Zicond, stated as a mask rather than as a select.  A22.  The two are
+    // exact complements, and together they always produce one operand and one
+    // zero -- which is the property constant-time code actually relies on.
+    if (op == rv32i_pkg::BM_CZEQZ) assert (y == (a & {32{|b}}));
+    if (op == rv32i_pkg::BM_CZNEZ) assert (y == (a & {32{~(|b)}}));
+    if (op == rv32i_pkg::BM_CZEQZ) assert (y == a || y == 32'd0);
+    if (op == rv32i_pkg::BM_CZNEZ) assert (y == a || y == 32'd0);
+    // THE ZERO TEST IS ON ALL 32 BITS.  b[4:0] == 0 is not the same question,
+    // and every other operation in this unit uses exactly those five bits --
+    // so this is the one asserted separately.
+    if (op == rv32i_pkg::BM_CZEQZ && b[4:0] == 5'd0 && b != 32'd0)
+      assert (y == a);
 
     // Zba, stated as a multiply rather than as a shift.
     if (op == rv32i_pkg::BM_SH1ADD) assert (y == (a * 32'd2) + b);

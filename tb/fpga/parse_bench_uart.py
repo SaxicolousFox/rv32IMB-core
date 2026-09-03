@@ -166,6 +166,29 @@ def parse_block(lines, idx, args):
                 b[k] = num(d, k, idx)
     b["has_hpm"] = "dhry_hpm_loaduse" in b
 
+    # A23's Keccak dual baseline, if this image carries it.  Optional and
+    # all-or-nothing for the same reason the HPM group above is.
+    kc_keys = ["kc_cycles_rv32im", "kc_instret_rv32im",
+               "kc_cycles_rv32imb", "kc_instret_rv32imb", "kc_check", "kc_sum"]
+    present = [k for k in kc_keys if k in d]
+    if present and len(present) != len(kc_keys):
+        raise Fail("block %d: %d of the %d kc_* fields are present -- a capture "
+                   "with some of the Keccak group is truncated"
+                   % (idx, len(present), len(kc_keys)))
+    for k in kc_keys:
+        if k in d:
+            b[k] = num(d, k, idx)
+    b["has_keccak"] = "kc_cycles_rv32im" in b
+    if b["has_keccak"]:
+        # The two builds must compute the same digest, or the "speedup" is a
+        # comparison between two different functions.
+        if b["kc_check"] != 0:
+            raise Fail("block %d: the two Keccak builds disagree on their "
+                       "output (kc_check=0x%08x) -- one of them is not "
+                       "computing SHAKE128" % (idx, b["kc_check"]))
+        b["kc_cycle_ratio"] = b["kc_cycles_rv32im"] / b["kc_cycles_rv32imb"]
+        b["kc_instret_ratio"] = b["kc_instret_rv32im"] / b["kc_instret_rv32imb"]
+
     # A16's dual baseline, if this image carries it.  OPTIONAL, because A13's
     # image does not have it and its captures must keep parsing unchanged -- the
     # RV32I numbers are preserved rather than overwritten (MODS_A A16), and a

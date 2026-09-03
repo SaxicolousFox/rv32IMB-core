@@ -188,6 +188,29 @@ module rvntt_csr (
   logic        inhibit_cy_q, inhibit_ir_q;
   logic [HPM_N-1:0] inhibit_hpm_q;
 
+  // A23.  ONE-HOT EVENT MASK PER COUNTER, REGISTERED, AND THIS IS A TIMING FIX
+  // WITH A MEASURED CAUSE.
+  //
+  // A20 selected each counter's event with a 6:1 mux indexed by mhpmevent_q.
+  // That mux sits AFTER the event bus, and two of the six events -- REDIRECT
+  // and MISPREDICT -- are derived from ex_redirect and ex_mispredict, which
+  // MODS_A2 section 3.4 measures at the very end of the critical path.  A20's
+  // own write-up predicted a cost there and said to measure it; A23's first
+  // Fmax search did, and the answer was that the critical path had MOVED ITS
+  // DESTINATION to mhpmcounter_q[2][25]/CE and 72 MHz failed by 0.943 ns.
+  //
+  // The mask is a function of mhpmevent_q and inhibit_hpm_q ONLY -- both
+  // registered, both written by CSR instructions, neither on any timing path
+  // that matters -- so computing it a cycle early costs nothing and leaves a
+  // single AND-OR reduction between ex_redirect and the counter enable.
+  //
+  // A20's stop rule offered "register the events one stage later" instead.
+  // That was rejected: delaying the events would shift every counter by a cycle
+  // relative to the mcycle read that brackets a region, and A20's done-when is
+  // agreement with the instrument TO THE COUNT.  This restructuring changes no
+  // cycle and no count at all, which the benchmark comparison checks.
+  logic [rv32i_pkg::HPM_EV_COUNT-1:0] hpm_watch_q [HPM_N];
+
   // MPP is read-only 11.  With only M-mode implemented there is no other legal
   // value, and the privileged spec's own way of discovering that is to write a
   // mode to MPP and read it back -- so hardwiring it is the correct answer, not
@@ -220,6 +243,20 @@ module rvntt_csr (
   wire hpm_uhi = (addr >= 12'hC83) && (addr <= 12'hC9F);   // hpmcounter3..31h
   wire hpm_evt = (addr >= 12'h323) && (addr <= 12'h33F);   // mhpmevent3..31
   wire hpm_any = hpm_mlo || hpm_mhi || hpm_ulo || hpm_uhi || hpm_evt;
+
+  // A23.  The mask a counter watches, from its selector and its inhibit bit.
+  // WRITTEN AT THE SAME CLOCK EDGE as mhpmevent_q and inhibit_hpm_q, never a
+  // cycle later: the increment already reads mhpmevent_q registered, so a mask
+  // updated on the same edge reproduces the old behaviour exactly.  Registering
+  // it a cycle behind would add a one-cycle programming latency, which is a
+  // behaviour change, and this is meant to be a timing change only.
+  function automatic logic [rv32i_pkg::HPM_EV_COUNT-1:0]
+      hpm_mask(input logic [3:0] ev, input logic inhibit);
+    if (inhibit || ev == rv32i_pkg::HPM_EV_NONE || ev > rv32i_pkg::HPM_EV_MAX)
+      hpm_mask = '0;
+    else
+      hpm_mask = rv32i_pkg::HPM_EV_COUNT'(1) << (ev - 4'd1);
+  endfunction
 
   wire [31:0] mcountinhibit_rd =
       {{(32-HPM_N-3){1'b0}}, inhibit_hpm_q, inhibit_ir_q, 1'b0, inhibit_cy_q};
@@ -307,21 +344,20 @@ module rvntt_csr (
       for (int i = 0; i < HPM_N; i++) begin
         mhpmcounter_q[i] <= 64'h0;
         mhpmevent_q[i]   <= rv32i_pkg::HPM_EV_NONE;
+        hpm_watch_q[i]   <= '0;
       end
     end else begin
       if (!inhibit_cy_q) mcycle_q <= mcycle_q + 64'd1;
       if (instret_bump && !minstret_written && !inhibit_ir_q)
         minstret_q <= minstret_q + 64'd1;
 
-      // A20.  One 6:1 selection per counter, so any event can be routed to any
-      // counter -- the alternative, hardwiring counter N to event N, is a WARL
-      // stretch and buys nothing at this size.  Event 0 counts nothing, which
-      // is the reset value.
+      // A20, RESTRUCTURED BY A23 FOR TIMING -- see hpm_watch above.  The
+      // selection is a one-hot AND-OR of REGISTERED masks, so the only logic
+      // between the event bus and the counter's clock enable is a single
+      // reduction.  Behaviour is bit-identical to the 6:1 mux it replaces;
+      // this is a timing change and the benchmark counts prove it.
       for (int i = 0; i < HPM_N; i++) begin
-        if (!inhibit_hpm_q[i] &&
-            mhpmevent_q[i] != rv32i_pkg::HPM_EV_NONE &&
-            mhpmevent_q[i] <= rv32i_pkg::HPM_EV_MAX &&
-            hpm_event[3'(mhpmevent_q[i] - 4'd1)] &&
+        if (|(hpm_watch_q[i] & hpm_event) &&
             !(hpm_written && hpm_sel == i[2:0]))
           mhpmcounter_q[i] <= mhpmcounter_q[i] + 64'd1;
       end
@@ -365,6 +401,10 @@ module rvntt_csr (
             // a WARL field may legally refuse a value it cannot represent.
             inhibit_ir_q  <= wdata[2];
             inhibit_hpm_q <= wdata[HPM_LAST:HPM_FIRST];
+            // Same edge, so inhibiting takes effect exactly when it used to.
+            for (int i = 0; i < HPM_N; i++)
+              hpm_watch_q[i] <= hpm_mask(mhpmevent_q[i],
+                                         wdata[HPM_FIRST + i]);
           end
           // MISA, MIP and the read-only group: WARL, and every value this core
           // supports is the one it already has.  A20's counters land here too,
@@ -378,8 +418,11 @@ module rvntt_csr (
               // The selector is WARL over 0..rv32i_pkg::HPM_EV_MAX.  An out-of-range write
               // leaves it unchanged rather than programming a counter to count
               // an event that does not exist.
-              else if (hpm_evt && wdata[3:0] <= rv32i_pkg::HPM_EV_MAX && wdata[31:4] == '0)
+              else if (hpm_evt && wdata[3:0] <= rv32i_pkg::HPM_EV_MAX && wdata[31:4] == '0) begin
                 mhpmevent_q[hpm_sel] <= wdata[3:0];
+                hpm_watch_q[hpm_sel] <= hpm_mask(wdata[3:0],
+                                                 inhibit_hpm_q[hpm_sel]);
+              end
             end
           end
         endcase

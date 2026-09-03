@@ -33,13 +33,34 @@ volatile ee_s32 seed5_volatile = 0;
 ee_u32 cm_cycles_start, cm_cycles_stop;
 ee_u32 cm_instret_start, cm_instret_stop;
 
+/* THE ORDER OF THESE THREE READS IS LOAD-BEARING, and A23 found out the hard
+ * way.  Every counter is read by its own instruction, so the three windows are
+ * nested rather than identical, and A18's identity
+ *
+ *     cycles = retired + load-use + multi-cycle EX + 2 x redirects
+ *
+ * is exact only if all four terms bracket the same instructions.  On hardware
+ * they cannot, so the residual is whatever the nesting makes it -- and the
+ * ordering decides whether that is a handful of cycles or a couple of hundred.
+ *
+ * This function used to read instret OUTSIDE the HPM snapshot, which put the
+ * two bench_hpm_read() calls -- roughly sixty instructions each -- INSIDE the
+ * retired-instruction window and outside the cycle window.  The identity then
+ * closed to -168 on hardware where Dhrystone, whose glue happens to nest the
+ * other way, closed to -38.
+ *
+ * The order below matches sw/bench/dhry_glue.c exactly: HPM outermost, then
+ * minstret, then mcycle innermost.  That makes the two regions' residuals
+ * comparable and both small, and it makes the residual a property of the read
+ * sequence rather than of which benchmark you happened to be looking at.
+ */
 void
 start_time(void)
 {
-    cm_instret_start = bench_minstret();
 #ifdef BENCH_HPM
     bench_hpm_read(bench_hpm_cm0);
 #endif
+    cm_instret_start = bench_minstret();
     cm_cycles_start  = bench_mcycle();
 }
 
@@ -47,10 +68,10 @@ void
 stop_time(void)
 {
     cm_cycles_stop  = bench_mcycle();
+    cm_instret_stop = bench_minstret();
 #ifdef BENCH_HPM
     bench_hpm_read(bench_hpm_cm1);
 #endif
-    cm_instret_stop = bench_minstret();
 }
 
 CORE_TICKS

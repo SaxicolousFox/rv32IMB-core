@@ -1102,6 +1102,37 @@ MUTATIONS = [
                  "          default:              bm_op_i = rv32i_pkg::BM_CLZ;")],
          caught=["cocotb:decode"]),
 
+    # ---------------------------------------------------------------- A22
+    dict(step="A22", name="czero_tests_only_the_low_five_bits",
+         why="the zero test reads b[4:0] instead of all 32 bits.  EVERY OTHER "
+             "OPERATION IN THIS UNIT USES EXACTLY b[4:0] -- shifts, rotates and "
+             "bit indices all do -- so this is the mistake the surrounding code "
+             "actively invites.  It is wrong only when rs2 is nonzero with its "
+             "low five bits clear, i.e. one operand in 32, which a casual test "
+             "will not draw",
+         edits=[(BM, "      rv32i_pkg::BM_CZEQZ:  y = (b == 32'd0) ? 32'd0 : a;",
+                     "      rv32i_pkg::BM_CZEQZ:  y = (b[4:0] == 5'd0) ? 32'd0 : a;")],
+         caught=["formal:rvntt_bitmanip", "random:bitmanip"]),
+
+    dict(step="A22", name="czero_eqz_and_nez_swapped",
+         why="the two are exact complements, so swapping them is invisible to "
+             "any check that only asks whether the result is rs1 or zero -- "
+             "which is what a structural property alone would ask",
+         edits=[(BM, "      rv32i_pkg::BM_CZNEZ:  y = (b != 32'd0) ? 32'd0 : a;",
+                     "      rv32i_pkg::BM_CZNEZ:  y = (b == 32'd0) ? 32'd0 : a;")],
+         caught=["formal:rvntt_bitmanip", "random:bitmanip"]),
+
+    dict(step="A22", name="zicond_reserved_funct3_becomes_legal",
+         why="funct7 0000111 has exactly two legal funct3 values, 101 and 111.  "
+             "This makes 110 decode as czero.nez as well.  ARCHITECTURALLY "
+             "INVISIBLE: no assembler emits it, so only the decoder equivalence "
+             "sweep sees it -- the same class as A21's reserved rs2 field, on "
+             "the newest extension in the core",
+         edits=[(DEC, "      {rv32i_pkg::F7_ZICOND,     3'b111}: bm_op_r = rv32i_pkg::BM_CZNEZ;",
+                      "      {rv32i_pkg::F7_ZICOND,     3'b110},\n"
+                      "      {rv32i_pkg::F7_ZICOND,     3'b111}: bm_op_r = rv32i_pkg::BM_CZNEZ;")],
+         caught=["cocotb:decode"]),
+
     # TWO A20 MUTATIONS ARE DELIBERATELY NOT IN THIS MANIFEST, and both are
     # recorded here rather than left out silently.
     #

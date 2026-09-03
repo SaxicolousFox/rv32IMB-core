@@ -34,8 +34,11 @@ def main() -> int:
     # A16.  Defaults reproduce A13's image exactly, so the mutation harness and
     # the regression keep measuring what they measured before; the two flags are
     # for validating A16's image before it costs a fourteen-minute Vivado run.
-    ap.add_argument("--arch", choices=["rv32i", "rv32im"], default="rv32i")
+    ap.add_argument("--arch", choices=["rv32i", "rv32im", "rv32imzb", "rv32imb"],
+                    default="rv32i")
     ap.add_argument("--ntt", action="store_true")
+    ap.add_argument("--hpm", action="store_true")
+    ap.add_argument("--keccak", action="store_true")
     # A19.  Cycle counts are no longer equal between report blocks: the branch
     # predictor carries state across them, and CoreMark was still moving by
     # 4 cycles in 833,259 between the second and third.  ARCHITECTURAL keys are
@@ -60,7 +63,10 @@ def main() -> int:
                         "--dhry-runs", str(a.dhry_runs),
                         "--iterations", str(a.iterations),
                         "--gap-cycles", "2000",
-                        "--arch", a.arch] + (["--ntt"] if a.ntt else []),
+                        "--arch", a.arch]
+                       + (["--ntt"] if a.ntt else [])
+                       + (["--hpm"] if a.hpm else [])
+                       + (["--keccak"] if a.keccak else []),
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     print(r.stdout.decode("utf-8", "replace").strip())
     if r.returncode != 0:
@@ -143,9 +149,17 @@ def main() -> int:
     # accounted fraction from 95.9% to 73.8% -- which reads exactly like "mcycle
     # counts slower than the clock" and is in fact "the accountant forgot a
     # quarter of a million cycles".
-    measured = sum(b["dhry_cycles"] + b["cm_cycles"] +
-                   b.get("ntt_cycles_rv32i", 0) + b.get("ntt_cycles_rv32im", 0)
-                   for b in blocks)
+    #
+    # A23 ADDED THE KECCAK PAIR AND IT HAPPENED AGAIN, to 58.0%, on the first
+    # run with --keccak.  Same message, same non-cause.  The list is now built
+    # from a NAMED SET rather than written out inline, so the next region has
+    # one obvious place to be added -- and the region names are the parser's
+    # own keys, so a region present in the capture and missing here is a typo
+    # rather than an omission.
+    REGION_CYCLE_KEYS = ("dhry_cycles", "cm_cycles",
+                         "ntt_cycles_rv32i", "ntt_cycles_rv32im",
+                         "kc_cycles_rv32im", "kc_cycles_rv32imb")
+    measured = sum(sum(b.get(k, 0) for k in REGION_CYCLE_KEYS) for b in blocks)
     # 34 cycles per bit, 10 bits per byte, at CORE_HZ/BAUD for the sim clock.
     uart_cycles = uart_bytes * 10 * (SIM_CORE_HZ // 115200)
     print("mcycle cross-check   : %d measured + %d UART = %d of %d simulated "

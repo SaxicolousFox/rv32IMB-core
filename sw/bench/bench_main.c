@@ -37,6 +37,14 @@ extern long Begin_Time, End_Time;
  * the reference NTT side by side, which the build-host and the pre-A14 image
  * cannot have -- and because A13's numbers must stay reproducible from A13's
  * image, byte for byte, rather than becoming "A13's numbers plus a section". */
+#ifdef BENCH_KECCAK
+/* A21/A23.  The half of ML-KEM a hardware NTT never touches -- plan 10 M3's
+ * other term, and the reason B was added at all. */
+extern void keccak_bench(void);
+extern unsigned int kc_cyc_m, kc_cyc_b, kc_ins_m, kc_ins_b;
+extern unsigned int kc_check, kc_sum;
+#endif
+
 #ifdef BENCH_NTT
 extern void ntt_bench(void);
 extern unsigned int ntt_cyc_i, ntt_cyc_m, ntt_ins_i, ntt_ins_m;
@@ -154,6 +162,17 @@ int main(void)
         /* The A13 markers are the report FORMAT's name, not the step's, and the
          * parser keys on them.  A16 adds a section inside the block and does not
          * rename the block. */
+#ifdef BENCH_KECCAK
+        bench_printf("--- keccak ---\r\n");
+        keccak_bench();
+        bench_printf("kc_cycles_rv32im=%u\r\n",   kc_cyc_m);
+        bench_printf("kc_instret_rv32im=%u\r\n",  kc_ins_m);
+        bench_printf("kc_cycles_rv32imb=%u\r\n",  kc_cyc_b);
+        bench_printf("kc_instret_rv32imb=%u\r\n", kc_ins_b);
+        bench_printf("kc_check=0x%08x\r\n",       kc_check);
+        bench_printf("kc_sum=0x%08x\r\n",         kc_sum);
+#endif
+
         bench_printf("=== end A13 ===\r\n");
 
         iter++;
