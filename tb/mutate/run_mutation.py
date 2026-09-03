@@ -31,6 +31,7 @@ Usage:
     python3 tb/mutate/run_mutation.py --only fwd_priority_swapped
 """
 import argparse
+import concurrent.futures as cf
 import contextlib
 import io
 import os
@@ -1218,11 +1219,17 @@ def mirror_rtl(work, name, edits):
     return d, None
 
 
-def build(work, name, rtl_dir, image):
-    """Build the traced simulator from `rtl_dir`.  Returns (exe, error)."""
+def build(work, name, rtl_dir, image, jobs=4):
+    """Build the traced simulator from `rtl_dir`.  Returns (exe, error).
+
+    `jobs` is verilator's INNER parallelism.  When the harness is running
+    mutations in parallel the two multiply, so the caller divides the machine
+    between them rather than letting 8 workers each ask for 4 cores on an
+    8-core box -- which is slower than either alone.
+    """
     build_dir = os.path.join(work, "obj_" + name)
     srcs = [os.path.join(rtl_dir, os.path.relpath(p, ROOT)) for p in t4.RTL]
-    cmd = ["verilator", "--cc", "--exe", "--build", "-j", "4", "-Wall",
+    cmd = ["verilator", "--cc", "--exe", "--build", "-j", str(jobs), "-Wall",
            "--top-module", "rvntt_trace_top",
            "--Mdir", build_dir, "--prefix", "Vrvntt_trace_top",
            "-CFLAGS", "-DVTOP=Vrvntt_trace_top",
@@ -1266,7 +1273,7 @@ def run_formal(work, name, rtl_dir, design):
     return r.returncode == 0
 
 
-def run_rvfi(rtl_dir, check):
+def run_rvfi(rtl_dir, check, core_name="rvntt"):
     """Run ONE riscv-formal check against the mutated tree.  True if it PASSES.
 
     One check per manifest entry rather than the whole set, for the same reason
@@ -1275,7 +1282,14 @@ def run_rvfi(rtl_dir, check):
     check be credited with everything.  It also keeps the cost sane -- the full
     set is about 40s wall, a single check two to ten.
     """
+    # --core-name is what makes this safe to run in parallel: run_riscv_formal
+    # generates checks.cfg and a tree of .sby files into riscv-formal's
+    # cores/<name>, and a shared one would have workers overwrite each other's
+    # generated checks -- producing not an error but a check that describes
+    # somebody else's design.  Found by running the harness parallel for the
+    # first time, where every rvfi: mutation died at once.
     r = subprocess.run([sys.executable, RVFI_RUNNER, "--rtl-dir", rtl_dir,
+                        "--core-name", core_name,
                         "--only", check, "-j", "1"],
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if r.returncode not in (0, 1):
@@ -1343,6 +1357,159 @@ class Fixture:
         return self.elfs[key]
 
 
+def prebuild_fixtures(fx, muts):
+    """Build every ELF the selected mutations will need, SERIALLY, up front.
+
+    Fixture caches lazily, which is right for a serial run and wrong for a
+    parallel one: eight workers reaching for the same uncompiled ELF would
+    compile it eight times into the same path, and the one that loses writes a
+    truncated file under another's feet.  Forcing them all first turns the
+    Fixture into read-only shared state, which is safe to inherit across a
+    fork and needs no locking anywhere.
+
+    It also moves compile errors to the front of the run, where they are a
+    setup failure rather than a mutation verdict.
+    """
+    kinds = sorted({k for m in muts for k in m["caught"]})
+    n = 0
+    for kind in kinds:
+        if kind.startswith("directed:"):
+            fx.directed_elf(kind.split(":", 1)[1]); n += 1
+        elif kind.startswith("riscv:"):
+            suite, name = kind.split(":", 1)[1].split("/")
+            fx.riscv_elf(suite, name); n += 1
+        elif kind.startswith("csr:"):
+            name = kind.split(":", 1)[1]
+            elf = fx.csr_elf(name); n += 1
+            # a9_minstret's expected count comes from Spike and is a property
+            # of the PROGRAM, so it is computed once against unmutated
+            # behaviour -- a mutation must not be able to move the goalposts.
+            if name == "a9_minstret" and "a9_minstret_expect" not in fx.elfs:
+                fx.elfs["a9_minstret_expect"] = ct.spike_commits_before(elf, "probe")
+        elif kind.startswith("random:"):
+            fx.random_elfs(kind.split(":", 1)[1]); n += 1
+        elif kind == "a4":
+            fx.a4_elf(); n += 1
+    return n, len(kinds)
+
+
+def baseline_job(spec):
+    """Run one baseline task: either a single kind, or the whole exe-using group.
+
+    THE SPLIT IS NOT ARBITRARY.  Kinds that run the simulator all read the one
+    memory image baked into the baseline exe at build time, so they cannot run
+    beside each other -- they go in a single task and stay serial within it.
+    Everything else (the formal proofs, the riscv-formal checks, cocotb, bench,
+    soc) touches neither, and those are the expensive ones: formal:rvntt_muldiv
+    alone is depth 37 and about three minutes, which was a third of this
+    harness's entire fixed cost while the baseline was serial.
+    """
+    kinds, label = spec
+    buf = io.StringIO()
+    results = []
+    try:
+        with contextlib.redirect_stdout(buf):
+            for kind in kinds:
+                ok = run_test(kind, _FX, _BASE_EXE, _BASE_DIR, _BASE_WORK,
+                              "base", quiet=True)
+                results.append((kind, ok))
+    except Exception as e:                     # noqa: BLE001 -- reported, not raised
+        return {"label": label, "results": results, "error": repr(e),
+                "output": buf.getvalue()}
+    return {"label": label, "results": results, "error": None,
+            "output": buf.getvalue()}
+
+
+# Set once in the parent before the pool starts, inherited by fork.  Passing
+# them as arguments would pickle the Fixture per task for no benefit.
+_FX = None
+_WORK = None
+_MUTS = None
+_INNER_J = 4
+_BASE_EXE = None
+_BASE_DIR = None
+_BASE_WORK = None
+
+
+def mutation_job(idx):
+    """Run one mutation end to end.  Returns a result dict; prints nothing.
+
+    All output is CAPTURED and returned so the parent can print the verdict
+    table in manifest order.  A parallel run that interleaved its own lines
+    would produce a report that is different every time, and this table is
+    meant to be diffable between runs.
+    """
+    m = _MUTS[idx]
+    res = {"idx": idx, "name": m["name"], "verdict": None, "detail": "",
+           "problem": False, "extra": ""}
+    buf = io.StringIO()
+    # Each mutation owns a directory: its RTL mirror, its object dir, its
+    # memory image and its traces all live inside it.
+    jwork = os.path.join(_WORK, "j_" + m["name"])
+    os.makedirs(jwork, exist_ok=True)
+    open(job_image(jwork), "w").write("00000000\n")
+    try:
+        with contextlib.redirect_stdout(buf):
+            d, err = mirror_rtl(jwork, m["name"], m["edits"])
+            if err:
+                res.update(verdict="NO-OP", detail=err, problem=True)
+                return res
+            exe, err = build(jwork, m["name"], d, job_image(jwork), _INNER_J)
+            if exe is None:
+                res.update(verdict="BUILD-ERR", detail=err, problem=True,
+                           extra="    A mutation that does not compile proves "
+                                 "nothing; reformulate it so every bit stays "
+                                 "referenced.")
+                return res
+
+            caught_by, missed = [], []
+            for kind in m["caught"]:
+                if run_test(kind, _FX, exe, d, jwork, m["name"]):
+                    missed.append(kind)
+                else:
+                    caught_by.append(kind)
+
+            if not m["caught"]:
+                res.update(verdict="UNCHECKED",
+                           detail="(no catcher declared -- see the manifest)")
+            elif not caught_by:
+                res.update(verdict="ESCAPED", problem=True,
+                           detail="declared: " + ", ".join(m["caught"]))
+            elif missed:
+                res.update(verdict="PARTIAL", problem=True,
+                           detail="caught: %s | NOT by: %s"
+                                  % (", ".join(caught_by), ", ".join(missed)))
+            else:
+                res.update(verdict="CAUGHT", detail=", ".join(caught_by))
+            return res
+    finally:
+        # Reclaim as we go.  86 mirrored trees and object directories is tens
+        # of gigabytes if they all survive to the end of the run, and in
+        # parallel they would all exist at once rather than one at a time.
+        shutil.rmtree(jwork, ignore_errors=True)
+        # The per-worker riscv-formal core directory lives inside the
+        # gitignored checkout rather than in jwork, so it needs removing by
+        # name.  Leaving 86 of them behind would be tidy-looking clutter that
+        # slowly fills the disk and, worse, could be picked up by a later run
+        # that expected only cores/rvntt to exist.
+        shutil.rmtree(os.path.join(ROOT, "toolchain/riscv-formal/cores",
+                                   "mut_" + m["name"]), ignore_errors=True)
+
+
+def job_image(work):
+    """The memory image for one mutation, inside ITS OWN work directory.
+
+    THIS IS WHAT MAKES PARALLELISM SAFE.  a5.run_one() copies each test's hex
+    over the image path baked into the simulator at build time, and the trace
+    it writes lands in the same directory.  A single shared image.hex was fine
+    while mutations ran one at a time and is a data race the moment they do
+    not -- one worker's program silently running under another's expectations,
+    which would show up as an ESCAPED or PARTIAL verdict that is not about the
+    mutation at all.
+    """
+    return os.path.join(work, "image.hex")
+
+
 def run_test(kind, fx, exe, rtl_dir, work, mut_name, quiet=True):
     """Run one named test.  True = PASSED (so False = caught the mutation)."""
     # A failing cosim prints its whole first-divergence report.  That is the
@@ -1406,17 +1573,22 @@ def _run_test(kind, fx, exe, rtl_dir, work, mut_name):
     if kind.startswith("formal:"):
         return run_formal(work, mut_name, rtl_dir, kind.split(":", 1)[1])
     if kind.startswith("rvfi:"):
-        return run_rvfi(rtl_dir, kind.split(":", 1)[1])
+        check = kind.split(":", 1)[1]
+        # The core directory is unique per (mutation, check).  `mut_name` alone
+        # was enough while the baseline ran its checks serially and is not now
+        # that it does not -- six baseline rvfi checks would all be "mut_base".
+        return run_rvfi(rtl_dir, check,
+                        core_name="mut_%s_%s" % (mut_name, check))
     if kind == "soc":
         return run_soc(rtl_dir, work, mut_name)
     if kind == "bench":
         return run_bench(rtl_dir, work, mut_name)
     if kind.startswith("directed:"):
         prog = kind.split(":", 1)[1]
-        return run_program_test(exe, fx.directed_elf(prog), work, fx.image, prog)
+        return run_program_test(exe, fx.directed_elf(prog), work, job_image(work), prog)
     if kind.startswith("riscv:"):
         suite, name = kind.split(":", 1)[1].split("/")
-        ok, _out = rvt.run_rtl(exe, fx.riscv_elf(suite, name), work, fx.image)
+        ok, _out = rvt.run_rtl(exe, fx.riscv_elf(suite, name), work, job_image(work))
         return ok
     if kind.startswith("csr:"):
         name = kind.split(":", 1)[1]
@@ -1429,7 +1601,7 @@ def _run_test(kind, fx, exe, rtl_dir, work, mut_name):
             if "a9_minstret_expect" not in fx.elfs:
                 fx.elfs["a9_minstret_expect"] = ct.spike_commits_before(elf, "probe")
             extra = ["--expect", str(fx.elfs["a9_minstret_expect"]), "--reg", "9"]
-        ok, _out = ct.run(exe, elf, work, fx.image, extra)
+        ok, _out = ct.run(exe, elf, work, job_image(work), extra)
         return ok
     if kind.startswith("cocotb:"):
         # A21.  The A3 decoder equivalence sweep -- 10^6 random words, RTL
@@ -1449,11 +1621,11 @@ def _run_test(kind, fx, exe, rtl_dir, work, mut_name):
         return r.returncode == 0
 
     if kind == "a4":
-        return run_program_test(exe, fx.a4_elf(), work, fx.image, "a4")
+        return run_program_test(exe, fx.a4_elf(), work, job_image(work), "a4")
     if kind.startswith("random:"):
         suite = kind.split(":", 1)[1]
         for i, elf in enumerate(fx.random_elfs(suite)):
-            if not run_program_test(exe, elf, work, fx.image, "%s#%d" % (suite, i)):
+            if not run_program_test(exe, elf, work, job_image(work), "%s#%d" % (suite, i)):
                 return False
         return True
     raise ValueError("unknown test kind: " + kind)
@@ -1463,6 +1635,11 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--step", default=None, help="only mutations for this step")
     ap.add_argument("--only", default=None, help="one mutation by name")
+    ap.add_argument("-j", "--jobs", type=int, default=0,
+                    help="run this many mutations at once (default: half the "
+                         "cores, min 2, max 6).  1 forces the old serial "
+                         "behaviour, which is what to use when a result is "
+                         "surprising and you want a clean stdout.")
     ap.add_argument("--check-anchors", action="store_true",
                     help="verify every edit's search text still matches its "
                          "file exactly once, and stop.  Takes a tenth of a "
@@ -1515,6 +1692,12 @@ def main():
         if a.check_anchors:
             return 0
 
+    if a.jobs <= 0:
+        # Half the cores, not all of them: verilator gets the other half
+        # through build()'s inner -j, and the two multiply.  Capped at 6
+        # because each worker holds a verilator build in memory.
+        a.jobs = max(2, min(6, (os.cpu_count() or 4) // 2))
+
     work = tempfile.mkdtemp(prefix="mutate_")
     problems = 0
     try:
@@ -1524,16 +1707,64 @@ def main():
 
         # ---- baseline: unmutated RTL must pass everything the manifest names.
         wanted = sorted({t for m in muts for t in m["caught"]})
-        base_dir, err = mirror_rtl(work, "base", [])
+        base_work = os.path.join(work, "j_base")
+        os.makedirs(base_work, exist_ok=True)
+        open(job_image(base_work), "w").write("00000000\n")
+        base_dir, err = mirror_rtl(base_work, "base", [])
         assert err is None, err
-        base_exe, err = build(work, "base", base_dir, image)
+        base_exe, err = build(base_work, "base", base_dir,
+                              job_image(base_work))
         if base_exe is None:
             print("BASELINE BUILD FAILED: " + err)
             return 1
+        n_elf, n_kind = prebuild_fixtures(fx, muts)
+        print("fixtures: %d ELF set(s) built up front for %d test kind(s); "
+              "running %d mutation(s) %s"
+              % (n_elf, n_kind, len(muts),
+                 "serially" if a.jobs <= 1 else "%d at a time" % a.jobs))
+
         print("baseline (unmutated RTL):")
+        global _FX, _WORK, _MUTS, _INNER_J, _BASE_EXE, _BASE_DIR, _BASE_WORK
+        _FX, _WORK, _MUTS = fx, work, muts
+        _BASE_EXE, _BASE_DIR, _BASE_WORK = base_exe, base_dir, base_work
+        _INNER_J = max(1, (os.cpu_count() or 4) // max(1, a.jobs))
+
+        # The exe-using kinds share one memory image and stay together in a
+        # single serial task; everything else is independent and gets its own.
+        exe_kinds = [k for k in wanted
+                     if k.startswith(("directed:", "riscv:", "csr:", "random:"))
+                     or k == "a4"]
+        solo_kinds = [k for k in wanted if k not in exe_kinds]
+        specs = ([(exe_kinds, "exe-group")] if exe_kinds else []) \
+              + [([k], k) for k in solo_kinds]
+
+        base_results = {}
+        if a.jobs <= 1:
+            for spec in specs:
+                r = baseline_job(spec)
+                base_results.update(dict(r["results"]))
+                if r["error"]:
+                    print("  baseline task %s raised %s" % (r["label"], r["error"]))
+                    problems += 1
+        else:
+            with cf.ProcessPoolExecutor(max_workers=a.jobs) as pool:
+                for r in [f.result() for f in
+                          cf.as_completed([pool.submit(baseline_job, sp)
+                                           for sp in specs])]:
+                    base_results.update(dict(r["results"]))
+                    if r["error"]:
+                        print("  baseline task %s raised %s"
+                              % (r["label"], r["error"]))
+                        problems += 1
+
+        # Printed in `wanted` order, not completion order, for the same reason
+        # the verdict table is: this report is meant to be diffable.
         for kind in wanted:
-            ok = run_test(kind, fx, base_exe, base_dir, work, "base",
-                          quiet=False)
+            ok = base_results.get(kind)
+            if ok is None:
+                print("  %-28s %s" % (kind, "NOT RUN <-- a baseline task died"))
+                problems += 1
+                continue
             print("  %-28s %s" % (kind, "pass" if ok else "FAIL <-- stuck-at-fail"))
             if not ok:
                 problems += 1
@@ -1544,44 +1775,48 @@ def main():
         # ---- the mutations.
         print("\n%-32s %-10s %s" % ("mutation", "verdict", "caught by"))
         print("-" * 96)
-        for m in muts:
-            d, err = mirror_rtl(work, m["name"], m["edits"])
-            if err:
-                print("%-32s %-10s %s" % (m["name"], "NO-OP", err))
-                problems += 1
-                continue
-            exe, err = build(work, m["name"], d, image)
-            if exe is None:
-                print("%-32s %-10s %s" % (m["name"], "BUILD-ERR", err))
-                print("    A mutation that does not compile proves nothing; "
-                      "reformulate it so every bit stays referenced.")
-                problems += 1
-                continue
+        # ---- run them, in parallel, and report in MANIFEST ORDER.
+        #
+        # Each mutation is independent -- mirror, build, run, report -- and
+        # shares nothing with any other now that the image and work directory
+        # are per-job and the fixtures are pre-built.  So the only reason this
+        # was serial is that it was written before it was slow.
+        #
+        # The RESULTS ARE PRINTED IN MANIFEST ORDER regardless of completion
+        # order, because this table is meant to be diffable between runs and a
+        # report whose line order depends on scheduling is not.
+        results = [None] * len(muts)
+        done = 0
+        if a.jobs <= 1:
+            for i in range(len(muts)):
+                results[i] = mutation_job(i)
+                done += 1
+        else:
+            with cf.ProcessPoolExecutor(max_workers=a.jobs) as pool:
+                futs = {pool.submit(mutation_job, i): i for i in range(len(muts))}
+                for fut in cf.as_completed(futs):
+                    r = fut.result()
+                    results[r["idx"]] = r
+                    done += 1
+                    # Progress on stderr: a fourteen-minute run that prints
+                    # nothing until the end looks hung, and stdout is the
+                    # ordered table that must stay diffable.
+                    print("  [%d/%d] %s %s" % (done, len(muts), r["verdict"],
+                                               r["name"]),
+                          file=sys.stderr, flush=True)
 
-            caught_by, missed = [], []
-            for kind in m["caught"]:
-                if run_test(kind, fx, exe, d, work, m["name"]):
-                    missed.append(kind)
-                else:
-                    caught_by.append(kind)
-
-            if not m["caught"]:
-                print("%-32s %-10s (no catcher declared -- see the manifest)"
-                      % (m["name"], "UNCHECKED"))
-            elif not caught_by:
-                print("%-32s %-10s declared: %s" % (m["name"], "ESCAPED",
-                                                    ", ".join(m["caught"])))
+        for r in results:
+            print("%-32s %-10s %s" % (r["name"], r["verdict"], r["detail"]))
+            if r["extra"]:
+                print(r["extra"])
+            if r["problem"]:
                 problems += 1
-            elif missed:
-                print("%-32s %-10s caught: %s | NOT by: %s"
-                      % (m["name"], "PARTIAL", ", ".join(caught_by),
-                         ", ".join(missed)))
-                problems += 1
-            else:
-                print("%-32s %-10s %s" % (m["name"], "CAUGHT",
-                                          ", ".join(caught_by)))
     finally:
         shutil.rmtree(work, ignore_errors=True)
+        # The baseline's own riscv-formal core directory, for the same reason
+        # the workers clean theirs up.
+        shutil.rmtree(os.path.join(ROOT, "toolchain/riscv-formal/cores",
+                                   "mut_base"), ignore_errors=True)
 
     print("\n=== %s ===" % ("ALL MUTATIONS CAUGHT AS DECLARED" if problems == 0
                             else "%d PROBLEM(S)" % problems))

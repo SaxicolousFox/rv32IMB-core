@@ -948,6 +948,69 @@ the board rather than from simulation.
 
 ---
 
+### H1 — the harness, before the harness becomes the cost
+
+**NOT AN A-NUMBER, DELIBERATELY.** The A-series is referenced by the pushed
+`m7.3-bitmanip-hw` tag and by `docs/a23-benchmarks.md`, both of which name A24
+as the Tier-1 timing probe and A26 as the cycle-neutral Fmax levers.
+Renumbering to slot this in would silently invalidate a tag annotation someone
+will land on cold, which is a worse cost than an odd letter. `H` is for
+harness; there may be more of them.
+
+**Not in the original A2 scope, and it is here because the regression grew from
+four minutes to twenty-six while M7.3 was being built.** Instrument before
+optimising applies to the workflow as much as to the core.
+
+**Where the time actually was, measured rather than assumed:** three tests were
+**84%** of a 49-test regression — `mutation_pipeline` (1284 s), `riscv_formal`
+(295 s) and `formal_muldiv` (181 s) — and the other 46 together were 180 s.
+
+**What was reclaimed.** `mutation_pipeline` rebuilt the simulator once per
+mutation and ran them one at a time, which was never a design decision: it was
+written before it was slow. It is now parallel, **1151 s → 547 s**, and the
+serial and parallel reports are **byte-identical** because results print in
+manifest order rather than completion order.
+
+Making that safe meant finding the shared mutable state, and there was more of
+it than expected: a single `image.hex` baked into every simulator at build
+time, one riscv-formal `cores/rvntt` directory that every worker generated its
+checks into, a lazily-populated ELF cache, and a generated ISA bundle written
+non-atomically. **The riscv-formal one is the instructive failure** — it did not
+corrupt anything, it made every `rvfi:` mutation die at once on the first
+parallel run, which is the good outcome. A quieter version of the same bug would
+have produced a check that described some other worker's design.
+
+**And the baseline turned out to be the real floor.** With mutations parallel,
+566 s of the run was the baseline validating 44 distinct catchers serially —
+including `formal:rvntt_muldiv` at depth 37. Seventeen of those touch neither
+the simulator nor its image, so they are now parallel too; the rest share one
+image and stay together in a single serial task.
+
+**What was NOT done, and why.** Running only the steps whose RTL changed was
+considered and rejected: `--step` is right for an edit loop and wrong as a
+default, because an escape in an untouched step would hide indefinitely and a
+partial default is only honest with a scheduled full run, which this project
+does not have. **Parallelising `tb/run_regress.py` itself was also rejected** —
+its 53 tests share build directories, `fpga/build` paths and a JTAG cable, and
+auditing all of that is exactly the shared-state hazard that had just cost this
+step three separate bugs. The concentrated 84% was worth attacking; the
+distributed 16% was not, at that risk.
+
+**Two things were added rather than removed.** `isa_consistency` (0.02 s) checks
+the ISA string in all six places it is written, plus `misa` in both — the
+failure it catches does not fail, it **hangs**, and it has cost two runs here
+already. And `fmax_search.py --probe MHZ` makes A23's one-run "did this lever
+help?" question a flag instead of a remembered trick, and says in its own output
+that a probe is a bound and not an Fmax.
+
+**Realistic expectation:** roughly half the regression back, and nothing given
+up. **Stop rule:** no change that makes a check weaker, later, or conditional on
+someone remembering to run it. **Done when:** the parallel and serial mutation
+reports are byte-identical, the tiers are documented with measured numbers
+rather than estimates, and the full run is still the default.
+
+---
+
 ### Phase 2 — performance (M7.4)
 
 ### A24 — The Tier-1 timing probe: what Fmax is Track B allowed to inherit?

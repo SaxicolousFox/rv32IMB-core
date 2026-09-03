@@ -19,6 +19,19 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 PASS, FAIL, SKIP, XFAIL = "PASS", "FAIL", "SKIP", "XFAIL"
 
+# H1.  THE EDIT-LOOP TIER.  Three tests are 84% of the regression's wall
+# clock -- mutation_pipeline, riscv_formal and formal_muldiv -- and none of the
+# three tells you anything about the edit you just made to a testbench or a
+# document.  RVNTT_FAST=1 drops exactly those three and keeps everything else,
+# INCLUDING both 20-millisecond pre-flights.
+#
+# It is deliberately NOT the default and it announces itself in the summary,
+# because the whole hazard of a tier is someone quoting its green line as a
+# regression result.  RVNTT_NO_MUTATE=1 remains the middle tier: it drops only
+# the mutation set and keeps both formal runs.
+FAST = os.environ.get("RVNTT_FAST") == "1"
+FAST_SKIPS = ["mutation_pipeline", "riscv_formal", "formal_muldiv"]
+
 @dataclass
 class Test:
     name: str
@@ -544,6 +557,19 @@ def discover() -> list:
                    "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a23/a23_regress.json")],
                   timeout=1800))
 
+    # H1 (MODS_A2).  The ISA string, in all six places it is written, plus
+    # misa in the two places IT is written.  Twenty milliseconds.
+    #
+    # Same shape and same justification as mutation_anchors below: the failure
+    # it catches -- one source naming a smaller ISA than the DUT -- does not
+    # produce a failing test.  It produces a HANG, on the first instruction the
+    # reference does not know, and that has cost two runs in this project
+    # already (A14 with `mul`, A21 with `clz`).  A cheap pre-flight that fails
+    # in a twentieth of a second beats an expensive run that reports nothing.
+    t.append(Test("isa_consistency", "meta",
+                  [py, os.path.join(ROOT, "tb/unit/test_isa_consistency.py")],
+                  timeout=120))
+
     # A20 (MODS_A2).  The mutation manifest's anchors, checked as a string
     # search in a twentieth of a second.
     #
@@ -561,14 +587,29 @@ def discover() -> list:
                    "--check-anchors"],
                   timeout=120))
 
-    # Mutation testing (A6+).  ON by default, at about 3m45s -- it rebuilds the
-    # simulator once per mutation, and A11's entries add a riscv-formal check
-    # each on top, so it is the most expensive thing here by a wide margin.  It is on anyway because it is the only test that checks the
-    # OTHER tests, and an unrun mutation manifest rots silently: A6's forwarding
-    # proof was checking itself, and A8's directed test never touched the
-    # comparator's rs2 port, and neither was visible any other way.  Set
-    # RVNTT_NO_MUTATE=1 to skip it during a tight edit loop.
-    if os.environ.get("RVNTT_NO_MUTATE") != "1":
+    # Mutation testing (A6+).  ON by default, and still the most expensive
+    # thing here -- but H1 made it PARALLEL and it is now about 9 minutes for
+    # 86 mutations rather than 21.
+    #
+    # WHY IT STAYS ON AND STAYS WHOLE.  It is the only test that checks the
+    # OTHER tests, and an unrun manifest rots silently: A6's forwarding proof
+    # was checking itself, and A8's directed test never touched the comparator's
+    # rs2 port, and neither was visible any other way.  Running only the steps
+    # whose RTL changed was considered at H1 and REJECTED: `--step` exists and
+    # is right for an edit loop, but as a default it would let an escape in an
+    # untouched step hide indefinitely, and there is no scheduler here to
+    # guarantee the full set ever runs.  A partial default needs a nightly to
+    # be honest, and this project does not have one.
+    #
+    # What H1 did instead was make the whole set cheap enough not to need
+    # tiering: 1284s -> 547s by running mutations, and the baseline's 44
+    # independent checks, in parallel.  See tb/mutate/run_mutation.py.
+    #
+    # RVNTT_NO_MUTATE=1 still skips it for a tight edit loop, and
+    # `mutation_anchors` above still runs in 0.03s either way -- so the rot
+    # mode that has actually bitten this project five times (a stale anchor) is
+    # caught even when the full set is skipped.
+    if not FAST and os.environ.get("RVNTT_NO_MUTATE") != "1":
         t.append(Test("mutation_pipeline", "meta",
                       [py, os.path.join(ROOT, "tb/mutate/run_mutation.py")],
                       requires=["verilator", "riscv-none-elf-gcc", "spike",
@@ -631,6 +672,11 @@ def main() -> int:
     a = ap.parse_args()
 
     tests = discover()
+    if FAST:
+        # Applied to the built list rather than at each registration, so the
+        # set of skipped tests is one list in one place and cannot drift from
+        # what the summary banner claims was skipped.
+        tests = [t for t in tests if t.name not in FAST_SKIPS]
     if a.filter:
         tests = [t for t in tests if a.filter in t.name or a.filter == t.group]
     if a.list:
@@ -687,6 +733,16 @@ def main() -> int:
 
     n = {s: sum(1 for r in results if r.status == s) for s in (PASS, FAIL, SKIP, XFAIL)}
     print(f"passed {n[PASS]}   xfail {n[XFAIL]}   skipped {n[SKIP]}   FAILED {n[FAIL]}")
+    # H1.  A tier that omits checks must SAY SO in the line people quote, not
+    # only in the invocation they have already forgotten.  Three tests are 84%
+    # of the regression and RVNTT_FAST drops all three; a run that did that and
+    # then printed "REGRESSION PASSED" unqualified would be exactly the kind of
+    # green this project keeps getting burned by.
+    if FAST:
+        print("*** RVNTT_FAST=1: this was the EDIT-LOOP TIER.  Not run: "
+              + ", ".join(FAST_SKIPS) + ".")
+        print("*** It is not a regression result.  Run the full set at a step "
+              "boundary before claiming anything.")
     if n[SKIP]:
         print("note: SKIPs are missing tools, not passes -- see status above.")
     if n[FAIL]:
