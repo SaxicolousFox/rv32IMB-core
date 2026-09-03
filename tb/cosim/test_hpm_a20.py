@@ -50,7 +50,7 @@ CASES = {
 def compile_s(path, tmp, name):
     elf = os.path.join(tmp, name + ".elf")
     r = subprocess.run(
-        ["riscv-none-elf-gcc", "-march=rv32im_zicsr", "-mabi=ilp32",
+        ["riscv-none-elf-gcc", "-march=" + spike_asm.MARCH, "-mabi=ilp32",
          "-nostdlib", "-nostartfiles", "-T", t4.LD, "-o", elf, path],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if r.returncode != 0:

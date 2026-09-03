@@ -99,10 +99,46 @@ class spike_ref(pluginTemplate):
         # The single-letter extensions, taken from the yaml rather than
         # written down.  [A-WY] deliberately excludes X and Z, which introduce
         # multi-letter names and must not be swallowed as letters.
-        m = re.match(r"RV32([A-WY]*)", ispec["ISA"].upper())
-        self.isa = 'rv32' + (m.group(1).lower() if m and m.group(1) else 'i')
-        if "zicsr" in ispec["ISA"].lower():
-            self.isa += '_zicsr'
+        raw = ispec["ISA"]
+        m = re.match(r"RV32([A-WY]*)", raw.upper())
+        letters = (m.group(1).lower() if m and m.group(1) else 'i')
+
+        # EVERY Z EXTENSION, not just zicsr.  The previous version tested for
+        # the literal string "zicsr" and appended it, which was true and stayed
+        # true right up until A21 added Zba/Zbb/Zbkb/Zbs -- at which point the
+        # tests were compiled -march=rv32izbb from the suite's own ISA field
+        # while Spike was told rv32im_zicsr, took an illegal-instruction trap on
+        # the first `clz`, and SPUN UNTIL THE 600-SECOND TIMEOUT.  Three tests
+        # at a time, 118 tests, on a run that reports nothing while it happens.
+        #
+        # THAT IS THE SECOND TIME THIS EXACT BUG HAS BEEN IN THIS FUNCTION --
+        # the header above describes A14's version of it, with `mul` instead of
+        # `clz`.  Both times the cause was the same: a derivation that keeps
+        # only the extensions someone thought to enumerate.  So this one keeps
+        # ALL of them and then CHECKS that it did.
+        zexts = [z.lower() for z in re.findall(r"Z[a-z]+", raw, re.I)]
+        self.isa = 'rv32' + letters + ''.join('_' + z for z in zexts)
+
+        # The completeness check that makes the above a fix rather than a patch.
+        # Reconstructing the yaml's own string from the parsed pieces and
+        # comparing catches ANY extension this parser does not understand,
+        # including ones that do not exist yet -- which is the only way to stop
+        # this happening a third time.  Refusing to run is the correct
+        # behaviour: a reference model that quietly implements less than the
+        # DUT does not fail, it HANGS, and a hang reports nothing at all.
+        rebuilt = ('rv32' + letters + ''.join(zexts)).lower()
+        if rebuilt != raw.replace('_', '').lower():
+            raise SystemExit(
+                "spike_ref: cannot express the DUT's ISA to Spike.\n"
+                "  yaml says : %s\n"
+                "  parsed as : %s\n"
+                "  rebuilt   : %s\n"
+                "Something in the ISA string is neither a single-letter\n"
+                "extension nor a Z-extension, and running with the parsed\n"
+                "subset would give the reference a SMALLER ISA than the DUT --\n"
+                "which does not fail, it hangs on an illegal instruction."
+                % (raw, self.isa, rebuilt))
+
         logger.info("spike_ref: reference ISA is %s (from %s)"
                     % (self.isa, ispec["ISA"]))
         self.compile_cmd += ' -mabi=ilp32'

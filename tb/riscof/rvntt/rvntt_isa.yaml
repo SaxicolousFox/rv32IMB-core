@@ -6,8 +6,21 @@
 # Zifencei and fence_i is selected and fails.  Understating it silently drops
 # coverage instead.
 #
-# So this file says exactly rv32im_zicsr, machine mode only -- the same string
-# the toolchain and Spike use.  M was added by MODS_A A14, and the note this
+# So this file says exactly RV32IMZicsr_Zba_Zbb_Zbkb_Zbs, machine mode only.
+#
+# THE ORDER IS NOT ARBITRARY: riscv-config 3.18.3 requires Zbs to come AFTER
+# Zbkb ("Within the Zb category extension Zbs must occur after Zbkb"), and it
+# rejects the `B` letter outright.  Both were found by running it, not by
+# reading the schema.
+#
+# A21 ADDED B AND Zbkb, AND THE SUITE SELECTION HAS A TRAP IN IT.  The
+# arch-test B directory is the OLD grouping and contains clmul, clmulh and
+# clmulr, which are Zbc -- ratified B is Zba + Zbb + Zbs and has no carry-less
+# multiply.  Those three are excluded BY NAME, exactly as the pmp tests are and
+# for the same reason (riscof 1.25.3 ignores the `verify` clause they would
+# otherwise use to deselect themselves).  The result is reported as 29/29 of the
+# ratified-B tests with 3 Zbc tests excluded -- never as 32/32, and never as
+# "B passes".  MODS_A2 section 3.1 has the reasoning.  M was added by MODS_A A14, and the note this
 # file used to carry -- "claim M and the multiply tests are selected and fail"
 # -- is now the INTENT rather than the warning: the eight rv32i_m/M tests are
 # selected on purpose, and they pass.
@@ -19,12 +32,16 @@
 # points nowhere near the cause.
 hart_ids: [0]
 hart0:
-  ISA: RV32IMZicsr
+  ISA: RV32IMZicsr_Zba_Zbb_Zbkb_Zbs
   physical_addr_sz: 32
   User_Spec_Version: '2.3'
   supported_xlen: [32]
   misa:
-    reset-val: 0x40001100      # MXL = 1 (RV32), extension bits I and M
+    reset-val: 0x40001100      # MXL = 1 (RV32), extension bits I and M.
+                               # NOT bit 1 (B), although B is implemented --
+                               # riscv-config 3.18.3 cannot express the B letter
+                               # and derives misa from single-letter extensions
+                               # only.  rvntt_csr.sv has the full reasoning.
     rv32:
       accessible: true
       mxl:

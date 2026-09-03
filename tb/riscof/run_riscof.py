@@ -62,6 +62,38 @@ EXCLUDED_SUITES = {
            "excluded here instead.",
 }
 
+# A21 (MODS_A2).  Individual tests excluded from suites that are otherwise kept.
+#
+# THE arch-test `B` DIRECTORY IS THE OLD GROUPING.  Ratified B is Zba + Zbb +
+# Zbs and contains no carry-less multiply, but the suite predates that split and
+# ships clmul, clmulh and clmulr, which are Zbc.  Selecting the B suite
+# therefore selects three tests for an extension this core does not implement.
+#
+# They are excluded BY NAME, exactly as `pmp` is above and for the same reason.
+# The result is reported as 29/29 of the ratified-B tests with 3 Zbc tests
+# excluded -- NEVER as 32/32, and never as "B passes".  The dishonest third
+# option is claiming the suite passes without saying which tests ran, and that
+# is the shape this project has hit six times now.
+EXCLUDED_TESTS = {
+    ("B", "clmul-01"):  "Zbc, not ratified B. The arch-test B directory is the "
+                        "pre-split grouping; clmul/clmulh/clmulr are Zbc and "
+                        "this core implements Zba+Zbb+Zbs only.",
+    ("B", "clmulh-01"): "Zbc, not ratified B -- see clmul-01.",
+    ("B", "clmulr-01"): "Zbc, not ratified B -- see clmul-01.",
+}
+
+# Suites where only a NAMED SUBSET is kept.  The arch-test `K` directory is the
+# scalar-cryptography suite: 55 tests, of which exactly five -- pack, packh,
+# brev8, zip and unzip -- are the Zbkb instructions that Zbb does not already
+# cover. The other 50 are AES, SHA2, SHA3, SM3 and SM4, which this core does not
+# implement and does not claim to.  Keeping the five and naming the boundary is
+# the honest form; running all 55 and reporting 5/55 is not.
+SUITE_KEEP_ONLY = {
+    "K": ({"pack-01", "packh-01", "brev8_32-01", "zip-01", "unzip-01"},
+          "the Zbkb subset. The rest of K is AES/SHA/SM3/SM4, which this core "
+          "does not implement -- see rvntt_isa.yaml's ISA string."),
+}
+
 CONFIG = """[RISCOF]
 ReferencePlugin=spike_ref
 ReferencePluginPath={here}/spike_ref
@@ -125,9 +157,22 @@ def filter_testlist(path):
     out = []
     for b in blocks:
         body = "".join(b)
-        m = re.search(r"rv32i_m/([A-Za-z0-9_]+)/src/", body)
-        if m and m.group(1) in EXCLUDED_SUITES:
-            continue
+        m = re.search(r"rv32i_m/([A-Za-z0-9_]+)/src/([A-Za-z0-9_.\-]+)\.S", body)
+        if m:
+            suite, test = m.group(1), m.group(2)
+            if suite in EXCLUDED_SUITES:
+                continue
+            if (suite, test) in EXCLUDED_TESTS:
+                continue
+            keep = SUITE_KEEP_ONLY.get(suite)
+            if keep is not None and test not in keep[0]:
+                continue
+        else:
+            # A block whose path does not parse is not silently kept: the whole
+            # point of this filter is that what runs is known by name.
+            m2 = re.search(r"rv32i_m/([A-Za-z0-9_]+)/src/", body)
+            if m2 and m2.group(1) in EXCLUDED_SUITES:
+                continue
         out.append(body)
     text_out = "".join(out)
     open(path, "w").write(text_out)
@@ -295,7 +340,26 @@ def main():
             print("  %-12s %3d passed, %3d failed" % (name, p, f))
         for name, why in sorted(EXCLUDED_SUITES.items()):
             print("  %-12s EXCLUDED  %s" % (name, why))
+        # A21.  The per-test exclusions are printed too, and that is the whole
+        # point of having them by name: a compliance line that says "B 29
+        # passed" without saying what was NOT run is the report this project has
+        # already been burned by six times.  The reader should not have to open
+        # the source to find out what 29 means.
+        for (suite, test), why in sorted(EXCLUDED_TESTS.items()):
+            print("  %-12s EXCLUDED  %s -- %s" % (suite, test, why))
+        for suite, (keep, why) in sorted(SUITE_KEEP_ONLY.items()):
+            print("  %-12s KEPT ONLY %s -- %s"
+                  % (suite, ", ".join(sorted(keep)), why))
         print("riscof: %d passed, %d failed" % (passed, failed))
+        # And the count is stated in the form the claim will be made in, so the
+        # write-up cannot round "29 of the ratified-B tests" up to "the B suite
+        # passes".
+        if "B" in per_suite:
+            print("  NOTE: B is 29/29 of the RATIFIED-B tests (Zba+Zbb+Zbs). "
+                  "The arch-test B directory also ships 3 Zbc tests "
+                  "(clmul/clmulh/clmulr), which are NOT part of ratified B and "
+                  "are excluded above.  Report this as 29/29 ratified-B, never "
+                  "as 32/32 and never as \"B passes\".")
         if not a.no_save_report and a.rtl_dir is None:
             print("report saved to " + os.path.relpath(REPORT_DEST, ROOT))
 

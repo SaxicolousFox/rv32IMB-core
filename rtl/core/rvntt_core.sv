@@ -792,11 +792,31 @@ module rvntt_core #(
   // The value is only correct on the cycle ex_md_done is high -- but that is
   // the only cycle EX/MEM latches anything, because ex_stall bubbles it on
   // every other one.
+  // ---- A21: the bit-manipulation unit --------------------------------------
+  // Its operands are the SAME two the ALU sees, so it costs no new forwarding
+  // path and no new operand mux: ex_alu_a and ex_alu_b already carry rs1 and
+  // either rs2 or the immediate, and the immediate is where rori's and bseti's
+  // shift amount comes from.  One unit, one result, joined below.
+  //
+  // NOT joined at ex_alu_y, and that is the whole design decision -- MODS_A2
+  // section 3.4.  ex_alu_y feeds ex_jump_target, which feeds the mispredict
+  // comparison and the fetch redirect, and it is a third of the measured
+  // critical path.  ex_result terminates at the EX/MEM pipeline register and
+  // does not.
+  logic [31:0] ex_bm_result;
+  rvntt_bitmanip u_bitmanip (
+      .op (id_ex_q.ctrl.bm_op),
+      .a  (ex_alu_a),
+      .b  (ex_alu_b),
+      .y  (ex_bm_result)
+  );
+
   logic [31:0] ex_result;
   always_comb begin
-    if      (id_ex_q.ctrl.is_muldiv) ex_result = ex_md_result;
-    else if (id_ex_q.ctrl.is_csr)    ex_result = ex_csr_rdata;
-    else                             ex_result = ex_alu_y;
+    if      (id_ex_q.ctrl.is_muldiv)  ex_result = ex_md_result;
+    else if (id_ex_q.ctrl.is_bitmanip) ex_result = ex_bm_result;
+    else if (id_ex_q.ctrl.is_csr)     ex_result = ex_csr_rdata;
+    else                              ex_result = ex_alu_y;
   end
 
   // ---- traps (A9) ----------------------------------------------------------

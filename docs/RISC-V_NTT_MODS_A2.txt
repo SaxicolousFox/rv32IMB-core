@@ -117,7 +117,7 @@ without diffing anything.
 
 | Original | Marker | What now holds |
 |---|---|---|
-| §1.5 *"RV32I + `Zicsr` + `Zicntr`, machine mode only"*, as already overridden by `MODS_A` §2 to RV32IM | **OVERRIDES** *(second time)* | **RV32IM + Zba + Zbb + Zbs + Zbkb + Zicond + Zicsr + Zicntr + Zihpm + Zkr + Zkt**, machine mode only. Still no `A`, `F`, `D`, **no `C`** (§3.1), no `Zifencei`, no PMP, no user mode, no supervisor mode. `misa` becomes `0x40001104` — `I`, `M` and **`B`**; see the note below the table, which is load-bearing. |
+| §1.5 *"RV32I + `Zicsr` + `Zicntr`, machine mode only"*, as already overridden by `MODS_A` §2 to RV32IM | **OVERRIDES** *(second time)* | **RV32IM + Zba + Zbb + Zbs + Zbkb + Zicond + Zicsr + Zicntr + Zihpm + Zkr + Zkt**, machine mode only. Still no `A`, `F`, `D`, **no `C`** (§3.1), no `Zifencei`, no PMP, no user mode, no supervisor mode. `misa` stays `0x40001100` — `I` and `M` only, **with `B` deliberately not asserted**; see the note below the table, which is load-bearing and was rewritten after A21 measured it. |
 | §1.5's CSR list | **EXTENDS** | Adds `mhpmcounter3–31` / `mhpmcounter3h–31h`, `mhpmevent3–31`, `mcountinhibit`, and `seed` (`0x015`). `mcounteren` remains absent — there is no user mode to enable counters for. |
 | §1.6 *"Add a BTB + 2-bit bimodal predictor later, as a measured improvement"* | **CLARIFIES** | Satisfied by A19 and closed. This round does not add a second predictor. It does change *what the existing one is worth*, because Zicond removes branches — see §3.5 and A22, which re-measures rather than re-tunes. |
 | §1.4 *"64 KB instruction and 64 KB data memory is 128 KB"* | **UNCHANGED — and this is a deliberate re-affirmation, not an omission** | A17 measured 64 KB as worth **≥ +3.5 MHz** and did not adopt it, because the Tier-2 coprocessor's buffers do not exist yet and cannot be sized against an array already given away. **This round re-examined that decision under a 110 MHz target and reaches the same answer.** There is therefore **no third OVERRIDES row against §1.4**, and `MODS_A` A17's rule — that adopting it requires one — remains unused on purpose. |
@@ -137,15 +137,33 @@ without diffing anything.
 | `CLAUDE.md`, *"`model/` is a frozen contract"* | **NOT overridden** | The frozen files remain `modarith.py`, `ntt_ref.py`, `ntt_math.py`, `isa/xkntt.py`, and this round does not touch one of them. `model/rv32i_ref.py` and `model/bpred.py` are not among them and are extended freely. |
 | `docs/isa-spec.md`, the frozen `Xkntt` contract | **UNCHANGED** | Verified, not assumed — §3.1. No encoding in this round touches `custom-0` or `custom-1`, and the strict reserved-field rule survives with one new legal `funct7` in `OP` and two new legal `funct7`s elsewhere, each enumerated. |
 
-**The `misa` note, which is not cosmetic.** `misa` bit 1 (`B`) means the ratified
-B extension: Zba **and** Zbb **and** Zbs, all three. Zbkb is **not** part of B and
-has no `misa` bit — it is a separate extension that happens to overlap Zbb.
-Setting bit 1 while implementing only part of B is a false claim that
-`tb/riscof/rvntt/rvntt_isa.yaml` will turn into selected tests that fail, which
-is the good failure mode; **not** setting it while implementing all of B silently
-drops the entire B compliance suite, which is the bad one. The reset value, the
-YAML's `reset-val`, the YAML's `bitmask`, and the `--isa` strings in `tb/cosim/`
-move in **one commit** or they do not move.
+**The `misa` note, REWRITTEN AFTER A21 MEASURED IT.** This paragraph originally
+said that `misa` bit 1 must be set, and that not setting it *"silently drops the
+entire B compliance suite"*. **Both halves turned out to be wrong**, and the
+correction is worth more than the original claim:
+
+- **arch-test does not select suites from `misa`.** It selects them by regex on
+  the ISA string — `check ISA:=regex(.*I.*Zbb.*)` — so
+  `RV32IMZicsr_Zba_Zbb_Zbkb_Zbs` selects all 34 B and Zbkb tests with bit 1
+  clear. Nothing is dropped.
+- **riscv-config 3.18.3 cannot express `B` at all.** Every spelling of the
+  letter — `RV32IMB…`, `RV32IMB_Zicsr…` — is rejected as *"does not match
+  accepted canonical ordering"*, and it derives the expected `misa` from the
+  single-letter extensions only. Setting bit 1 makes the config invalid, and
+  RISCOF then runs **nothing**.
+- It also requires `Zbs` to come **after** `Zbkb` in the string, which is why
+  the canonical form here is `Zba_Zbb_Zbkb_Zbs` and not alphabetical.
+
+**So `misa.B` is deliberately not asserted, and that is a recorded boundary in
+the sense M5 and M6 use the word.** The extension is implemented, selected,
+compliance-tested (29/29 ratified-B, 5/5 Zbkb) and formally verified; only the
+reporting bit is withheld, because asserting it would break the tooling that
+proves the rest. `rvntt_csr.sv` carries the reasoning next to the constant.
+
+The original paragraph's last sentence stands unchanged and is the reason this
+was caught at all: the reset value, the YAML's `reset-val`, the YAML's
+`bitmask`, and the `--isa` strings in `tb/cosim/` move in **one commit** or they
+do not move.
 
 ---
 
@@ -785,8 +803,10 @@ group with a plausible claim to belong in the ALU — **put them in the bitmanip
 unit anyway**, so that the rule "B is not in the ALU" has no exceptions to
 remember.
 
-**`misa` bit 1 is set only when all three of Zba, Zbb and Zbs are complete.**
-Partial B with the bit set is a false claim; see §2's note.
+**`misa` bit 1 is NOT set, and §2's note says why** — riscv-config 3.18.3
+cannot express the `B` letter, and arch-test selects the suites from the ISA
+string rather than from `misa`, so asserting it would cost the whole compliance
+run and buy nothing.
 
 **Verify — and this is the step where the verification surface is paid:**
 
@@ -824,7 +844,7 @@ lane before continuing — that is a structural failure of the step's central
 decision, and carrying it forward would corrupt A26's and A27's before/after.
 
 **Done when:** all six verification items above pass with the two exclusions
-recorded by name, `misa` reads `0x40001104`, `rvntt_isa.yaml`'s reset value and
+recorded by name, `misa` reads `0x40001100` with the `B`-bit boundary recorded, `rvntt_isa.yaml`'s reset value and
 bitmask agree with the hardware, and `rvntt_alu.sv` is untouched in the diff.
 
 ---
@@ -1348,7 +1368,7 @@ is not edited; these live here.
   unchanged**. 1000 random programs containing B, Zbkb and Zicond at high hazard
   density are byte-identical against Spike, and A3's 10⁶-word decoder
   equivalence covers the new encodings with strict reserved fields intact.
-  `misa` reads `0x40001104` and `rvntt_isa.yaml` agrees with the hardware.
+  `misa` reads `0x40001100` with the `B`-bit boundary recorded, and `rvntt_isa.yaml` agrees with the hardware.
   Fmax, DMIPS/MHz, CoreMark/MHz and IPC are re-measured on hardware over three
   passes, **the dual software NTT baseline is re-recorded**, and **§10 M3's
   Keccak/NTT breakdown is reported both with and without B.** The predictor's

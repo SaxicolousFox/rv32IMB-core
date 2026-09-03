@@ -137,8 +137,30 @@ module rvntt_csr (
   localparam logic [11:0] CSR_MIMPID    = 12'hF13;
   localparam logic [11:0] CSR_MHARTID   = 12'hF14;
 
-  // MXL = 1 (RV32) in bits 31:30, extension bits I and -- as of A14 (MODS_A) --
-  // M in bit 12.  The X bit stays CLEAR even though the decoder recognises
+  // MXL = 1 (RV32) in bits 31:30, extension bits I (bit 8) and M (bit 12,
+  // MODS_A A14).
+  //
+  // misa.B (bit 1) IS DELIBERATELY NOT SET, EVEN THOUGH A21 IMPLEMENTS B.
+  // This is a recorded boundary, not an oversight, and the reason is a tool
+  // limitation rather than anything about the core:
+  //
+  //   * riscv-config 3.18.3 -- which RISCOF uses to validate rvntt_isa.yaml --
+  //     has no representation for the `B` letter in an ISA string at all.
+  //     RV32IMB..., RV32IMB_Zicsr... and every variant are rejected as "does
+  //     not match accepted canonical ordering".
+  //   * It derives the expected misa from the SINGLE-LETTER extensions only,
+  //     so with the Z-spelled string it computes 0x40001100 and rejects any
+  //     reset value with bit 1 set.
+  //   * The arch-test privilege suite compares the yaml against the register
+  //     this core reports.  Setting bit 1 here would therefore produce a real
+  //     failing misa test caused entirely by the config model.
+  //
+  // NOTHING IS LOST BY NOT SETTING IT.  arch-test selects the B and Zbkb tests
+  // by REGEX ON THE ISA STRING -- `check ISA:=regex(.*I.*Zbb.*)` -- not from
+  // misa, so RV32IMZicsr_Zba_Zbb_Zbkb_Zbs selects all of them.  The extension
+  // is claimed, selected and tested; only the reporting bit is withheld, and
+  // this comment is where that is written down.  Revisit if riscv-config gains
+  // the B letter.  The X bit stays CLEAR even though the decoder recognises
   // Xkntt: no stage executes it yet, and misa is a claim about what the hart
   // can RUN, not about what it can decode.  M is set for exactly the opposite
   // reason: rvntt_muldiv executes it.

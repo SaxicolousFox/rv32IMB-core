@@ -265,7 +265,7 @@ function filter_table(elem) {
 
 </script>
     <h1></h1>
-    <p>Report generated on 2026-09-02 05:10 GMT by <a href="https://pypi.python.org/pypi/riscof">riscof</a> v</p>
+    <p>Report generated on 2026-09-03 02:58 GMT by <a href="https://pypi.python.org/pypi/riscof">riscof</a> v</p>
     <h2>Environment</h2>
     <table id="environment">
       <tr>
@@ -282,7 +282,7 @@ function filter_table(elem) {
         <td>spike</td></tr>
       <tr>
         <td>ISA</td>
-        <td>RV32IMZicsr</td></tr>
+        <td>RV32IMZicsr_Zba_Zbb_Zbkb_Zbs</td></tr>
       <tr>
         <td>User Spec Version</td>
         <td>2.3</td></tr>
@@ -299,7 +299,7 @@ function filter_table(elem) {
       </thead>
       <tbody>
           <tr>
-            <td class="col-yname">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rvntt_isa_checked.yaml</td></tr>
+            <td class="col-yname">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rvntt_isa_checked.yaml</td></tr>
           <tr>
             <td class="extra" colspan="1">
               <div class="log"># riscv-config ISA description of the rvntt core, for RISCOF (plan A10).
@@ -310,8 +310,21 @@ function filter_table(elem) {
 # Zifencei and fence_i is selected and fails.  Understating it silently drops
 # coverage instead.
 #
-# So this file says exactly rv32im_zicsr, machine mode only -- the same string
-# the toolchain and Spike use.  M was added by MODS_A A14, and the note this
+# So this file says exactly RV32IMZicsr_Zba_Zbb_Zbkb_Zbs, machine mode only.
+#
+# THE ORDER IS NOT ARBITRARY: riscv-config 3.18.3 requires Zbs to come AFTER
+# Zbkb ("Within the Zb category extension Zbs must occur after Zbkb"), and it
+# rejects the `B` letter outright.  Both were found by running it, not by
+# reading the schema.
+#
+# A21 ADDED B AND Zbkb, AND THE SUITE SELECTION HAS A TRAP IN IT.  The
+# arch-test B directory is the OLD grouping and contains clmul, clmulh and
+# clmulr, which are Zbc -- ratified B is Zba + Zbb + Zbs and has no carry-less
+# multiply.  Those three are excluded BY NAME, exactly as the pmp tests are and
+# for the same reason (riscof 1.25.3 ignores the `verify` clause they would
+# otherwise use to deselect themselves).  The result is reported as 29/29 of the
+# ratified-B tests with 3 Zbc tests excluded -- never as 32/32, and never as
+# "B passes".  MODS_A2 section 3.1 has the reasoning.  M was added by MODS_A A14, and the note this
 # file used to carry -- "claim M and the multiply tests are selected and fail"
 # -- is now the INTENT rather than the warning: the eight rv32i_m/M tests are
 # selected on purpose, and they pass.
@@ -323,7 +336,7 @@ function filter_table(elem) {
 # points nowhere near the cause.
 hart_ids: [0]
 hart0:
-    ISA: RV32IMZicsr
+    ISA: RV32IMZicsr_Zba_Zbb_Zbkb_Zbs
     physical_addr_sz: 32
     User_Spec_Version: '2.3'
     supported_xlen:
@@ -4540,7 +4553,7 @@ hart0:
           </tbody>
           <tbody>
           <tr>
-            <td class="col-yname">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rvntt_platform_checked.yaml</td></tr>
+            <td class="col-yname">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rvntt_platform_checked.yaml</td></tr>
           <tr>
             <td class="extra" colspan="1">
               <div class="log"># Platform description for RISCOF.  The core has no timer and no NMI source --
@@ -4568,7 +4581,7 @@ zicbo_cache_block_sz:
     <p>Please visit <a href="https://riscv-config.readthedocs.io/en/latest/yaml-specs.html">YAML specifications</a> for more information. </p>
 
     <h2>Summary</h2>
-    <p class="filter" hidden="true">(Un)check the boxes to filter the results.</p><input checked="true" class="filter" data-test-result="passed" name="filter_checkbox" onChange="filter_table(this)" type="checkbox"/><span class="passed">84Passed</span>, <input checked="true" class="filter" data-test-result="failed" name="filter_checkbox" onChange="filter_table(this)" type="checkbox"/><span class="failed">0Failed</span>
+    <p class="filter" hidden="true">(Un)check the boxes to filter the results.</p><input checked="true" class="filter" data-test-result="passed" name="filter_checkbox" onChange="filter_table(this)" type="checkbox"/><span class="passed">118Passed</span>, <input checked="true" class="filter" data-test-result="failed" name="filter_checkbox" onChange="filter_table(this)" type="checkbox"/><span class="failed">0Failed</span>
     <h2>Results</h2>
     <table id="results-table">
       <thead id="results-table-head">
@@ -4581,9 +4594,393 @@ zicbo_cache_block_sz:
         
         <tbody class= "passed  results-table-row" >
         <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/andn-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/andn-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/bclr-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/bclr-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/bclri-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/bclri-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/bext-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/bext-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/bexti-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/bexti-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/binv-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/binv-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/binvi-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/binvi-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/bset-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/bset-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/bseti-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/bseti-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/clz-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/clz-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/cpop-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/cpop-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/ctz-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/ctz-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/max-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/max-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/maxu-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/maxu-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/min-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/min-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/minu-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/minu-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/orcb_32-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/orcb_32-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/orn-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/orn-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/rev8_32-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/rev8_32-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/rol-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/rol-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/ror-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/ror-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/rori-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/rori-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/sext.b-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/sext.b-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/sext.h-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/sext.h-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/sh1add-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/sh1add-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/sh2add-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/sh2add-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/sh3add-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/sh3add-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/xnor-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/xnor-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/B/src/zext.h_32-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/B/src/zext.h_32-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/add-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/add-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/add-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4596,7 +4993,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/addi-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/addi-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/addi-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4609,7 +5006,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/and-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/and-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/and-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4622,7 +5019,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/andi-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/andi-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/andi-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4635,7 +5032,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/auipc-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/auipc-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/auipc-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4648,7 +5045,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/beq-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/beq-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/beq-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4661,7 +5058,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/bge-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/bge-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/bge-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4674,7 +5071,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/bgeu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/bgeu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/bgeu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4687,7 +5084,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/blt-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/blt-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/blt-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4700,7 +5097,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/bltu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/bltu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/bltu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4713,7 +5110,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/bne-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/bne-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/bne-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4726,7 +5123,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/fence-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/fence-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/fence-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4739,7 +5136,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/jal-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/jal-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/jal-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4752,7 +5149,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/jalr-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/jalr-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/jalr-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4765,7 +5162,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/lb-align-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/lb-align-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/lb-align-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4778,7 +5175,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/lbu-align-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/lbu-align-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/lbu-align-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4791,7 +5188,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/lh-align-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/lh-align-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/lh-align-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4804,7 +5201,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/lhu-align-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/lhu-align-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/lhu-align-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4817,7 +5214,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/lui-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/lui-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/lui-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4830,7 +5227,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/lw-align-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/lw-align-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/lw-align-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4843,7 +5240,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/or-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/or-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/or-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4856,7 +5253,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/ori-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/ori-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/ori-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4869,7 +5266,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/sb-align-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/sb-align-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/sb-align-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4882,7 +5279,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/sh-align-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/sh-align-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/sh-align-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4895,7 +5292,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/sll-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/sll-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/sll-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4908,7 +5305,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/slli-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/slli-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/slli-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4921,7 +5318,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/slt-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/slt-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/slt-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4934,7 +5331,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/slti-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/slti-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/slti-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4947,7 +5344,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/sltiu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/sltiu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/sltiu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4960,7 +5357,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/sltu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/sltu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/sltu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4973,7 +5370,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/sra-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/sra-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/sra-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4986,7 +5383,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/srai-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/srai-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/srai-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -4999,7 +5396,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/srl-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/srl-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/srl-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5012,7 +5409,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/srli-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/srli-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/srli-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5025,7 +5422,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/sub-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/sub-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/sub-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5038,7 +5435,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/sw-align-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/sw-align-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/sw-align-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5051,7 +5448,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/xor-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/xor-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/xor-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5064,7 +5461,72 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/I/src/xori-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/I/src/xori-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/I/src/xori-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/K/src/brev8_32-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/K/src/brev8_32-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/K/src/pack-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/K/src/pack-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/K/src/packh-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/K/src/packh-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/K/src/unzip-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/K/src/unzip-01.S</td></tr>
+        <tr>
+          <td class="extra" colspan="4">
+            <div class="log">commit_id:-
+MACROS:
+TEST_CASE_1=True
+XLEN=32</br></div></td>
+        </tr></tbody>
+        
+        <tbody class= "passed  results-table-row" >
+        <tr>
+          <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/K/src/zip-01.S</td>
+          <td class="col-result">Passed</td>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/K/src/zip-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5077,7 +5539,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/M/src/div-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/M/src/div-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/M/src/div-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5090,7 +5552,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/M/src/divu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/M/src/divu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/M/src/divu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5103,7 +5565,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/M/src/mul-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/M/src/mul-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/M/src/mul-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5116,7 +5578,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/M/src/mulh-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/M/src/mulh-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/M/src/mulh-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5129,7 +5591,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/M/src/mulhsu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/M/src/mulhsu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/M/src/mulhsu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5142,7 +5604,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/M/src/mulhu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/M/src/mulhu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/M/src/mulhu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5155,7 +5617,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/M/src/rem-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/M/src/rem-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/M/src/rem-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5168,7 +5630,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/M/src/remu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/M/src/remu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/M/src/remu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5181,7 +5643,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/add-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/add-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/add-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5194,7 +5656,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/addi-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/addi-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/addi-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5207,7 +5669,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/and-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/and-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/and-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5220,7 +5682,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/andi-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/andi-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/andi-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5233,7 +5695,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/auipc-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/auipc-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/auipc-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5246,7 +5708,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/fence-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/fence-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/fence-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5259,7 +5721,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/lui-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/lui-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/lui-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5272,7 +5734,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/or-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/or-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/or-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5285,7 +5747,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/ori-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/ori-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/ori-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5298,7 +5760,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/sll-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/sll-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/sll-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5311,7 +5773,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/slli-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/slli-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/slli-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5324,7 +5786,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/slt-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/slt-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/slt-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5337,7 +5799,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/slti-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/slti-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/slti-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5350,7 +5812,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/sltiu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/sltiu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/sltiu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5363,7 +5825,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/sltu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/sltu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/sltu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5376,7 +5838,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/sra-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/sra-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/sra-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5389,7 +5851,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/srai-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/srai-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/srai-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5402,7 +5864,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/srl-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/srl-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/srl-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5415,7 +5877,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/srli-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/srli-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/srli-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5428,7 +5890,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/sub-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/sub-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/sub-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5441,7 +5903,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/xor-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/xor-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/xor-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5454,7 +5916,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/hints/src/xori-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/hints/src/xori-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/hints/src/xori-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5467,7 +5929,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/ebreak.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/ebreak.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/ebreak.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5481,7 +5943,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/ecall.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/ecall.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/ecall.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5495,7 +5957,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-beq-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-beq-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-beq-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5509,7 +5971,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-bge-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-bge-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-bge-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5523,7 +5985,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-bgeu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-bgeu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-bgeu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5537,7 +5999,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-blt-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-blt-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-blt-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5551,7 +6013,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-bltu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-bltu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-bltu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5565,7 +6027,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-bne-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-bne-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-bne-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5579,7 +6041,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-jal-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-jal-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-jal-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5593,7 +6055,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-lh-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-lh-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-lh-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5607,7 +6069,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-lhu-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-lhu-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-lhu-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5621,7 +6083,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-lw-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-lw-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-lw-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5635,7 +6097,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-sh-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-sh-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-sh-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5649,7 +6111,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign-sw-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign-sw-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign-sw-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5663,7 +6125,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign1-jalr-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign1-jalr-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign1-jalr-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-
@@ -5676,7 +6138,7 @@ XLEN=32</br></div></td>
         <tr>
           <td class="col-name">/home/saxicolousfox/dev/riscv-ntt-track-a/toolchain/riscv-arch-test/riscv-test-suite/rv32i_m/privilege/src/misalign2-jalr-01.S</td>
           <td class="col-result">Passed</td>
-          <td class="col-path">/tmp/claude-1000/riscof_qiqy5chn/riscof_work/rv32i_m/privilege/src/misalign2-jalr-01.S</td></tr>
+          <td class="col-path">/tmp/claude-1000/riscof_cklbwpqp/riscof_work/rv32i_m/privilege/src/misalign2-jalr-01.S</td></tr>
         <tr>
           <td class="extra" colspan="4">
             <div class="log">commit_id:-

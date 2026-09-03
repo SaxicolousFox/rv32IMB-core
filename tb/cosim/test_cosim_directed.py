@@ -28,6 +28,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, os.path.join(ROOT, "tb/cosim"))
 sys.path.insert(0, os.path.join(ROOT, "tb/unit"))
 import test_cosim_a5 as a5          # noqa: E402
+import spike_asm               # noqa: E402
 import test_core_verilator as t4    # noqa: E402
 
 # (name, source) -- name is what the mutation harness and the regression report.
@@ -45,7 +46,7 @@ def compile_s(path, tmp, name):
     r = subprocess.run(
         # rv32im as of A14: a14_muldiv.S is written in M instructions, and the
         # other three programs assemble identically either way.
-        ["riscv-none-elf-gcc", "-march=rv32im_zicsr", "-mabi=ilp32",
+        ["riscv-none-elf-gcc", "-march=" + spike_asm.MARCH, "-mabi=ilp32",
          "-nostdlib", "-nostartfiles", "-T", t4.LD, "-o", elf, path],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if r.returncode != 0:
