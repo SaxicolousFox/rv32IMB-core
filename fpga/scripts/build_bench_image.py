@@ -48,8 +48,23 @@ CC = "riscv-none-elf-gcc"
 # -march is A16's variable (MODS_A): the same sources are built rv32i to
 # reproduce A13's baseline and rv32im to measure what M bought.  Everything else
 # about the measurement is held fixed so the two are comparable.
+# A21/A22 (MODS_A2).  `rv32imb` is spelled out as its Z-extensions because that
+# is what GCC and riscv-config both accept, and because misa.B is not asserted
+# (rvntt_csr.sv has the reasoning) -- the ISA string is the claim, not the bit.
+ARCH_ALIASES = {
+    "rv32i":   "rv32i",
+    "rv32im":  "rv32im",
+    "rv32imb": "rv32im_zba_zbb_zbs_zbkb_zicond",
+    # B WITHOUT Zicond, which exists ONLY to attribute A22's branch delta.
+    # Zbb's min/max are themselves if-conversion instructions, so a two-point
+    # rv32im-vs-rv32imb comparison cannot tell what Zicond did from what min and
+    # max did.  Three points can.
+    "rv32imzb": "rv32im_zba_zbb_zbs_zbkb",
+}
+
+
 def arch_flags(arch):
-    return ["-march=%s_zicsr" % arch, "-mabi=ilp32"]
+    return ["-march=%s_zicsr" % ARCH_ALIASES.get(arch, arch), "-mabi=ilp32"]
 
 ARCH  = arch_flags("rv32i")
 
@@ -70,6 +85,23 @@ KYBER_SYMS = ["ntt", "invntt", "basemul", "zetas",
 def kyber_renames(prefix):
     return ["-Dpqcrystals_kyber768_ref_%s=%s%s" % (sym, prefix, sym)
             for sym in KYBER_SYMS]
+
+
+# A21/A23.  The Keccak dual baseline uses the same trick against fips202.h's
+# FIPS202_NAMESPACE.  Only the exported symbols need renaming -- everything
+# else in fips202.c, KeccakF1600_StatePermute included, is static.
+FIPS202_SYMS = [
+    "sha3_256", "sha3_512", "shake128", "shake256",
+    "shake128_init", "shake128_absorb", "shake128_finalize",
+    "shake128_squeeze", "shake128_absorb_once", "shake128_squeezeblocks",
+    "shake256_init", "shake256_absorb", "shake256_finalize",
+    "shake256_squeeze", "shake256_absorb_once", "shake256_squeezeblocks",
+]
+
+
+def fips202_renames(prefix):
+    return ["-Dpqcrystals_kyber_fips202_ref_%s=%s%s" % (sym, prefix, sym)
+            for sym in FIPS202_SYMS]
 # Dhrystone 2.1 predates prototypes: implicit int, implicit function
 # declarations and old-style definitions are what the benchmark IS.  Silencing
 # them for those two translation units only keeps the build output readable
@@ -88,7 +120,8 @@ def incs():
 
 
 def build(out_elf, objdir, core_hz, dhry_runs, iterations, gap_cycles,
-          host=False, arch="rv32i", ntt=False, hpm=False):
+          host=False, arch="rv32i", ntt=False, hpm=False,
+          keccak=False):
     os.makedirs(objdir, exist_ok=True)
     ARCH = arch_flags(arch)
     # What goes into `flags=` on the wire and into CoreMark's own "Compiler
@@ -101,7 +134,14 @@ def build(out_elf, objdir, core_hz, dhry_runs, iterations, gap_cycles,
     # divide and modulo in both benchmarks is a call into libgcc.
     flags_str = (" ".join(ARCH + BASE) +
                  " | dhrystone: -std=gnu89 + upstream no-inline pragma"
-                 " | mul/div: " + ("hardware M extension" if arch == "rv32im"
+                 # DERIVED FROM THE RESOLVED -march, not from the alias.
+                 # `arch == "rv32im"` was an exact-match test, so A21's rv32imb
+                 # -- which HAS M -- was labelled "no M extension" in the flags
+                 # line that goes into every benchmark record.  A wrong label on
+                 # a right number is worse than a wrong number, because nothing
+                 # downstream can tell.
+                 " | mul/div: " + ("hardware M extension"
+                                   if "m" in ARCH_ALIASES.get(arch, arch)[4:].split("_")[0]
                                    else "libgcc software (no M extension)"))
     common = ARCH + BASE + incs() + [
         "-DCORE_HZ=%uu" % core_hz,
@@ -144,6 +184,21 @@ def build(out_elf, objdir, core_hz, dhry_runs, iterations, gap_cycles,
     # both ways and diffing the cycle counts rather than trusting the sentence.
     if hpm:
         common = common + ["-DBENCH_HPM"]
+
+    # A21/A23.  Keccak the same way, and it is the measurement A21 exists for:
+    # plan 10 M3 asks for the NTT/Keccak split before and after, and B's whole
+    # justification is that `rori` and `andn` accelerate the half a hardware NTT
+    # never touches.  Both builds get M; the variable is B and Zbkb alone, so
+    # the ratio is a property of those extensions and of nothing else.
+    if keccak:
+        common = common + ["-DBENCH_KECCAK"]
+        units = units + [(os.path.join(BENCH, "keccak_bench.c"), [])]
+        for prefix, a in (("bm_", "rv32im"), ("bb_", "rv32imzb")):
+            units.append((os.path.join(KYBER, "fips202.c"),
+                          ["-I" + KYBER]
+                          + fips202_renames(prefix)
+                          + ["-o-suffix=" + prefix]
+                          + arch_flags(a)))
 
     if ntt:
         common = common + ["-DBENCH_NTT"]
@@ -211,12 +266,16 @@ def main() -> int:
     ap.add_argument("--words", type=int, default=32768)
     ap.add_argument("--out", required=True)
     ap.add_argument("--elf", default=None)
-    ap.add_argument("--arch", choices=["rv32i", "rv32im"], default="rv32i",
-                    help="A16: which ISA Dhrystone and CoreMark are built for")
+    ap.add_argument("--arch", choices=["rv32i", "rv32im", "rv32imzb", "rv32imb"],
+                    default="rv32i",
+                    help="A16/A21: which ISA Dhrystone and CoreMark are built "
+                         "for.  rv32imb is rv32im + Zba+Zbb+Zbs+Zbkb+Zicond.")
     ap.add_argument("--ntt", action="store_true",
                     help="A16: add the reference NTT built BOTH ways")
     ap.add_argument("--hpm", action="store_true",
                     help="A20: arm and report the six Zihpm counters")
+    ap.add_argument("--keccak", action="store_true",
+                    help="A21/A23: add SHAKE128 built with and without B")
     a = ap.parse_args()
 
     core_hz = a.core_hz
@@ -234,7 +293,7 @@ def main() -> int:
     elf = a.elf or os.path.join(outdir, "bench_image.elf")
     objdir = os.path.join(outdir, "bench_obj")
     flags = build(elf, objdir, core_hz, a.dhry_runs, a.iterations, a.gap_cycles,
-                  arch=a.arch, ntt=a.ntt, hpm=a.hpm)
+                  arch=a.arch, ntt=a.ntt, hpm=a.hpm, keccak=a.keccak)
 
     mem = bytearray(a.words * 4)
     used = 0

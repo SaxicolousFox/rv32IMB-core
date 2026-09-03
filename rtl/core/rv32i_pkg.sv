@@ -230,6 +230,9 @@ package rv32i_pkg;
   localparam logic [4:0] RS2_REV8   = 5'b11000;  // with F7_ZBS_BINV
   localparam logic [4:0] RS2_BREV8  = 5'b00111;  // with F7_ZBS_BINV
   localparam logic [4:0] RS2_ZIPUNZ = 5'b01111;  // with F7_ZBKB_PACK
+
+  // Zicond (A22).  One funct7 in OP, two funct3 values, nothing else.
+  localparam logic [6:0] F7_ZICOND    = 7'b0000111;
   /* verilator lint_on UNUSEDPARAM */
 
   // ------------------------------------------- A21: B (Zba+Zbb+Zbs) and Zbkb
@@ -239,51 +242,63 @@ package rv32i_pkg;
   // chooses immediate or rs2, so a separate member for each would be 5 extra
   // encodings that all behave identically.
   //
-  // 29 members and BM_NONE, so five bits.  Deliberately NOT folded into
+  // 31 members and BM_NONE, so SIX bits.  Five would hold exactly 32 and leave
+  // the case statement's `default` arm unreachable, which Verilator is right to
+  // object to and which leaves no room for the next addition; a spare bit in
+  // one pipeline-register field is the cheaper side of that trade.
+  //
+  // Zicond (A22) lives here rather than in its own unit for the same reason B
+  // does: `rs2 == 0 ? 0 : rs1` is one AND with a replicated zero-detect, and
+  // what matters is not its size but that it stays off ex_alu_y.  Deliberately NOT folded into
   // alu_op_e: MODS_A2 section 3.4 measures the ALU result mux at a third of the
   // critical path, and ex_alu_y feeds ex_jump_target and the mispredict
   // comparison.  A wider alu_op_e widens that mux; a separate unit joined at
   // ex_result -- which terminates at a pipeline register -- does not.
-  typedef enum logic [4:0] {
-    BM_NONE   = 5'd0,
+  typedef enum logic [5:0] {
+    BM_NONE   = 6'd0,
     // Zba
-    BM_SH1ADD = 5'd1,
-    BM_SH2ADD = 5'd2,
-    BM_SH3ADD = 5'd3,
+    BM_SH1ADD = 6'd1,
+    BM_SH2ADD = 6'd2,
+    BM_SH3ADD = 6'd3,
     // Zbb / Zbkb logic-with-negate
-    BM_ANDN   = 5'd4,
-    BM_ORN    = 5'd5,
-    BM_XNOR   = 5'd6,
+    BM_ANDN   = 6'd4,
+    BM_ORN    = 6'd5,
+    BM_XNOR   = 6'd6,
     // Zbb counts
-    BM_CLZ    = 5'd7,
-    BM_CTZ    = 5'd8,
-    BM_CPOP   = 5'd9,
+    BM_CLZ    = 6'd7,
+    BM_CTZ    = 6'd8,
+    BM_CPOP   = 6'd9,
     // Zbb min/max
-    BM_MIN    = 5'd10,
-    BM_MINU   = 5'd11,
-    BM_MAX    = 5'd12,
-    BM_MAXU   = 5'd13,
+    BM_MIN    = 6'd10,
+    BM_MINU   = 6'd11,
+    BM_MAX    = 6'd12,
+    BM_MAXU   = 6'd13,
     // Zbb extends
-    BM_SEXTB  = 5'd14,
-    BM_SEXTH  = 5'd15,
-    BM_ZEXTH  = 5'd16,
+    BM_SEXTB  = 6'd14,
+    BM_SEXTH  = 6'd15,
+    BM_ZEXTH  = 6'd16,
     // Zbb / Zbkb permutes
-    BM_ORCB   = 5'd17,
-    BM_REV8   = 5'd18,
+    BM_ORCB   = 6'd17,
+    BM_REV8   = 6'd18,
     // Zbb / Zbkb rotates.  rori is BM_ROR with SRCB_IMM.
-    BM_ROL    = 5'd19,
-    BM_ROR    = 5'd20,
+    BM_ROL    = 6'd19,
+    BM_ROR    = 6'd20,
     // Zbs single-bit.  The immediate forms are these with SRCB_IMM.
-    BM_BSET   = 5'd21,
-    BM_BCLR   = 5'd22,
-    BM_BINV   = 5'd23,
-    BM_BEXT   = 5'd24,
+    BM_BSET   = 6'd21,
+    BM_BCLR   = 6'd22,
+    BM_BINV   = 6'd23,
+    BM_BEXT   = 6'd24,
     // Zbkb
-    BM_PACK   = 5'd25,
-    BM_PACKH  = 5'd26,
-    BM_BREV8  = 5'd27,
-    BM_ZIP    = 5'd28,
-    BM_UNZIP  = 5'd29
+    BM_PACK   = 6'd25,
+    BM_PACKH  = 6'd26,
+    BM_BREV8  = 6'd27,
+    BM_ZIP    = 6'd28,
+    BM_UNZIP  = 6'd29,
+    // Zicond (A22).  czero.eqz rd,rs1,rs2 = (rs2 == 0) ? 0 : rs1;
+    // czero.nez is its complement.  Read from Spike's own
+    // czero_eqz.h / czero_nez.h rather than recalled.
+    BM_CZEQZ  = 6'd30,
+    BM_CZNEZ  = 6'd31
   } bm_op_e;
 
   // ------------------------------------------------------- A20: Zihpm events

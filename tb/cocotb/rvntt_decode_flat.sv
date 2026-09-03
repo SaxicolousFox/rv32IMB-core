@@ -45,7 +45,7 @@ module rvntt_decode_flat (
     output wire logic        is_muldiv,
     output wire logic [2:0]  muldiv_op,
     output wire logic        is_bitmanip,
-    output wire logic [4:0]  bm_op,
+    output wire logic [5:0]  bm_op,
     output wire logic        is_xkntt,
     output wire logic [3:0]  xkntt_op,
     output wire logic        is_illegal,

@@ -76,6 +76,7 @@ BM_ROL, BM_ROR                           = 19, 20
 BM_BSET, BM_BCLR, BM_BINV, BM_BEXT       = 21, 22, 23, 24
 BM_PACK, BM_PACKH                        = 25, 26
 BM_BREV8, BM_ZIP, BM_UNZIP               = 27, 28, 29
+BM_CZEQZ, BM_CZNEZ                       = 30, 31   # Zicond (A22)
 
 BM_OPS = {
     "BM_NONE": BM_NONE, "BM_SH1ADD": BM_SH1ADD, "BM_SH2ADD": BM_SH2ADD,
@@ -88,8 +89,9 @@ BM_OPS = {
     "BM_BSET": BM_BSET, "BM_BCLR": BM_BCLR, "BM_BINV": BM_BINV,
     "BM_BEXT": BM_BEXT, "BM_PACK": BM_PACK, "BM_PACKH": BM_PACKH,
     "BM_BREV8": BM_BREV8, "BM_ZIP": BM_ZIP, "BM_UNZIP": BM_UNZIP,
+    "BM_CZEQZ": BM_CZEQZ, "BM_CZNEZ": BM_CZNEZ,
 }
-BM_OP_WIDTH = 5           # bm_op_e is logic [4:0]
+BM_OP_WIDTH = 6           # bm_op_e is logic [5:0]
 
 # ------------------------------------------------------- multi-cycle latency
 # EX OCCUPANCY in cycles for the M instructions (MODS_A A14).  An instruction
@@ -391,6 +393,7 @@ F7_ZBKB_PACK  = 0b0000100
 F7_ZBS_BSET   = 0b0010100
 F7_ZBS_BCLR   = 0b0100100
 F7_ZBS_BINV   = 0b0110100
+F7_ZICOND     = 0b0000111    # Zicond (A22)
 
 # (funct7, funct3) -> op, for the register-register forms in OP.
 _BM_OP_R = {
@@ -416,6 +419,9 @@ _BM_OP_R = {
     # right answer for it, so there is no BM_ZEXTH row here either.
     (F7_ZBKB_PACK,  0b100): BM_PACK,
     (F7_ZBKB_PACK,  0b111): BM_PACKH,
+    # Zicond (A22).  000-100 and 110 under this funct7 stay illegal.
+    (F7_ZICOND,     0b101): BM_CZEQZ,
+    (F7_ZICOND,     0b111): BM_CZNEZ,
 }
 
 # The OP-IMM unary group: these five share opcode, funct3 AND imm[11:5] and

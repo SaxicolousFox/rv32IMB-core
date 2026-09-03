@@ -279,7 +279,8 @@ def main() -> int:
     ap.add_argument("--dhry-runs", type=int, default=2000)
     ap.add_argument("--iterations", type=int, default=6)
     ap.add_argument("--max-cycles", type=int, default=400_000_000)
-    ap.add_argument("--arch", choices=["rv32i", "rv32im"], default="rv32im")
+    ap.add_argument("--arch", choices=["rv32i", "rv32im", "rv32imzb", "rv32imb"],
+                    default="rv32im")
     ap.add_argument("--ntt", action="store_true")
     ap.add_argument("--hpm", action="store_true",
                     help="A20: build the image so SOFTWARE arms and reads the "

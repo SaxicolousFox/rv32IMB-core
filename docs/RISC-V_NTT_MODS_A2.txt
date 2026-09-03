@@ -881,6 +881,21 @@ on the post-Zicond branch stream**. The expected shape is that Zicond removes
 always correctly predicted — so **the mispredict rate may go UP while the
 mispredict count goes DOWN.** Report both; either alone is misleading.
 
+> **REVISED AFTER MEASURING, AND THE REVISION IS THE POINT OF THE STEP.** Two
+> builds are not enough. `Zbb`'s `min`/`max` are themselves if-conversion
+> instructions and `Zba`'s `sh*add` replace multiplies, so an `rv32im` versus
+> `rv32im+B+Zicond` comparison **cannot separate what Zicond did from what B
+> did** — and run that way, Dhrystone appears to lose 2,000 branches and 3,999
+> mispredicts together, which reads as Zicond removing a fifth of the
+> mispredicts. **A third build, B without Zicond, says B removed all 3,999 and
+> Zicond removed none.**
+>
+> So this step's done-when now requires **three** points — `rv32im`,
+> `rv32im+B`, `rv32im+B+Zicond` — and `build_bench_image.py` grew an
+> `rv32imzb` arch that exists for no other purpose. The predicted shape was
+> half right: the count did not move at all and the rate rose 0.11 points
+> purely because the denominator shrank. See `docs/a22-zicond.md`.
+
 **Verify:** RISCOF's `Zicond` suite, both tests. Cosim against Spike, whose
 `czero_eqz.h`/`czero_nez.h` already exist. `model/bpred.py` re-run against the
 new stream and required to still match the RTL redirect count **to the unit**,
@@ -898,8 +913,9 @@ and it is on `Zkt`-adjacent ground (§3.5 notes `Zicond` is *not* on the ratifie
 `Zkt` list, which is itself worth recording).
 
 **Done when:** both RISCOF tests pass, cosim passes, the predictor's payoff is
-re-reported on the post-Zicond stream with count and rate shown separately, and
-`model/bpred.py` still matches RTL redirects to the unit.
+re-reported on the post-Zicond stream **from three builds, so B's contribution
+and Zicond's are separated**, with count and rate shown separately, and
+`model/bpred.py` still matches RTL redirects to the unit in every build.
 
 ---
 
@@ -1359,9 +1375,32 @@ is not edited; these live here.
 
 - [ ] **M7.3** — **The ISA round: B, Zicond and hardware counters.**
   *Satisfied by A20, A21, A22 and A23.* The six `Zihpm` counters agree with
-  A18's simulation instrument **to the count** on both benchmarks and the
+  A18's simulation instrument **to the count** on both benchmarks, and the
   `cycles = retired + load-use + multi-cycle EX + 2 × redirects` identity closes
-  with residual **exactly zero on hardware**. RISCOF passes the ratified-B suite
+  on hardware to **a small constant residual whose magnitude is accounted for by
+  the counter-read sequence**.
+
+  > **REVISED AFTER MEASURING: "exactly zero on hardware" was unachievable as
+  > written, and the reason is structural rather than a shortfall.** A18's
+  > instrument samples every counter at one instant, so its residual is exactly
+  > zero and that is a real result. **Software cannot do that.** On hardware each
+  > of `mcycle`, `minstret` and the six HPM counters is read by its own
+  > instruction, so the four windows are *nested*, not identical, and the
+  > residual is whatever the nesting makes it — the reads themselves execute
+  > inside some windows and outside others.
+  >
+  > A23 measured −38 on Dhrystone and −168 on CoreMark, and the difference
+  > between them was the finding: the two regions' glue nested the reads in
+  > **different orders**, and CoreMark's put both `bench_hpm_read()` calls
+  > inside the retired-instruction window. Aligning the order (HPM outermost,
+  > then `minstret`, then `mcycle`) makes the residual a property of the read
+  > sequence rather than of which benchmark is being looked at.
+  >
+  > So the requirement becomes: **the residual is small, of a sign and magnitude
+  > the read ordering predicts, and constant rather than proportional** — the
+  > same distinction A20 established for the software-read overhead, and for the
+  > same reason. Residual exactly zero remains the standard for A18's
+  > simulation instrument, where it is achievable and still holds. RISCOF passes the ratified-B suite
   at 29/29 **with the three `Zbc` tests excluded by name and the boundary
   recorded**, plus the Zbkb subset of `K` and both `Zicond` tests. riscv-formal
   passes the union of `rv32im`, `rv32ib` and `rv32iZbkb` at **depth 14
