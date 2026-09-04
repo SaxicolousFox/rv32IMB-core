@@ -103,7 +103,7 @@ BM_OP_WIDTH = 6           # bm_op_e is logic [5:0]
 # "independent" cycle model agree with the pipeline by construction, which is
 # precisely what the model exists not to do; duplicating it and checking makes a
 # retune a test failure rather than a silent re-derivation.
-MUL_CYCLES = 3
+MUL_CYCLES = 2
 DIV_CYCLES = 34
 
 MULDIV_CYCLES = {

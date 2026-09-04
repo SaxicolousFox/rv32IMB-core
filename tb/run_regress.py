@@ -524,7 +524,7 @@ def discover() -> list:
                    # is the worst kind of green: it programs a real board, gets
                    # byte-perfect UART and reproducible counters, and certifies
                    # a design the repository no longer contains.
-                   "--bit", os.path.join(ROOT, "fpga/build/bench_a25/rvntt_soc_top.bit"),
+                   "--bit", os.path.join(ROOT, "fpga/build/bench_a28/rvntt_soc_top.bit"),
                    # 150 s, and the number is derived rather than guessed.
                    # CoreMark needs 2500 iterations to clear its own ten-second
                    # minimum (A19's predictor made the M extension's 2200 finish
@@ -540,17 +540,21 @@ def discover() -> list:
                    # FOUR blocks, so 108 s of payload, and 150 s left room for
                    # the partial block a capture always starts in the middle of.
                    #
-                   # A25's bitstream runs at 70.000 MHz, not 74.576 -- its
-                   # netlist does not close where A23's did and the shortfall is
-                   # on the core's redirect path, not the multiplier's (see
-                   # docs/a25-multiply.md).  A slower clock is a LONGER block:
-                   # 29 s each, 116 s for four, so the window goes to 170 s.
+                   # A28's bitstream runs at 96.246 MHz -- A26's cycle-neutral
+                   # levers, with A27's floorplans measured and not adopted.  A
+                   # FASTER clock is a shorter block, but CoreMark had to go to
+                   # 3300 iterations to clear its own 10 s minimum (at 2500 it
+                   # finished in 7.91 s and the parser refused it, exactly as
+                   # A19 hit at 2200).  Dhrystone 12.6 s + CoreMark 10.4 s + the
+                   # kernels and the gap is about 25 s a block; four blocks is
+                   # 100 s, and 145 s leaves room for the partial block a
+                   # capture always starts in the middle of.
                    #
                    # THIS FIXTURE FAILED AT 75 s WHEN A23 FIRST RAN IT, which is
                    # why the derivation is written down: the image is the
                    # measured artefact and the capture window has to accommodate
                    # it, not the other way round.
-                   "--seconds", "170", "--send-byte", "-1",
+                   "--seconds", "145", "--send-byte", "-1",
                    "--out-name", "bench_uart.log",
                    "--parser", os.path.join(ROOT, "tb/fpga/parse_bench_uart.py"),
                    # `--parser-arg=--flag` rather than `--parser-arg --flag`:
@@ -560,7 +564,7 @@ def discover() -> list:
                    # A19: block 1 is cold.  See parse_bench_uart.py.
                    "--parser-arg=--warmup-blocks", "--parser-arg=1",
                    "--parser-arg=--json",
-                   "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a25/a25_regress.json")],
+                   "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a28/a28_regress.json")],
                   timeout=1800))
 
     # H1 (MODS_A2).  The ISA string, in all six places it is written, plus

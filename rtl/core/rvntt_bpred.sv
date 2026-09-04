@@ -53,6 +53,30 @@ module rvntt_bpred #(
     // out of this module's cone.  The prediction is suppressed rather than
     // allowed to describe the wrong address.
     input  wire         flush,
+    // A26 lever 5 (MODS_A2 M7.4, not one of 3.4's listed four).  HOLD THE
+    // ANSWER INSTEAD OF ASKING THE QUESTION AGAIN.
+    //
+    // A19 wrote `lookup_pc = front_stall ? pc_q : ...` and its own comment
+    // records why that is correct: "under front_stall the address does not
+    // move, so the lookup simply repeats and re-registers the same answer".
+    // It is correct, and it is expensive: `front_stall` is a function of the
+    // DECODED instruction, so the stall term drags the instruction memory's
+    // output, the decoder and the hazard unit in front of this module's index
+    // mux, its array read and its tag compare.  A26 measured that chain at
+    // 14.033 ns and it was the whole critical path.
+    //
+    // If the lookup re-registers the same answer, the register can simply keep
+    // it.  That is only true if nothing this module reads can CHANGE during the
+    // stall, and it is: every piece of state here -- btb_q, btb_valid_q, ras_q,
+    // ras_sp_q, ras_cnt_q -- is written under `upd_valid` alone, and
+    // rvntt_core's a_no_bp_update_under_front_stall proves upd_valid is false
+    // whenever the core asserts `hold`.  So this is an identity, not an
+    // approximation, and the benchmark cycle counts are bit-identical.
+    //
+    // `flush` OUTRANKS `hold`, inside this module rather than by agreement with
+    // its caller: a redirect moves the pc even while the front end is stalled,
+    // so the held answer is about the wrong address and must be cleared.
+    input  wire         hold,
     output wire         pred_taken,
     output wire  [31:0] pred_target,
     // A20: did the lookup FIND an entry, regardless of what the counter then
@@ -198,7 +222,7 @@ module rvntt_bpred #(
       pred_taken_q  <= 1'b0;
       pred_target_q <= 32'h0;
       pred_hit_q    <= 1'b0;
-    end else begin
+    end else if (!hold || flush) begin
       pred_taken_q  <= taken_c && !flush;
       pred_target_q <= target_c;
       // `!flush` for the same reason pred_taken has it: after a redirect the
@@ -288,8 +312,18 @@ module rvntt_bpred #(
       // Nothing is predicted taken out of an invalid entry.  With no reset
       // sweep this is the ONLY thing standing between a cold machine and
       // whatever the distributed RAM powers up holding.
-      if (pred_taken_q)
+      // A26 lever 5 narrows the guard rather than the claim: the register is
+      // only written when `!hold || flush`, so a held value's provenance is
+      // the edge that wrote it, not the previous one.  a_hold_freezes below is
+      // the other half -- together they say the value can ONLY have come from
+      // a hit, however many cycles ago.
+      if (pred_taken_q && !$past(hold))
         a_taken_needs_a_hit: assert ($past(lk_hit));
+
+      if ($past(hold) && !$past(flush))
+        a_hold_freezes: assert (pred_taken_q  == $past(pred_taken_q) &&
+                                pred_target_q == $past(pred_target_q) &&
+                                pred_hit_q    == $past(pred_hit_q));
 
       // The occupancy is a count of what is in the array.  A count that can
       // exceed it -- or wrap below zero -- makes the emptiness test lie and the

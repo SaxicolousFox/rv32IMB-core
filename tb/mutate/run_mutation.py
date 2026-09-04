@@ -398,7 +398,14 @@ MUTATIONS = [
              "-- rvntt_ram ignores the low address bits by design -- so the "
              "core executes the right instruction at a pc that is off by one, "
              "and only the commit log's pc column shows it",
-         edits=[(CORE, "{ex_alu_y[31:1], 1'b0}", "{ex_alu_y[31:1], ex_alu_y[0]}")],
+         # A26 lever 1 moved JALR's target off the ALU and onto A17's address
+         # adder, so the anchor moved with it.  The mutation is unchanged in
+         # substance -- it still fails to clear bit 0 -- and its catchers are
+         # unchanged, because neither of them cares which adder produced the
+         # number.  The 0.04 s anchor pre-flight found this on the first
+         # regression after the edit, which is the sixth time it has paid for
+         # itself.
+         edits=[(CORE, "{ex_mem_addr[31:1], 1'b0}", "{ex_mem_addr[31:1], ex_mem_addr[0]}")],
          # A11 added the second catcher, and it is the interesting one: RISCOF
          # passes 76/76 over this mutation (see the A10 table in CLAUDE.md),
          # because no arch-test computes an odd JALR target.  riscv-formal's
@@ -640,6 +647,63 @@ MUTATIONS = [
     # `minstret_counts_stalled_cycles` ONLY to a9_minstret.  Everything else in
     # the tree -- Spike, rv32um, the commit-log differ -- is structurally blind
     # to both, which is the same shape as A7's phantom stall.
+    # ---- A26 (MODS_A2) --------------------------------------------------
+    #
+    # THE FOURTH MUTATION HERE WAS WRITTEN AND THEN NOT ADDED, and the reason
+    # is worth more than the mutation would have been.  Dropping the load-use
+    # exclusion from the ID-stage forwarding precompute -- `mem_mem_read` tied
+    # to 0 -- escapes cosimulation AND riscv-formal, and it escapes CORRECTLY.
+    # The exclusion is structurally redundant there: the only way a load in EX
+    # can match the ID instruction's rs is the exact condition rvntt_hazard
+    # stalls on, and a stalled ID instruction never latches the precompute.
+    # The port stays wired to the real signal because the redundancy is a
+    # property of the INTERLOCK and not of the forwarding unit, and a mutation
+    # aimed somewhere it could never bite is the shape A14 already rejected
+    # once.  Same finding, same response.
+    #
+    # A SECOND ONE WAS WRITTEN AND NOT ADDED, for a different reason: reverting
+    # lever 1 -- putting JALR's target back on ex_alu_y -- cannot be caught by
+    # anything, because a_jalr_target_matches_alu says the two adders produce
+    # the same NUMBER and riscv-formal proves it at depth 14.  A mutation whose
+    # verdict is "no observable difference" is a proof restated as a test, and
+    # a worse one.  The equality is the check; the mutation would only measure
+    # timing, which is A26's own measurement and not the mutation set's job.
+    #
+    # AND A THIRD, which is the one that took real work to settle.  A26 lever 5
+    # gives rvntt_bpred a `hold` input and lets `flush` OUTRANK it, so that a
+    # redirect arriving during a front-end stall clears the held prediction
+    # instead of preserving one about an address the core will no longer fetch.
+    # Removing that override escapes directed:a19_bpred, rvfi:pc_fwd_ch0,
+    # random:loaduse, random:branch and directed:a7_loaduse -- five catchers,
+    # none of which see it -- and it escapes for a reason worth writing down.
+    #
+    # `front_stall && ex_redirect` needs the instruction in EX to be BOTH a
+    # load (id_stall's condition) and something that redirects.  ex_stall is
+    # excluded structurally, ex_redirect being gated on !ex_stall.  ex_mret is
+    # not a load.  ex_mispredict cannot happen to a load at all: only a branch
+    # or a jump ever allocates a BTB entry, index and tag together are the whole
+    # word address, so a load can never hit and never be predicted taken.  What
+    # is left is a MISALIGNED LOAD with a dependent instruction behind it -- and
+    # even then the consequence is one stale prediction, which the next EX
+    # resolution corrects.  Architecturally invisible, and worth at most a
+    # cycle.
+    #
+    # So `|| flush` is kept and NOT mutated: it is a guard against a case that
+    # is nearly unreachable and entirely harmless, and A20 already settled what
+    # to do with those -- keep the guard, do not pretend a test covers it.
+    dict(step="A26", name="fwd_precompute_does_not_decay",
+         why="A26 lever 2's precomputed forwarding select is HELD through a "
+             "multi-cycle EX stall instead of decaying MEM -> WB -> REG.  The "
+             "producers drain out from under the stalled instruction, so a "
+             "held FWD_MEM reads a bubble -- zero -- instead of the register "
+             "file.  This is the bug the equivalence assertion actually found, "
+             "and it is invisible to cosimulation: the only reader after the "
+             "start cycle is the multi-cycle unit, which captured its operands "
+             "already",
+         edits=[(CORE, "      id_ex_q.fwd_a <= fwd_decay(id_ex_q.fwd_a);",
+                       "      id_ex_q.fwd_a <= id_ex_q.fwd_a;")],
+         caught=["rvfi:unique_ch0"]),
+
     dict(step="A14", name="muldiv_done_one_cycle_late",
          why="every M instruction occupies EX for one cycle longer than the "
              "latency contract.  Every VALUE is unchanged and every retirement "
@@ -661,8 +725,23 @@ MUTATIONS = [
              "because EX/MEM is bubbled on every stalled cycle",
          edits=[(MD, "  assign done = req && active_q && (cnt_q == target);",
                      "  assign done = req && active_q && (cnt_q == target - 6'd1);")],
-         caught=["directed:a14_muldiv", "random:muldiv",
-                 "riscv:rv32um/mul", "riscv:rv32um/div"]),
+         # A28 DROPPED riscv:rv32um/mul FROM THIS LIST, and the reason is a
+         # property of the 2-cycle multiply rather than a weakening of the test.
+         #
+         # At MUL_CYCLES = 4 the mutation read m_p2_q a cycle before the product
+         # reached it -- the PREVIOUS multiply's answer, a wrong VALUE, which
+         # rv32um/mul sees.  At MUL_CYCLES = 2 there is no product register at
+         # all: MUL_PIPE is 0 and the 33x33 is combinational from the operand
+         # registers, which are held by their enable.  So `done` a cycle early
+         # cannot read a partial result, because there is nothing partial to
+         # read.  What actually happens is that cnt_q (which starts at 1) never
+         # equals target-1 = 0 until it WRAPS at 64, so MUL takes 65 cycles and
+         # returns the right answer.  A timing-only mutation, and the two span
+         # checks catch it: directed:a14_muldiv and random:muldiv both do.
+         #
+         # rv32um/div stays, because the divider is untouched at 34 cycles and
+         # its loop really does hold partial state.
+         caught=["directed:a14_muldiv", "random:muldiv", "riscv:rv32um/div"]),
 
     # THIS ENTRY REPLACED ONE THAT ESCAPED, AND THE ESCAPE WAS THE FINDING.
     # The first version dropped the multiplier's operand-register ENABLE, so

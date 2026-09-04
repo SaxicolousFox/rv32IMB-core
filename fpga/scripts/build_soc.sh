@@ -53,6 +53,24 @@ rm -f "$STAGE_WSL/rtl/rvntt_blinky_top.sv" "$STAGE_WSL/rtl/rvntt_bram_selftest.s
       "$STAGE_WSL/rtl/rvntt_uart_report.sv"
 
 cp "$ROOT"/fpga/constraints/arty_a7_100t_soc.xdc "$STAGE_WSL/constraints/"
+
+# A27 (MODS_A2): an OPTIONAL floorplan constraint.  SOC_PBLOCK names a file in
+# fpga/constraints/; absent, the build is exactly what it was before, which is
+# what makes A27's before-and-after a one-variable comparison.
+#
+# It is staged under a FIXED name so the Tcl script does not have to know which
+# configuration it is running -- and build_soc.tcl prints whether it found one,
+# because a floorplanning experiment whose constraint silently failed to reach
+# the tool would report the unconstrained number as a result.  That is the
+# shape A24 hit with `cmd.exe` eating an `=`, three steps ago.
+if [ -n "${SOC_PBLOCK:-}" ]; then
+  if [ ! -f "$ROOT/fpga/constraints/$SOC_PBLOCK" ]; then
+    echo "SOC_FAIL: SOC_PBLOCK=$SOC_PBLOCK not found in fpga/constraints/" >&2
+    exit 1
+  fi
+  cp "$ROOT/fpga/constraints/$SOC_PBLOCK" "$STAGE_WSL/constraints/pblock.xdc"
+  echo "=== floorplan: $SOC_PBLOCK ==="
+fi
 cp "$ROOT"/fpga/scripts/build_soc.tcl            "$STAGE_WSL/"
 # $readmemh and `include both resolve relative to Vivado's working directory.
 cp "$ROOT"/fpga/generated/soc_clk.svh   "$STAGE_WSL/"
