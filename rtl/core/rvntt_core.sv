@@ -223,9 +223,17 @@ module rvntt_core #(
   // `bp_flush` below tells the predictor to say so rather than answer about the
   // wrong address.  One unpredicted instruction per redirect, and the entire EX
   // datapath leaves the fetch path.
-  wire [31:0] bp_lookup_pc = front_stall  ? pc_q
-                           : bp_pred_taken ? bp_pred_target
-                           :                 pc_q + 32'd4;
+  // A26 lever 5.  `front_stall` USED TO BE THE FIRST TERM OF THIS MUX, and it
+  // was the whole critical path: it is a function of the decoded instruction,
+  // so it dragged the instruction memory's output, the decoder and the hazard
+  // unit in front of the BTB's index mux, its array read and its tag compare.
+  // Measured at 14.033 ns with the fetch RAM as the source and pred_taken_q as
+  // the destination.  The predictor now HOLDS its registered answer instead,
+  // which A19's own comment says is the same answer -- see rvntt_bpred's `hold`
+  // port for why that is an identity rather than an approximation.  What is
+  // left here reads only registered sources, exactly as A19 required.
+  wire [31:0] bp_lookup_pc = bp_pred_taken ? bp_pred_target
+                                           : pc_q + 32'd4;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) pc_q <= RESET_PC;
@@ -237,6 +245,7 @@ module rvntt_core #(
       .rst_n       (rst_n),
       .lookup_pc   (bp_lookup_pc),
       .flush       (ex_redirect),
+      .hold        (front_stall),
       .pred_taken  (bp_pred_taken),
       .pred_target (bp_pred_target),
       .pred_hit    (bp_pred_hit),
@@ -394,6 +403,34 @@ module rvntt_core #(
       // order is written down so that stops being an argument and starts being
       // a rule.
       id_ex_q <= id_ex_q;
+
+      // ---- A26 lever 2: THE CASE riscv-formal FOUND ---------------------
+      // Holding the whole register is right for every field EXCEPT the
+      // precomputed forwarding selects, and this is the one place the "same
+      // decision, one cycle earlier" argument does not carry.
+      //
+      // An instruction sits in EX for MORE than one cycle when the multi-cycle
+      // unit is running, and while it does, EX/MEM is bubbled every cycle and
+      // MEM/WB copies EX/MEM regardless.  So the producers DRAIN out from under
+      // it: the one that was in MEM moves to WB, and the one that was in WB
+      // leaves the pipeline.  rvntt_muldiv's header describes exactly this
+      // ("on the second stall cycle FWD_MEM stops matching, on the third
+      // FWD_WB stops matching") and captures its operands on the start cycle
+      // because of it.
+      //
+      // A held select would keep pointing at a stage that has since been
+      // cleared, and FWD_MEM into a bubble reads ZERO -- worse than the
+      // register file's stale copy, which is what the original computation
+      // falls back to.  So the select DECAYS with the pipeline instead:
+      // MEM -> WB -> REG, one step per stalled cycle, which is precisely what
+      // recomputing it in EX would have produced.
+      //
+      // a_fwd_precompute_matches_a/b is what found this, at step 14, on all 77
+      // checks at once.  Nothing else in the tree noticed: the only consumer
+      // that reads these operands after the start cycle is the multi-cycle
+      // unit itself, and it does not re-read them.
+      id_ex_q.fwd_a <= fwd_decay(id_ex_q.fwd_a);
+      id_ex_q.fwd_b <= fwd_decay(id_ex_q.fwd_b);
     end else if (id_stall || ex_redirect) begin
       id_ex_q <= '0;
     end else begin
@@ -412,6 +449,12 @@ module rvntt_core #(
       id_ex_q.pred_taken  <= if_id.pred_taken;
       id_ex_q.pred_target <= if_id.pred_target;
       id_ex_q.pred_hit    <= if_id.pred_hit;
+      // A26 lever 2.  Registered on exactly the edge that makes it correct --
+      // see the argument at u_forward.  The two bubble arms above clear it to
+      // FWD_REG along with everything else, which is the right value for a
+      // bubble: it reads nothing.
+      id_ex_q.fwd_a       <= id_fwd_a;
+      id_ex_q.fwd_b       <= id_fwd_b;
     end
   end
 
@@ -425,7 +468,19 @@ module rvntt_core #(
   // that `sw` wrote a stale value.  Plan A7 names it explicitly for that
   // reason, and there is exactly one rs2 signal in this stage so it cannot be
   // half-fixed.
+  // One step of the decay described at the ex_stall arm of the ID/EX register:
+  // the producer in MEM moves to WB, the producer in WB leaves.  Saturating at
+  // FWD_REG, which is where a producer that has left the pipeline sends you.
+  function automatic rv32i_pkg::fwd_sel_e fwd_decay(input rv32i_pkg::fwd_sel_e s);
+    fwd_decay = (s == rv32i_pkg::FWD_MEM) ? rv32i_pkg::FWD_WB
+                                          : rv32i_pkg::FWD_REG;
+  endfunction
+
+  // A26 lever 2: `ex_fwd_*` is now a registered field rather than a
+  // combinational function of this cycle's pipeline registers.  `id_fwd_*` is
+  // where it is computed, one stage earlier.
   rv32i_pkg::fwd_sel_e ex_fwd_a, ex_fwd_b;
+  rv32i_pkg::fwd_sel_e id_fwd_a, id_fwd_b;
   logic [31:0] ex_rs1_fwd, ex_rs2_fwd;
 
   // The MEM stage's forwardable value.  NOT `mem_result`, which includes the
@@ -456,21 +511,55 @@ module rvntt_core #(
     endcase
   end
 
+  // ---- A26 lever 2: the forwarding decision is made in ID -----------------
+  // MODS_A2 3.4 measures segment 1 -- MEM/WB rd_addr, through the forwarding
+  // comparators, to the operand mux -- at 3.35 ns of a 12.954 ns path, and it
+  // starts at a five-bit comparator whose inputs are all registered.  The
+  // decision does not have to be made in the cycle it is used.
+  //
+  // WHY IT IS THE SAME DECISION, and this is the whole correctness argument.
+  // An instruction in EX at cycle T compares its rs against the producers in
+  // MEM and WB.  The same instruction in ID at T-1 compares its rs against the
+  // producers in EX and MEM.  Those are the same two instructions IF the
+  // pipeline advances all three registers together on that edge -- and it
+  // does, provably, from the write conditions themselves:
+  //
+  //   * ID/EX takes a NEW instruction only in its final `else`, which requires
+  //     !ex_stall && !id_stall && !ex_redirect.
+  //   * ex_redirect is `!ex_stall && (ex_trap || ex_mret || ex_mispredict)`,
+  //     so !ex_redirect && !ex_stall implies !ex_trap.
+  //   * EX/MEM bubbles on `ex_trap || ex_stall`, and both are false there, so
+  //     EX/MEM takes the EX instruction unsquashed on exactly those edges.
+  //   * MEM/WB copies EX/MEM unconditionally, always.
+  //
+  // So on every edge where a new instruction enters EX, the instruction that
+  // was in EX enters MEM and the one in MEM enters WB.  a_pipe_advances_
+  // together asserts the first three of those and a_fwd_precompute_matches
+  // asserts the conclusion directly, against a second copy of the original
+  // EX-stage computation, at depth 14.
+  //
+  // THE PORT NAMES STILL READ `ex_`/`mem_`/`wb_`, and that is deliberate:
+  // rvntt_forward is unchanged, keeps its standalone proof and its cocotb
+  // tests, and its names describe where each operand WILL BE when the answer
+  // is used.  From ID, that is one cycle in the future.
   rvntt_forward u_forward (
-      .ex_rs1_addr   (id_ex_q.rs1_addr),
-      .ex_rs2_addr   (id_ex_q.rs2_addr),
-      .ex_uses_rs1   (id_ex_q.ctrl.uses_rs1),
-      .ex_uses_rs2   (id_ex_q.ctrl.uses_rs2),
-      .mem_valid     (ex_mem_q.valid),
-      .mem_reg_write (ex_mem_q.reg_write),
-      .mem_mem_read  (ex_mem_q.mem_read),
-      .mem_rd_addr   (ex_mem_q.rd_addr),
-      .wb_valid      (mem_wb_q.valid),
-      .wb_reg_write  (mem_wb_q.reg_write),
-      .wb_rd_addr    (mem_wb_q.rd_addr),
-      .fwd_a         (ex_fwd_a),
-      .fwd_b         (ex_fwd_b)
+      .ex_rs1_addr   (id_rs1),
+      .ex_rs2_addr   (id_rs2),
+      .ex_uses_rs1   (id_ctrl.uses_rs1),
+      .ex_uses_rs2   (id_ctrl.uses_rs2),
+      .mem_valid     (id_ex_q.valid),
+      .mem_reg_write (id_ex_q.ctrl.reg_write),
+      .mem_mem_read  (id_ex_q.ctrl.mem_read),
+      .mem_rd_addr   (id_ex_q.rd_addr),
+      .wb_valid      (ex_mem_q.valid),
+      .wb_reg_write  (ex_mem_q.reg_write),
+      .wb_rd_addr    (ex_mem_q.rd_addr),
+      .fwd_a         (id_fwd_a),
+      .fwd_b         (id_fwd_b)
   );
+
+  assign ex_fwd_a = id_ex_q.fwd_a;
+  assign ex_fwd_b = id_ex_q.fwd_b;
 
   always_comb begin
     unique case (ex_fwd_a)
@@ -634,11 +723,29 @@ module rvntt_core #(
   // for the same reason: the ALU's four-level operation-select mux is in front
   // of something that only ever wanted a sum.
   //
-  // JALR is left on the ALU: its target genuinely depends on a register, which
-  // is the whole difference between it and the other two shapes.
+  // A19 left JALR on the ALU because "its target genuinely depends on a
+  // register, which is the whole difference between it and the other two
+  // shapes".  That is true, and A26 (MODS_A2 3.4) is that it is also exactly
+  // why A17's adder is the right one: `ex_mem_addr = ex_rs1_fwd + imm` is a
+  // REGISTER-sourced sum and has been sitting here since A17.  Nobody noticed,
+  // because A17 added it for loads and A19 added a different one for branches,
+  // and JALR is neither.
+  //
+  // THE DECODER IS WHAT MAKES THIS TRUE, not this file: OPC_JALR sets
+  // alu_op = ALU_ADD, alu_src_a = SRCA_RS1 and alu_src_b = SRCB_IMM, so
+  // ex_alu_y and ex_mem_addr are the same number.  a_jalr_target_matches_alu
+  // proves it at depth 14 rather than trusting the sentence, which is the same
+  // shape of claim as a_addr_adder_matches_alu and a_pc_target_matches_alu.
+  //
+  // WHAT IT REMOVES.  ex_alu_y no longer feeds ex_jump_target at all, so the
+  // ALU's operation-select mux and the JALR target form both leave the
+  // mispredict path -- 3.4's segments 3 and 4, measured at about 2.7 ns of
+  // 12.954.  ex_alu_y now terminates at ex_result, which terminates at a
+  // pipeline register.  ZERO NEW LOGIC: the adder already existed and its
+  // output already fanned out to the byte enables and the trap value.
   wire [31:0] ex_pc_target = id_ex_q.pc + id_ex_q.imm;
 
-  assign ex_jump_target = id_ex_q.ctrl.jalr ? {ex_alu_y[31:1], 1'b0}
+  assign ex_jump_target = id_ex_q.ctrl.jalr ? {ex_mem_addr[31:1], 1'b0}
                                             : ex_pc_target;
 
   // ---- A19: checking the prediction, and telling the predictor -------------
@@ -1135,6 +1242,16 @@ module rvntt_core #(
     if (id_ex_q.valid && (id_ex_q.ctrl.mem_read || id_ex_q.ctrl.mem_write))
       a_addr_adder_matches_alu: assert (ex_mem_addr == ex_alu_y);
 
+    // ---- A26 lever 1: JALR's target comes off A17's address adder ---------
+    // Same claim, same reason, third consumer.  If a future decoder change
+    // gave JALR a different alu_src or a different alu_op, ex_jump_target
+    // would silently become a different number from the architectural target
+    // and every JALR in the program would go to the wrong place -- which the
+    // cosimulator would catch, but at depth 14 this catches it first and says
+    // which of the two adders disagreed.
+    if (id_ex_q.valid && id_ex_q.ctrl.jalr)
+      a_jalr_target_matches_alu: assert (ex_mem_addr == ex_alu_y);
+
     // ---- A20: the two stalls are MUTUALLY EXCLUSIVE, and that is proved
     // ---- here rather than assumed by the counter that depends on it.
     //
@@ -1153,6 +1270,68 @@ module rvntt_core #(
     // future multi-cycle unit ever does overlap with a load this fires at
     // depth 14 instead of silently double-counting.
     a_stalls_are_disjoint: assert (!(id_stall && ex_stall));
+
+    // ---- A26 lever 2, the structural half of the argument ----------------
+    // On every edge where ID/EX takes a NEW instruction, EX/MEM must take the
+    // EX instruction unsquashed -- otherwise the producer the ID-stage
+    // comparison matched against would not be in MEM when the answer is used,
+    // and the forward would come from a bubble.  ID/EX's final `else` requires
+    // !ex_stall && !id_stall && !ex_redirect; EX/MEM squashes on
+    // `ex_trap || ex_stall`.  So the obligation is exactly `!ex_trap`, and it
+    // follows from ex_redirect's own definition rather than from a coincidence.
+    if (!ex_stall && !id_stall && !ex_redirect)
+      a_pipe_advances_together: assert (!ex_trap && !ex_stall);
+
+    // ---- A26 lever 5: the fact holding the prediction rests on -------------
+    // Every piece of predictor state is written under `upd_valid` alone.  If
+    // the core can stall the front end while also updating the predictor, then
+    // a repeated lookup would NOT return the same answer as the held one and
+    // the transformation stops being an identity.  It cannot: ex_bp_upd has
+    // !ex_stall in it directly, and id_stall requires the EX instruction to be
+    // a LOAD, which is neither a branch nor a jump.  Two independent reasons,
+    // one assertion, proved at depth 14.
+    a_no_bp_update_under_front_stall: assert (!(front_stall && ex_bp_upd));
+  end
+
+  // ---- A26 lever 2, the half that proves the conclusion -------------------
+  // A SECOND COPY OF THE ORIGINAL COMPUTATION, wired the way it was wired
+  // before this step, with its answer compared against the registered one.
+  // This is the strongest available check and the cheapest to read: it does
+  // not restate the transformation, it states that the transformation changed
+  // nothing.  riscv-formal proves it at depth 14 on every one of its 77 checks,
+  // because an assert in the design is an obligation on all of them.
+  //
+  // It is NOT the same instance: `u_forward` now reads ID-stage operands, and
+  // this one reads the EX-stage operands the original read.  If the two ever
+  // disagree -- a new stall condition that advances one register and not the
+  // others, a producer squashed after the decision was taken -- this fires and
+  // names the cycle.
+  rv32i_pkg::fwd_sel_e f_fwd_a_ex, f_fwd_b_ex;
+  rvntt_forward u_forward_ref (
+      .ex_rs1_addr   (id_ex_q.rs1_addr),
+      .ex_rs2_addr   (id_ex_q.rs2_addr),
+      .ex_uses_rs1   (id_ex_q.ctrl.uses_rs1),
+      .ex_uses_rs2   (id_ex_q.ctrl.uses_rs2),
+      .mem_valid     (ex_mem_q.valid),
+      .mem_reg_write (ex_mem_q.reg_write),
+      .mem_mem_read  (ex_mem_q.mem_read),
+      .mem_rd_addr   (ex_mem_q.rd_addr),
+      .wb_valid      (mem_wb_q.valid),
+      .wb_reg_write  (mem_wb_q.reg_write),
+      .wb_rd_addr    (mem_wb_q.rd_addr),
+      .fwd_a         (f_fwd_a_ex),
+      .fwd_b         (f_fwd_b_ex)
+  );
+
+  always_comb begin
+    // Only for an instruction that is really in EX.  A bubble's fwd fields are
+    // cleared to FWD_REG and its uses_rs* are zero, so the reference agrees
+    // there too -- but asserting it for bubbles would be asserting a property
+    // of '0, not of the transformation.
+    if (id_ex_q.valid) begin
+      a_fwd_precompute_matches_a: assert (ex_fwd_a == f_fwd_a_ex);
+      a_fwd_precompute_matches_b: assert (ex_fwd_b == f_fwd_b_ex);
+    end
   end
 
   // ---- A19: the other half of rvntt_bpred's interface contract ------------

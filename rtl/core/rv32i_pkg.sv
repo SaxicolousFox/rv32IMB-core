@@ -140,19 +140,25 @@ package rv32i_pkg;
   // retuning the divider here without retuning the model fails a test rather
   // than silently making the independent cycle model agree by construction.
   //
-  // MUL is 3 (MODS_A2 A25; it was 4 through A24).  The multiplier carries an
-  // operand register and MUL_CYCLES-2 product registers, derived in
-  // rvntt_muldiv.sv rather than written twice.  A14 chose 4 so Vivado could
-  // pack AREG/BREG, MREG and PREG into the DSP48E1 -- plan B1's advice, for
-  // plan B1's reason -- and A25 measured what the third stage was actually
-  // worth: out of context the unit clears 160 MHz at 4, at 3 AND at 2, with the
-  // worst register-to-register path in the DSP cascade both times.  The stage
-  // was buying nothing this core can use, and CoreMark pays 18,792 cycles for
-  // it.  DIV is 34 because the
+  // MUL is 2 (MODS_A2 A25 took it to 3; A28 measured 2 and adopted it).  The
+  // multiplier carries an operand register and MUL_CYCLES-2 product registers,
+  // derived in rvntt_muldiv.sv rather than written twice, so at 2 the 33x33 is
+  // combinational FROM THE OPERAND REGISTER -- not from the module input, which
+  // would put a multiplier behind the forwarding mux.
+  //
+  // A14 chose 4 so Vivado could pack AREG/BREG, MREG and PREG into the DSP48E1
+  // -- plan B1's advice, for plan B1's reason.  A25 measured what those stages
+  // were worth: out of context the unit clears 160 MHz at 4, at 3 AND at 2.
+  // But out of context is blind at 2, because the combinational product leaves
+  // through a PORT and an OOC run with no I/O delays does not time it -- A25
+  // recorded 2 as UNMEASURED rather than free.  A28 measured it where it
+  // actually lands, in the SoC: at the adopted 96.246 MHz, 2 cycles closes with
+  // WNS +0.004 against 3 cycles' +0.010.  Six picoseconds, on a design whose
+  // build-to-build spread is over a nanosecond.  DIV is 34 because the
   // radix-2 restoring loop is one load cycle, 32 iterations and one fixup
   // cycle, and it is DATA-INDEPENDENT: an early-out on a small dividend would
   // make the cycle model unbuildable (MODS_A A14).
-  localparam int MULDIV_MUL_CYCLES = 3;
+  localparam int MULDIV_MUL_CYCLES = 2;
   localparam int MULDIV_DIV_CYCLES = 34;
 
   // SYSTEM funct12 (the whole 31:20 field, not funct7).
@@ -476,6 +482,17 @@ package rv32i_pkg;
     logic        pred_taken;
     logic [31:0] pred_target;
     logic        pred_hit;      // A20, observational only
+    // A26 lever 2 (MODS_A2 3.4).  THE FORWARDING DECISION, MADE A STAGE EARLY.
+    // The comparison an instruction in EX makes is against producers in MEM and
+    // WB; the SAME decision, made in ID, is against producers in EX and MEM,
+    // because the ID/EX register only ever advances on a cycle when EX/MEM
+    // advances unsquashed.  Carrying the four-bit answer instead of recomputing
+    // it takes the rd_addr comparator and the select encoder off the EX
+    // critical path and leaves only the operand mux.
+    // rvntt_core's a_fwd_precompute_matches asserts it against the original
+    // EX-stage computation at depth 14.
+    fwd_sel_e    fwd_a;
+    fwd_sel_e    fwd_b;
   } id_ex_t;
 
   typedef struct packed {

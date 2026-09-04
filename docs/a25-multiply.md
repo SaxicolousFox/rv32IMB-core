@@ -150,6 +150,16 @@ critical path A12 identified and A26 exists to attack — forwarding mux, ALU
 result mux, misaligned-address check, BRAM byte enables. Putting a combinational
 33×33 in front of it is the wrong direction for the step that comes next.
 
+> **A28 measured it and adopted 2.** The paragraph below stood for exactly as
+> long as it took A26 to give the SoC a clock worth probing at. At the adopted
+> 96.246 MHz a 2-cycle multiply closes with **WNS +0.004 ns** against 3 cycles'
+> **+0.010** — six picoseconds, on a design whose build-to-build spread is over
+> a nanosecond — and it is worth a further **23 490 000 CoreMark cycles**. The
+> reasoning below is left standing because it is why 2 was *not* adopted in A25:
+> the OOC method genuinely cannot see that path, and adopting a latency on a
+> measurement that excludes the thing it changes would have been luck rather
+> than evidence. See `docs/a28-benchmarks.md`.
+
 So: **3, and 2 is not ruled out — it is unmeasured.** It is worth another
 18 792 CoreMark cycles (a further 2.7%), and the run that would settle it is a
 full SoC implementation, which A26 and A28 do anyway. `MUL_PIPE` is derived from

@@ -46,8 +46,25 @@ read_verilog -sv [concat $pkgs $rest]
 set_property include_dirs [list [pwd] [pwd]/rtl] [current_fileset]
 read_xdc constraints/arty_a7_100t_soc.xdc
 
+# A27: the optional floorplan.  Reported either way -- "none" is a result and a
+# constraint that quietly failed to arrive is not.
+if {[file exists constraints/pblock.xdc]} {
+  read_xdc constraints/pblock.xdc
+  puts "SOC_PBLOCK: present"
+} else {
+  puts "SOC_PBLOCK: none"
+}
+
 # ------------------------------------------------------------------ synthesis
 synth_design -top $TOP -part $PART -include_dirs [list [pwd] [pwd]/rtl]
+
+# ...and after synthesis, say what the floorplan actually CONTAINS.  A pblock
+# whose add_cells_to_pblock matched nothing -- a renamed instance, a -quiet that
+# swallowed the error -- creates an empty region and constrains nothing, and the
+# run looks identical to one with no pblock at all.
+foreach pb [get_pblocks -quiet] {
+  puts "SOC_PBLOCK_CELLS: $pb [llength [get_cells -quiet -of_objects $pb]] cell(s) at [get_property GRID_RANGES $pb]"
+}
 write_checkpoint -force $OUTDIR/post_synth.dcp
 report_utilization -file $OUTDIR/post_synth_util.rpt
 

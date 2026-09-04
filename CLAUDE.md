@@ -246,7 +246,7 @@ confirm it is satisfied.
 | **M7.1** | **RV32IM core: `M` verified and the benchmark re-measured** (`MODS_A`) | ✅ **hardware-confirmed** |
 | **M7.2** | **Core performance: Fmax recovered and branch prediction measured** (`MODS_A`) | ✅ **hardware-confirmed** |
 | **M7.3** | **The ISA round: B, Zicond and hardware counters** (`MODS_A2`) | ✅ **hardware-confirmed** |
-| **M7.4** | **A faster multiply and the Fmax the coprocessor can inherit** (`MODS_A2`) | **A24 ✅, A25 ✅; A26–A28 not started** |
+| **M7.4** | **A faster multiply and the Fmax the coprocessor can inherit** (`MODS_A2`) | ✅ **hardware-confirmed** |
 | **M7.5** | **The cryptographic guarantees: `Zkr` and `Zkt`** (`MODS_A2`) | not started |
 | M8–M16 | — | not started |
 
@@ -368,7 +368,8 @@ it back on purpose.** A17 reached 86.490 MHz with a dedicated load/store address
 adder (−1.589 ns for 26 LUTs); A19's predictor costs clock and returns more than
 it costs in IPC, so **absolute Dhrystone still rises 63.35 → 72.43 DMIPS on a
 slower part**. Both IPC figures and DMIPS/MHz land inside §A13's bands for the
-first time. **§9's core-only Fmax baseline is now 77.501 MHz**, not 86.490.
+first time. **§9's core-only Fmax baseline was 77.501 MHz** after A19, and is **96.246 MHz**
+after A26 — see M7.4 below.
 
 **A19's Fmax carries a wider band than any previous one, and the reason is
 recorded rather than averaged away.** The binary search is **not monotonic** —
@@ -598,6 +599,109 @@ both times and the resulting 4.023 ns DSP hop was the whole critical path.
 shift-adds derived from the constant itself. Whether a constant multiply wants a
 DSP or fabric is decided by its **population count**: `q = 3329` (four set bits)
 belongs in fabric, `BARR_V = 20159` (eleven) does not.
+
+**M7.4 is met by A24, A25, A26, A27 and A28 together, and is hardware-confirmed.**
+**Fmax 96.246 MHz** — up 29.1% from M7.3's 74.577 — **DMIPS 90.096,
+DMIPS/MHz 0.9361, CoreMark 326.24, CoreMark/MHz 3.3896, IPC 0.8734 (Dhrystone)
+and 0.8689 (CoreMark)** at 96.246 000 MHz, over three JTAG passes with **all 42
+integer counters identical across fifteen report blocks**. 5793 LUTs, 1926 FFs,
+32 BRAM tiles, 4 DSP48E1, **no floorplan**. `MUL` is **2 cycles** of EX
+occupancy. See `docs/a28-benchmarks.md` and `.json`.
+
+**§9's core-only Fmax baseline is now 96.246 MHz**, not 77.501.
+
+**A26 raised the clock 29.1% and changed not one cycle count**, which is the
+whole of its contract and is checked rather than asserted: every counter on the
+board is identical to A25's, and both identity residuals are **−40 and −48**,
+the same two numbers A23 measured. Three levers, each measured separately at one
+constraint (85 MHz, `default`) so the deltas are comparable:
+
+| lever | contribution |
+|---|---:|
+| 1 — JALR off the ALU result mux, onto A17's address adder | +0.073 ns |
+| 2 — the forwarding decision precomputed in ID | +0.673 ns |
+| 5 — the predictor **holds** instead of re-looking-up under a stall | **+2.293 ns** |
+
+**Lever 1's number is not lever 1's value.** §3.4 predicted ~2.7 ns and the
+logic really is gone; what the probe measures is the *design's* worst path, and
+lever 1 exposed a different one that was already 14.033 ns. **Everything after it
+is measured against that newly-exposed path, which is why lever 5 — a lever the
+plan does not list — is the largest contribution in the round.**
+
+**Lever 5 is the one worth carrying forward.** A19 wrote
+`bp_lookup_pc = front_stall ? pc_q : …` and its own comment says why it is
+correct: *"under front_stall the address does not move, so the lookup simply
+repeats and re-registers the same answer."* True, and expensive — `front_stall`
+is a function of the **decoded** instruction, so it dragged the instruction
+memory, the decoder and the hazard unit in front of the BTB's index mux, array
+read and tag compare. **If the lookup re-registers the same answer, the register
+can keep it.** That is an identity because every piece of predictor state is
+written under `upd_valid` alone, and `upd_valid` is provably false during a front
+stall — `ex_bp_upd` carries `!ex_stall`, and `id_stall` requires the EX
+instruction to be a **load**. Proved at depth 14 by
+`a_no_bp_update_under_front_stall`.
+
+**Levers 3 and 4 were dropped with evidence, not omitted.** The mispredict
+comparison lever 3 targets is no longer on the critical path, so it would cost
+cycles for zero benefit; and the fanout-131 and fanout-66 nets lever 4 aims at
+are gone, the largest fanout on the new path being 41.
+
+**riscv-formal found a real bug in lever 2, on all 77 checks at once, and the
+check that found it is the one worth copying.** Lever 2 was verified by keeping
+**a second copy of the original EX-stage computation** and asserting the two
+agree — not a restatement of the transformation, but the claim that the
+transformation changed nothing. The structural argument ("the same decision, one
+cycle earlier") is right about the edge an instruction *enters* EX and silent
+about the cycles it *stays* there: during a multi-cycle EX stall the producers
+drain out from under the consumer, and a held `FWD_MEM` reads a **bubble —
+zero** — which is worse than the register file's stale copy. The select now
+**decays** `MEM → WB → REG`, one step per stalled cycle. **Cosimulation passes
+over that bug**, because the only reader after the start cycle is the
+multi-cycle unit and it does not re-read.
+
+**A27's floorplanning answer is negative, and its premise was half wrong.**
+`post_route_clock_util.rpt` says Vivado had *already* concentrated the design
+into a contiguous 2×2 clock-region block with four regions empty. Both pblocks
+tried were slower — core+memory in one row by **0.651 ns**, core alone by
+**0.189 ns** — so **none is adopted**. That P2 is the better of the two says the
+memory's forced placement is the more expensive half: Vivado's own BRAM choice
+beat being pushed into the row that already held 29 of the 32 tiles. **Route
+delay at low utilisation is not automatically evidence of a spread placement** —
+it can be a path whose hops are set by where the site *types* are.
+See `docs/a27-floorplan.md`; `SOC_PBLOCK=<file>` selects one, and
+`build_soc.tcl` prints `SOC_PBLOCK_CELLS` so an empty pblock cannot pass as a
+floorplan.
+
+**A28 measured the 2-cycle multiply A25 had declined, and adopted it.** A25
+recorded 2 as *unmeasured, not ruled out* — at 2 the 33×33 is combinational into
+the module's `result` **port**, which an out-of-context run with no I/O delays
+does not time; its endpoint moved to the divider, which was the tell. Measured in
+the SoC at the adopted clock: **WNS +0.004 ns against 3 cycles' +0.010**, six
+picoseconds, for another 3.2% of CoreMark. `MODS_A2` A25's stop rule named the
+wrong hazard — there is no data-dependent path at any latency, because the
+multiplier is a register chain whose length is its latency.
+
+**One mutation changed verdict at 2 cycles, and the reason is structural.**
+`muldiv_done_one_cycle_early` was caught by `rv32um/mul` at 4 cycles because it
+read the product register early. At 2 cycles **there is no product register** —
+`MUL_PIPE` is 0 — so it cannot read a partial result and degrades to a
+timing-only fault. The two span checks still catch it; `rv32um/div` still does,
+because the divider is untouched. The catcher list was narrowed **with that
+reason written down**.
+
+**The counter pairing is retired.** A20's hardware counters and A18's simulation
+instrument agree **8 of 8 rows** across both benchmarks on the shipped ISA. Per
+`MODS_A2` A28, **from this point the hardware counters are the primary source and
+the simulation instrument is the cross-check**, not the record. The instrument
+keeps two jobs the counters cannot do: it closes the identity at residual exactly
+zero, which software reading its own counters structurally cannot, and it runs
+without a board.
+
+**The A26 Fmax search was MONOTONIC, unlike A19's** — 104.998 failed by 0.423,
+100.000 by 0.210, 97.504 by 0.152 — but the implied path delay across the six
+runs spans **9.947–11.575 ns, a 1.63 ns spread**, wider than A12's ±0.4 and
+A19's 0.9, because the router optimises to the constraint and stops. Quote
+96.246 MHz as the fastest constraint observed to pass, not as a boundary.
 
 **A25 cut the multiply from 4 cycles of EX occupancy to 3, and it is
 hardware-confirmed.** The product pipeline's depth is now **derived** from the
