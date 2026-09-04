@@ -246,7 +246,7 @@ confirm it is satisfied.
 | **M7.1** | **RV32IM core: `M` verified and the benchmark re-measured** (`MODS_A`) | ✅ **hardware-confirmed** |
 | **M7.2** | **Core performance: Fmax recovered and branch prediction measured** (`MODS_A`) | ✅ **hardware-confirmed** |
 | **M7.3** | **The ISA round: B, Zicond and hardware counters** (`MODS_A2`) | ✅ **hardware-confirmed** |
-| **M7.4** | **A faster multiply and the Fmax the coprocessor can inherit** (`MODS_A2`) | not started |
+| **M7.4** | **A faster multiply and the Fmax the coprocessor can inherit** (`MODS_A2`) | **A24 ✅, A25 ✅; A26–A28 not started** |
 | **M7.5** | **The cryptographic guarantees: `Zkr` and `Zkt`** (`MODS_A2`) | not started |
 | M8–M16 | — | not started |
 
@@ -555,6 +555,96 @@ compared, 0 differing. The residual 2.92 MHz is B's placement cost, and §3.4's
 A26 levers target that exact path; pulling them forward was deliberately
 declined, because A26's discipline is that cycle-neutral Fmax work gets its own
 before/after.
+
+**A24 answered the round's gating question, and the answer is that nothing is
+gated.** A Tier-1 butterfly satisfying the frozen contract — `kmm` at 4 cycles of
+EX occupancy, `kbfct`/`kbfgs` at 5 — closes at **128.125 MHz** out of context on
+this part and speed grade, with 2 DSP48E1, 326 LUTs and 150 FFs. §3.3 established
+that Tier 1 **cannot** be in its own clock domain, so that number is the ceiling
+the core's clock inherits; A24's pre-stated 10% margin puts the core's limit at
+**116.5 MHz**, so **A26 and A27 may target 110 MHz and are not bounded by Track
+B**. See `docs/a24-tier1-probe.md` and `.json`, and `rtl/probe/CLAUDE.md`.
+
+**The frozen latency table is not a compromise — it is measured to be right.**
+Reading "`kmm` 4" as a constraint on the whole pipeline, so that every operation
+finishes in four, costs **24%** (97.5 MHz); three costs **45%** (70.0 MHz). One
+four-stage pipeline serves both numbers because `kmm` does not use the butterfly
+segment and taps out of the Montgomery one an edge early. **The limiting path is
+the Montgomery reduction in every configuration** — not the multiply, which is a
+DSP nowhere near the critical path.
+
+**The probe lives in `rtl/probe/`, never `rtl/ntt/`, and ships nothing.**
+`rtl/ntt/` is Track B's; a probe there would be mistaken for a starting point.
+**What carries across is the frequency, not the RTL.** It still gets a
+correctness test against the frozen model (`tier1_probe`, 0.2 s), because a
+datapath that computes the wrong answer is very likely a *smaller* one — which
+reports a frequency the real unit cannot reach, i.e. exactly the failure the step
+exists to prevent.
+
+**A seventh "green over nothing", and it was mine.** `cmd.exe` treats `=` as an
+argument separator, so `-tclargs … STAGES=2` reached the Tcl script as two
+arguments, `synth_design` got no generic, and three "configurations" were all the
+default with byte-identical WNS at every point. The tell was a critical-path
+endpoint naming a generate block the shallower configurations do not contain.
+**Generics now travel as `NAME:VALUE`**, `synth_ooc.tcl` hard-fails if trailing
+arguments parse to none, and `probe_tier1.py` refuses to report two
+configurations whose netlists are identical — a different pipeline depth cannot
+have the same flop count.
+
+**Vivado ignored `use_dsp = "no"` in both documented forms**, on a net
+declaration and on an `always_comb` variable; the cell histogram said `DSP48E1=4`
+both times and the resulting 4.023 ns DSP hop was the whole critical path.
+**Structure controls what attributes did not** — write the constant multiplies as
+shift-adds derived from the constant itself. Whether a constant multiply wants a
+DSP or fabric is decided by its **population count**: `q = 3329` (four set bits)
+belongs in fabric, `BARR_V = 20159` (eleven) does not.
+
+**A25 cut the multiply from 4 cycles of EX occupancy to 3, and it is
+hardware-confirmed.** The product pipeline's depth is now **derived** from the
+latency (`MUL_PIPE = MUL_CYCLES - 2`) rather than written twice, and `MUL_CYCLES`
+is a module parameter — defaulted from `rv32i_pkg` — only so that
+`fpga/scripts/synth_ooc.sh` can sweep it. **Nothing instantiates it with a
+different value and `isa_consistency` checks that.** Out of context the unit
+clears 160 MHz at 4, at 3 *and* at 2, so A14's third register stage was buying
+nothing this core can use.
+
+**Every board delta closes exactly, and the interesting one is a zero.**
+CoreMark **−23 490 000 cycles (−2.99%)**, and its multi-cycle EX stall counter
+fell by the *same* number — A23's `exstall`/3 is 23 490 000 multiplies and A25
+removes one cycle from each. CoreMark/MHz 3.1866 → **3.2850**, IPC 0.8168 →
+**0.8420**. The ML-KEM NTT's `rv32im` build saves 2 688 cycles (2 688
+multiplies); its `rv32i` build and SHAKE128 are unchanged because neither
+contains a `MUL`. Three JTAG passes, **42 integer counters identical**.
+See `docs/a25-multiply.md` and `docs/a25-benchmarks.json`.
+
+**Dhrystone gains exactly zero, and B is why — measured, not guessed.** Its
+`exstall` is 66 000 000 over 2 000 000 runs, exactly 33 per run: one divide and
+**no multiplies at all**, because at `-march=rv32imb` the compiler
+strength-reduces Dhrystone's multiply into Zba shift-adds. **A21 had already
+removed the thing A25 makes cheaper.** The same measurement at `-march=rv32im`
+shows Dhrystone saving a cycle per run, so **the value of a shorter multiply
+depends on which other extensions are enabled** — measure it on the image that
+ships.
+
+**§3.6 P1 arrived as pre-committed**: the software NTT baseline got *faster*
+(33 946 → 31 258 cycles), so §10 M2's reported coprocessor speedup gets
+**smaller**, and the RV32I:RV32IM cycle ratio rises 4.8828 → 5.3027. That is the
+correct direction, and `docs/a25-benchmarks.json` is now the denominator, not
+A16's.
+
+**A25 is NOT Fmax-neutral, and the multiplier is not why.** Rebuilt at A23's
+exact clock with a byte-identical memory image and `explore_postroute`, the A25
+netlist **misses 74.577 MHz by 0.423 ns** and produces no bitstream; the board
+numbers above are taken at **70.000 MHz**. The failing path is
+`mem_wb rd_addr → … → pc_q` — the core's own writeback-to-redirect path, the
+same family A12, A17, A19 and A23 each found in turn — and `rvntt_muldiv`
+appears nowhere on it. **The comparison is one-variable** (`build_soc.sh` does
+not stage `rtl/probe/`, and the last commit before A25 to touch a staged source
+is A23's), so the move is attributable to removing 64 flops perturbing
+placement — which is the ±0.4 ns band A12 recorded, arriving unfavourably this
+time. **One build cannot separate "the change cost this" from "a different
+design placed differently"; A28 measures Fmax properly and A26's levers target
+this exact path.**
 
 **M7.3's done-when was revised once, and the revision is recorded in
 `MODS_A2` §6.** "The identity closes with residual exactly zero on hardware" is

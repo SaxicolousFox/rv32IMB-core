@@ -67,7 +67,17 @@
 // ============================================================================
 `default_nettype none
 
-module rvntt_muldiv (
+module rvntt_muldiv #(
+    // MODS_A2 A25.  The EX-occupancy contract, DEFAULTED FROM THE PACKAGE so
+    // that the core, the cycle model and Spike keep taking the one number
+    // rv32i_pkg holds.  It is a parameter rather than a localparam for exactly
+    // one reason: A25 has to answer "what does one register level of the
+    // product pipeline actually cost in nanoseconds", and that is a question
+    // only a real post-route run can answer -- fpga/scripts/synth_ooc.sh
+    // sweeps it out of context.  NOTHING INSTANTIATES THIS MODULE WITH A
+    // DIFFERENT VALUE, and tb/unit/test_isa_consistency.py checks that.
+    parameter int MUL_CYCLES = rv32i_pkg::MULDIV_MUL_CYCLES
+) (
     input  wire         clk,
     input  wire         rst_n,
 
@@ -83,8 +93,22 @@ module rvntt_muldiv (
     output logic [31:0] result
 );
 
-  localparam int MUL_CYCLES = rv32i_pkg::MULDIV_MUL_CYCLES;
   localparam int DIV_CYCLES = rv32i_pkg::MULDIV_DIV_CYCLES;
+
+  // Register levels on the PRODUCT side.  Occupancy L gives L-1 clock edges
+  // between the operands appearing and the result being read; one of those is
+  // spent capturing the operands, so the product pipeline gets L-2.
+  //
+  //   L = 4 : operands | product | delay      <- A14's arrangement
+  //   L = 3 : operands | product              <- A25's target
+  //   L = 2 : operands, then combinational    <- the multiply after a flop
+  //
+  // At L = 2 the 33x33 is combinational from the OPERAND REGISTER, not from
+  // the module input.  That distinction is the whole reason the operand
+  // capture is kept rather than the product register: the alternative puts a
+  // 33x33 multiplier directly behind the forwarding mux, which is where the
+  // core's critical path already is.
+  localparam int MUL_PIPE = MUL_CYCLES - 2;
 
   // ==========================================================================
   // Sequencing
@@ -151,7 +175,6 @@ module rvntt_muldiv (
 
   /* verilator lint_off PROCASSINIT */
   logic signed [32:0] m_a_q = '0, m_b_q = '0;
-  logic        [63:0] m_p_q = '0, m_p2_q = '0;
   logic               m_hi_q = 1'b0;
   /* verilator lint_on PROCASSINIT */
 
@@ -170,9 +193,28 @@ module rvntt_muldiv (
       m_b_q  <= b_ext;
       m_hi_q <= (op[1:0] != 2'b00);      // everything but MUL wants the top half
     end
-    m_p_q  <= m_prod[63:0];
-    m_p2_q <= m_p_q;
   end
+
+  // The product pipeline, MUL_PIPE deep.  Written as a chain rather than as
+  // two named registers so that the latency really is a parameter: A14's
+  // comment says the three stages exist so Vivado can pack AREG/BREG, MREG and
+  // PREG, and dropping one by hand while leaving MUL_CYCLES at 4 would make
+  // `done` fire a cycle after the result was already stale.
+  wire [63:0] m_full;
+  generate
+    if (MUL_PIPE == 0) begin : g_mul_comb
+      assign m_full = m_prod[63:0];
+    end else begin : g_mul_pipe
+      /* verilator lint_off PROCASSINIT */
+      logic [63:0] m_pipe_q [MUL_PIPE];
+      /* verilator lint_on PROCASSINIT */
+      always_ff @(posedge clk) begin
+        m_pipe_q[0] <= m_prod[63:0];
+        for (int i = 1; i < MUL_PIPE; i++) m_pipe_q[i] <= m_pipe_q[i-1];
+      end
+      assign m_full = m_pipe_q[MUL_PIPE-1];
+    end
+  endgenerate
 
   // ==========================================================================
   // DIV / DIVU / REM / REMU -- radix-2 restoring, on magnitudes
@@ -289,7 +331,7 @@ module rvntt_muldiv (
 `else
   always_comb begin
     if (is_div_q) result = div_result;
-    else          result = m_hi_q ? m_p2_q[63:32] : m_p2_q[31:0];
+    else          result = m_hi_q ? m_full[63:32] : m_full[31:0];
   end
 `endif
 

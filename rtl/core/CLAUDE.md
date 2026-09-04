@@ -59,6 +59,16 @@ Two conventions in it are load-bearing:
   `check_pkg_agreement()` compares them, so retuning the divider without
   retuning `tb/cosim/cycle_model.py` fails a test instead of silently making the
   independent cycle model agree by construction.
+- **A25 made the multiplier's pipeline depth DERIVED from that contract**:
+  `MUL_PIPE = MUL_CYCLES - 2`, product-side register levels. Before it, three
+  named registers sat beside a hardcoded 4 and were related only by a comment.
+  `MUL_CYCLES` is now a module **parameter** (defaulted from the package) purely
+  so `fpga/scripts/synth_ooc.sh` can sweep it against real post-route timing —
+  **nothing instantiates the module with a different value**, and
+  `tb/unit/test_isa_consistency.py` checks both that the default is the package
+  constant and that nothing in `rtl/` passes the parameter by name. An override
+  would leave the RTL retiring `MUL` at a cycle the independent cycle model does
+  not predict, and the failure would surface nowhere near the parameter.
 
 `insn` is carried the full length of the pipe on purpose: A5's commit tracer
 and A11's RVFI port both need `(pc, insn, rd, wdata)` at WB. It costs 128 FFs

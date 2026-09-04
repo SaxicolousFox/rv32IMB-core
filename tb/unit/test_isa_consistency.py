@@ -166,6 +166,48 @@ def main():
               "riscv-config has since gained the letter, update BOTH.")
         return 1
 
+    # ------------------------------------------------------------------
+    # MODS_A2 A25: the multiply latency, which is now a MODULE PARAMETER.
+    # ------------------------------------------------------------------
+    # rvntt_muldiv gained `parameter int MUL_CYCLES` so that A25 could sweep the
+    # product pipeline's depth against real post-route timing out of context.
+    # A parameter with a default is a second place the number can live, and the
+    # number is a CONTRACT: rv32i_pkg holds it, model/rv32i_ref.py duplicates it
+    # (check_pkg_agreement compares those two), tb/cosim/cycle_model.py predicts
+    # spans from it, and the core stalls for exactly that many cycles.
+    #
+    # An override at the instantiation would desynchronise all of that silently
+    # -- the RTL would retire MUL a cycle early or late and the cycle model
+    # would keep predicting the package's number, so cosimulation would fail
+    # somewhere that looks nothing like a parameter.  Two things are checked,
+    # both by string search: the default IS the package constant, and nothing
+    # in rtl/ passes the parameter by name.
+    muldiv = read("rtl/core/rvntt_muldiv.sv")
+    if not re.search(r"parameter\s+int\s+MUL_CYCLES\s*=\s*"
+                     r"rv32i_pkg::MULDIV_MUL_CYCLES", muldiv):
+        print("ISA_FAIL: rvntt_muldiv's MUL_CYCLES parameter no longer defaults "
+              "to rv32i_pkg::MULDIV_MUL_CYCLES.  The package is the contract "
+              "model/rv32i_ref.py and tb/cosim/cycle_model.py both read.")
+        return 1
+    overrides = []
+    for d, _, files in os.walk(os.path.join(ROOT, "rtl")):
+        for f in sorted(files):
+            if not f.endswith(".sv"):
+                continue
+            path = os.path.join(d, f)
+            body = io.open(path, encoding="utf-8").read()
+            if re.search(r"\.\s*MUL_CYCLES\s*\(", body):
+                overrides.append(os.path.relpath(path, ROOT))
+    print("MUL_CYCLES: default from package, %d override(s) in rtl/"
+          % len(overrides))
+    if overrides:
+        print("ISA_FAIL: MUL_CYCLES is overridden at instantiation in %s.  The "
+              "RTL would then retire MUL at a different cycle from the one "
+              "rv32i_pkg declares, and cycle_model.py predicts spans from the "
+              "package.  Change rv32i_pkg (and model/rv32i_ref.py) instead."
+              % ", ".join(overrides))
+        return 1
+
     print("\nISA_OK: %d sources agree" % len(found))
     return 0
 
