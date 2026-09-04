@@ -1,0 +1,98 @@
+{
+ "step": "A25",
+ "milestone": "M7.4 (in progress; A26-A28 outstanding)",
+ "what": "MODS_A2 A25 -- the multiply's EX occupancy cut from 4 cycles to 3. The memory image is BYTE-IDENTICAL to bench_a23.mem and the only source difference from A23's build is MULDIV_MUL_CYCLES, so every delta below is one-variable.",
+ "clock_hz": 70000000,
+ "clock_note": "70.000 MHz, not A23's 74.576.  The A25 netlist misses A23's clock by 0.423 ns on the core's writeback-to-PC redirect path, which the multiplier is not on.  Cycle counts and IPC do not depend on the clock and are directly comparable with A23; the derived rates are not.  A28 measures Fmax properly.",
+ "part": "xc7a100tcsg324-1",
+ "speed_grade": -1,
+ "vivado": "2025.2",
+ "strategy": "explore_postroute",
+ "luts": 5722,
+ "ffs": 1963,
+ "bram_tiles": 32,
+ "dsp48e1": 4,
+ "wns_ns": 0.048,
+ "whs_ns": 0.068,
+ "passes": 3,
+ "blocks_per_pass": 4,
+ "all_fields_identical_across_passes": true,
+ "integer_counters_compared": 42,
+ "flags": "-march=rv32im_zba_zbb_zbs_zbkb_zicond_zicsr -mabi=ilp32 -O2 -ffreestanding -nostdlib -nostartfiles -fno-common -Wall | dhrystone: -std=gnu89 + upstream no-inline pragma | mul/div: hardware M extension",
+ "dhrystone": {
+  "runs": 2000000,
+  "cycles": 1216000065,
+  "stat_cycles": 1216000090,
+  "instret": 1062000032,
+  "ipc": 0.873355224833906,
+  "dmips": 65.52736072460523,
+  "dmips_per_mhz": 0.9361051532086462,
+  "dhrystones_per_sec": 115131.57279313139,
+  "hpm": {
+   "loaduse": 52000006,
+   "exstall": 66000000,
+   "redirect": 18000046,
+   "mispredict": 18000046,
+   "btbhit": 171999989,
+   "xfertaken": 182000027
+  },
+  "vs_a23": {
+   "cycles": 0,
+   "instret": 0,
+   "exstall": 0,
+   "note": "ZERO change in every counter.  exstall is 66,000,000 = 2,000,000 x 33, which is one DIVIDE per run and NO multiplies: at -march=rv32imb the compiler strength-reduces Dhrystone's multiply into Zba shift-adds, so A21 had already removed what A25 makes cheaper."
+  }
+ },
+ "coremark": {
+  "iterations": 2500,
+  "cycles": 761038484,
+  "instret": 640820044,
+  "ipc": 0.8420336914263064,
+  "coremark_per_mhz": 3.284984994267386,
+  "score": 229.948949598717,
+  "crcfinal": 21109,
+  "seedcrc": 59893,
+  "hpm": {
+   "loaduse": 51803096,
+   "exstall": 46980000,
+   "redirect": 10717696,
+   "mispredict": 10717696,
+   "btbhit": 132795140,
+   "xfertaken": 92833117
+  },
+  "vs_a23": {
+   "cycles": -23490000,
+   "instret": 0,
+   "exstall": -23490000,
+   "implied_multiplies": 23490000,
+   "note": "The cycle saving and the exstall reduction are the SAME number, 23,490,000, which is exactly the multiply count implied by A23's exstall/3.  CoreMark performs no divides at all."
+  }
+ },
+ "ntt_dual_baseline": {
+  "rv32i_cycles": 165752,
+  "rv32im_cycles": 31258,
+  "rv32i_instret": 148655,
+  "rv32im_instret": 23805,
+  "cycle_ratio": 5.3027065071341735,
+  "instret_ratio": 6.244696492333543,
+  "sum": 3320186048,
+  "check": 0,
+  "vs_a23": {
+   "rv32i_cycles": 0,
+   "rv32im_cycles": -2688,
+   "note": "2,688 multiplies in the rv32im NTT, one cycle each.  The rv32i build is unchanged because it contains no MUL instruction at all -- libgcc multiplies in software.  MODS_A2 3.6 P1 arriving as pre-committed: the software NTT baseline got FASTER, so 10 M2's reported coprocessor speedup gets SMALLER.  That is the correct direction."
+  }
+ },
+ "keccak_dual_baseline": {
+  "rv32im_cycles": 373407,
+  "rv32imb_cycles": 312402,
+  "cycle_ratio": 1.1952772389421322,
+  "sum": 340517,
+  "check": 0,
+  "vs_a23": {
+   "rv32im_cycles": 0,
+   "rv32imb_cycles": 0,
+   "note": "Unchanged: SHAKE128 contains no multiplies."
+  }
+ }
+}

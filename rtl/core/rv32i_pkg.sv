@@ -140,13 +140,19 @@ package rv32i_pkg;
   // retuning the divider here without retuning the model fails a test rather
   // than silently making the independent cycle model agree by construction.
   //
-  // MUL is 4 because the multiplier carries three register stages (operand,
-  // product, output) so that Vivado can pack AREG/BREG, MREG and PREG into the
-  // DSP48E1 -- plan B1's advice, for plan B1's reason.  DIV is 34 because the
+  // MUL is 3 (MODS_A2 A25; it was 4 through A24).  The multiplier carries an
+  // operand register and MUL_CYCLES-2 product registers, derived in
+  // rvntt_muldiv.sv rather than written twice.  A14 chose 4 so Vivado could
+  // pack AREG/BREG, MREG and PREG into the DSP48E1 -- plan B1's advice, for
+  // plan B1's reason -- and A25 measured what the third stage was actually
+  // worth: out of context the unit clears 160 MHz at 4, at 3 AND at 2, with the
+  // worst register-to-register path in the DSP cascade both times.  The stage
+  // was buying nothing this core can use, and CoreMark pays 18,792 cycles for
+  // it.  DIV is 34 because the
   // radix-2 restoring loop is one load cycle, 32 iterations and one fixup
   // cycle, and it is DATA-INDEPENDENT: an early-out on a small dividend would
   // make the cycle model unbuildable (MODS_A A14).
-  localparam int MULDIV_MUL_CYCLES = 4;
+  localparam int MULDIV_MUL_CYCLES = 3;
   localparam int MULDIV_DIV_CYCLES = 34;
 
   // SYSTEM funct12 (the whole 31:20 field, not funct7).

@@ -695,6 +695,31 @@ MUTATIONS = [
                        "      .a      (id_ex_q.rs1_data),\n      .b      (id_ex_q.rs2_data),")],
          caught=["directed:a14_muldiv", "random:muldiv"]),
 
+    # A25 (MODS_A2).  The bug the multiply-latency PARAMETER made possible.
+    #
+    # A14's multiplier had three named registers and a hardcoded MUL_CYCLES=4;
+    # A25 derived the product pipeline's depth FROM the latency so the two
+    # cannot drift.  The failure that replaces the old one is therefore this:
+    # the derivation itself is wrong, and the pipeline is deeper than the
+    # latency allows.  `done` then fires while the product is still in flight
+    # and the result read is the PREVIOUS multiply's.
+    #
+    # The opposite direction -- a pipeline SHALLOWER than the latency -- is
+    # deliberately not a mutation, and the reason is the same one that made
+    # A14's operand-enable mutation escape correctly: the operands are held, so
+    # the product arrives early and simply sits there being right.  It wastes a
+    # cycle and changes no value, which is `muldiv_done_one_cycle_late`'s
+    # territory, and that entry already exists.
+    dict(step="A25", name="mul_pipeline_deeper_than_its_latency",
+         why="MUL_PIPE is derived as MUL_CYCLES-1 instead of MUL_CYCLES-2, so "
+             "the product pipeline is one register longer than the occupancy "
+             "the core stalls for.  Every MUL returns the PREVIOUS multiply's "
+             "product -- correct-looking, wrong, and invisible to anything that "
+             "does not run two multiplies close together",
+         edits=[(MD, "  localparam int MUL_PIPE = MUL_CYCLES - 2;",
+                     "  localparam int MUL_PIPE = MUL_CYCLES - 1;")],
+         caught=["directed:a14_muldiv", "random:muldiv", "riscv:rv32um/mul"]),
+
     dict(step="A14", name="divide_by_zero_quotient_is_zero",
          why="division by zero returns 0 rather than all-ones.  Zero is the "
              "answer an implementation gives when it simply lets the loop run "
