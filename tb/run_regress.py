@@ -570,6 +570,17 @@ def discover() -> list:
                   [py, os.path.join(ROOT, "tb/unit/test_isa_consistency.py")],
                   timeout=120))
 
+    # A24 (MODS_A2).  The Tier-1 timing probe's arithmetic, against the frozen
+    # model.  The probe is a MEASUREMENT ARTEFACT and ships nothing, so it would
+    # be easy to argue it needs no test -- but its whole value is one frequency,
+    # and a datapath that computes the wrong answer is very likely a SMALLER
+    # datapath than the right one.  That reports a frequency the real Tier-1
+    # unit cannot reach, which is exactly the failure A24 exists to prevent,
+    # arriving through the step meant to prevent it.
+    t.append(Test("tier1_probe", "rtl",
+                  [py, os.path.join(ROOT, "tb/probe/test_tier1_probe.py")],
+                  requires=["verilator"], timeout=300))
+
     # A20 (MODS_A2).  The mutation manifest's anchors, checked as a string
     # search in a twentieth of a second.
     #

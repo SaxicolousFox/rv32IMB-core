@@ -13,6 +13,27 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 
 TOP="${1:-rvntt_muldiv}"
+# MODS_A2 A24: everything after the top is handed to the Tcl script verbatim --
+# an optional clock period in ns, then any number of NAME=VALUE generics.  With
+# no period the behaviour is exactly A14's: synthesis only, resource report only.
+shift || true
+# NAME=VALUE is the natural way to write a generic and the one thing that cannot
+# be sent: `cmd.exe /c` splits on `=` as if it were a space, so the Tcl script
+# received the name and the value as two separate argv entries and silently
+# synthesised the default.  Callers still write `=`; it is translated to `:`
+# here, and synth_ooc.tcl hard-fails if trailing arguments parse to no generic.
+EXTRA=()
+for a in "$@"; do EXTRA+=("${a/=/:}"); done
+
+# The log name carries the generics, because A24 runs the same module at three
+# different STAGES values and a shared log would silently overwrite the number
+# from the previous configuration with the number from this one.
+TAG="$TOP"
+for a in "${EXTRA[@]}"; do
+  case "$a" in
+    *:*) TAG="${TAG}_${a/:/}" ;;
+  esac
+done
 
 VIVADO_WIN="${VIVADO_WIN:-C:\\AMDDesignTools\\2025.2\\Vivado\\bin\\vivado.bat}"
 STAGE_WIN="${STAGE_WIN:-C:\\Users\\liamf\\rvntt-ooc}"
@@ -29,6 +50,9 @@ cp "$ROOT"/rtl/common/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
 # reach.  The RVFI port is excluded -- it is compiled only under RISCV_FORMAL,
 # and reading it here would need the define plus riscv-formal's macros.
 cp "$ROOT"/rtl/soc/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
+# rtl/probe/ holds MODS_A2 A24's Tier-1 timing probe.  It is a measurement
+# artefact and is deliberately NOT in rtl/ntt/, which is Track B's.
+cp "$ROOT"/rtl/probe/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
 cp "$ROOT"/fpga/generated/*.svh "$STAGE_WSL/" 2>/dev/null
 cp "$ROOT"/fpga/generated/*.svh "$STAGE_WSL/rtl/" 2>/dev/null
 # $readmemh resolves against Vivado's WORKING directory, not the source file's.
@@ -47,15 +71,19 @@ cd "$STAGE_WSL"
 # option into a script argument and Vivado wrote to the default vivado.log --
 # the run itself succeeded and the wrapper still reported failure because it had
 # no log to grep.
-cmd.exe /c "cd /d $STAGE_WIN && $VIVADO_WIN -mode batch -log ooc_$TOP.log -journal ooc_$TOP.jou -source synth_ooc.tcl -tclargs $TOP" 2>&1
+cmd.exe /c "cd /d $STAGE_WIN && $VIVADO_WIN -mode batch -log ooc_$TAG.log -journal ooc_$TAG.jou -source synth_ooc.tcl -tclargs $TOP ${EXTRA[*]}" 2>&1
 rc=$?
 
 mkdir -p "$ROOT/fpga/build"
 cp "$STAGE_WSL"/ooc_*.log "$ROOT/fpga/build/" 2>/dev/null
 
-if grep -q "OOC_OK: $TOP" "$STAGE_WSL/ooc_$TOP.log" 2>/dev/null; then
+if grep -q "OOC_OK: $TOP" "$STAGE_WSL/ooc_$TAG.log" 2>/dev/null; then
+  # Echo the timing line here so the caller does not have to grep a Windows
+  # path.  Absent when no period was given, which is not an error.
+  grep -h "^OOC_TIMING:\|^OOC_ENDPOINT:\|^OOC_DSP_TOTAL:\|^OOC_CELLS:\|^OOC_GENERICS:" \
+       "$STAGE_WSL/ooc_$TAG.log" 2>/dev/null
   echo "OOC_OK: $TOP"
   exit 0
 fi
-echo "OOC_FAIL: $TOP (vivado rc=$rc) -- see fpga/build/ooc_$TOP.log" >&2
+echo "OOC_FAIL: $TOP (vivado rc=$rc) -- see fpga/build/ooc_$TAG.log" >&2
 exit 1
