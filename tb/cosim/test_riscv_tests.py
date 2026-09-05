@@ -38,7 +38,7 @@ import spike_asm                   # noqa: E402
 import test_core_verilator as t4   # noqa: E402
 
 TESTS_DIR = os.path.join(ROOT, "toolchain/riscv-tests")
-ISA = "rv32im_zba_zbb_zbs_zbkb_zicond_zicsr_zicntr"   # M: A14; B+Zbkb: A21 (MODS_A2)
+ISA = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr"   # M: A14; B+Zbkb: A21 (MODS_A2)
 
 # The RV32I user-level suite, minus the two that are outside this core's ISA.
 RV32UI = [

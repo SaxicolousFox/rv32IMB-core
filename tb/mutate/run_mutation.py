@@ -534,9 +534,40 @@ MUTATIONS = [
          why="writing a counter shadow silently does nothing instead of "
              "trapping.  Nothing observes the lost write; the missing trap is "
              "the whole of the failure",
-         edits=[(CSR, "  assign illegal = !known || (wen && read_only);",
-                      "  assign illegal = !known;")],
+         # A29 added `|| seed_illegal` to this expression, so the anchor moved
+         # with it.  The mutation is unchanged in substance -- a write to a
+         # read-only CSR stops trapping -- and dropping ONLY the read_only term
+         # keeps `seed`'s rule intact, so this still tests exactly what it
+         # tested before rather than accidentally testing two things.
+         edits=[(CSR, "  assign illegal = !known || (wen && read_only) || seed_illegal;",
+                      "  assign illegal = !known || seed_illegal;")],
          caught=["formal:rvntt_csr", "csr:a9_csr"]),
+
+    # A29.  The rule that makes `seed` safe to read.
+    dict(step="A29", name="seed_is_an_ordinary_readable_csr",
+         why="Zkr's `seed` accepts a read-only access instead of trapping.  "
+             "`csrrs rd, seed, x0` -- what a debugger's register dump or a "
+             "naive `csrr` macro emits -- would then silently CONSUME a seed "
+             "every time anyone looked at the machine.  The architecture "
+             "requires the write precisely so that reading cannot happen by "
+             "accident",
+         # THE SENSE IS INVERTED RATHER THAN THE TERM REMOVED.  Deleting
+         # `seed_illegal` from the expression leaves the wire unreferenced and
+         # Verilator's -Wall makes that a BUILD ERROR -- and a mutation that
+         # does not compile proves nothing.  Inverting the condition is also
+         # the more realistic slip: `!wen` versus `wen` is one character.
+         edits=[(CSR, "  wire seed_illegal = seed_access && !wen;",
+                      "  wire seed_illegal = seed_access && wen;")],
+         caught=["formal:rvntt_csr"]),
+
+    dict(step="A29", name="a_trapping_seed_access_still_consumes",
+         why="the consuming read is not gated on the access being legal, so an "
+             "instruction that TRAPS still eats a seed.  The entropy is gone "
+             "and the instruction did not happen, which is the worst of both: "
+             "invisible to software and a real loss of state",
+         edits=[(CSR, "  assign seed_rd_en = seed_access && wen;",
+                      "  assign seed_rd_en = seed_access;")],
+         caught=["formal:rvntt_csr"]),
 
     dict(step="A9", name="mret_does_not_restore_mie",
          why="MRET leaves MIE where the trap left it.  There are no interrupts "

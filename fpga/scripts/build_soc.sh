@@ -53,6 +53,9 @@ rm -f "$STAGE_WSL/rtl/rvntt_blinky_top.sv" "$STAGE_WSL/rtl/rvntt_bram_selftest.s
       "$STAGE_WSL/rtl/rvntt_uart_report.sv"
 
 cp "$ROOT"/fpga/constraints/arty_a7_100t_soc.xdc "$STAGE_WSL/constraints/"
+# A29: the ring oscillator's timing exclusion.  Always staged -- the stub build
+# simply matches no cells, and the count is printed either way.
+cp "$ROOT"/fpga/constraints/entropy_ring.xdc "$STAGE_WSL/constraints/"
 
 # A27 (MODS_A2): an OPTIONAL floorplan constraint.  SOC_PBLOCK names a file in
 # fpga/constraints/; absent, the build is exactly what it was before, which is

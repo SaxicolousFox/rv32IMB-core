@@ -247,7 +247,7 @@ confirm it is satisfied.
 | **M7.2** | **Core performance: Fmax recovered and branch prediction measured** (`MODS_A`) | ✅ **hardware-confirmed** |
 | **M7.3** | **The ISA round: B, Zicond and hardware counters** (`MODS_A2`) | ✅ **hardware-confirmed** |
 | **M7.4** | **A faster multiply and the Fmax the coprocessor can inherit** (`MODS_A2`) | ✅ **hardware-confirmed** |
-| **M7.5** | **The cryptographic guarantees: `Zkr` and `Zkt`** (`MODS_A2`) | not started |
+| **M7.5** | **The cryptographic guarantees: `Zkr` and `Zkt`** (`MODS_A2`) | ✅ **hardware-confirmed** |
 | M8–M16 | — | not started |
 
 **M5 is a compliance claim, and its boundaries are recorded rather than
@@ -491,8 +491,10 @@ Software arming is behind `BENCH_HPM`, **off by default**, so A13/A16/A19 images
 stay reproducible. See `docs/a20-counters.md`.
 
 **A21 — B (Zba+Zbb+Zbs) and Zbkb, 34 instructions in `rvntt_bitmanip.sv`.**
-**RISCOF 118/118** (29/29 ratified-B with 3 `Zbc` tests excluded by name, 5/5
-Zbkb, 38 `I`, 8 `M`, 22 hints, 16 privilege); **riscv-formal 77/77 at depth 14**,
+**RISCOF 120/120** (29/29 ratified-B with 3 `Zbc` tests excluded by name, 5/5
+Zbkb, 38 `I`, 8 `M`, **2 Zicond**, 22 hints, 16 privilege — A21's write-up said
+118 and its enumeration silently dropped the Zicond row; the suite total was
+always 120); **riscv-formal 77/77 at depth 14**,
 up from 43 and with the depth unchanged; cosim 30/30 byte-identical against
 Spike at 25% B density. See `docs/a21-bitmanip.md`.
 
@@ -599,6 +601,107 @@ both times and the resulting 4.023 ns DSP hop was the whole critical path.
 shift-adds derived from the constant itself. Whether a constant multiply wants a
 DSP or fabric is decided by its **population count**: `q = 3329` (four set bits)
 belongs in fabric, `BARR_V = 20159` (eleven) does not.
+
+**M7.5 is met by A29 and A30 together, and is hardware-confirmed.** The ISA is
+now **`RV32IMZicsr_Zicond_Zba_Zbb_Zbkb_Zbs_Zkr_Zkt`**, RISCOF is **120/120**,
+and the ring oscillator is in a real bitstream at 96.246 MHz with **every
+benchmark counter identical to A28's** — Zkr costs no cycles. 5502 LUTs, 1987
+FFs. See `docs/a29-zkr.md` and `docs/a30-zkt.md`.
+
+> **The entropy source is UNCERTIFIED.** No SP 800-90B statistical validation
+> campaign has been run on it. What exists is a noise source of a standard
+> construction and the two mandatory health tests, shown by fault injection to
+> detect stuck, biased and periodic sources. What does not exist is
+> entropy-rate estimation, restart tests, or the IID/non-IID track — none of
+> which is a simulation exercise. **`ES16`'s specified meaning is entropy
+> meeting SP 800-90B and this implementation does not establish that.** There
+> is also no cryptographic conditioning, and H = 1 bit/sample is an assumption
+> rather than a measurement. `docs/a29-zkr.md` carries the statement in full.
+
+**The health-test cutoffs are DERIVED, and the number everyone quotes is wrong
+for this configuration.** `tb/unit/test_entropy_health.py` recomputes both from
+SP 800-90B's own definitions and fails if the RTL disagrees: repetition **21**,
+adaptive proportion **589** at H=1, α=2⁻²⁰, W=1024. **The widely-cited 821 is
+for a different assumed entropy rate** — using it would have made the test four
+sigma looser while looking authoritative.
+
+**The mandated adaptive test has a blind spot, and it is the one that matters
+here.** SP 800-90B designates the *first* sample of each window as the value to
+count. A periodic source whose period divides the window has a fixed phase, so
+if that sample is the minority value the test **never** fires — not eventually,
+never. And that is the characteristic failure of a ring oscillator:
+injection-locking to its sampling clock produces exactly such a sequence. This
+implementation counts **both** values, which is strictly stronger, and
+`entropy_health`'s periodic 7-in-8 scenario is the regression for it. Before
+that scenario existed every bad source was catchable by the repetition test
+alone, and deleting the adaptive test changed no verdict.
+
+**α = 2⁻²⁰ is PER SAMPLE, and combining it with Zkr's latching DEAD nearly
+shipped an RNG that bricks itself.** A correctly-functioning source trips the
+repetition test about once per 2²⁰ samples by construction; free-running at
+96.246 MHz that is **eleven milliseconds**. Measured, not predicted — the ideal
+source went DEAD at 42 000 samples on a run of 23, a 6% event. **The sampler is
+therefore gated on needing to refill**, which moves the expected trip to
+**65 536 reads**. The limitation cannot be removed without changing α or giving
+up DEAD's latching; the number is stated rather than hidden.
+
+**The ring oscillator fought the tools in three separate ways**, each failing
+differently and A29 predicted it would: `DONT_TOUCH`+`KEEP_HIERARCHY` stops it
+being deleted, `set_disable_timing` stops it being *timed*, and
+**`ALLOW_COMBINATORIAL_LOOPS` stops the bitgen DRC refusing it** — the design
+routed at WNS 0.000 and then produced no bitstream. The acknowledgement is set
+**only on the ring's own nets**, never design-wide, because a blanket one would
+suppress the same DRC for an accidental loop elsewhere. Verilator's version of
+the same objection is `DIDNOTCONVERGE`, which is what every SoC simulation did
+until `rvntt_soc_sim_top` overrode `ENTROPY_STUB` back to 1.
+
+**The KAT path cannot reach the CSR, structurally, and it is checked by
+disassembly.** `make ENTROPY=1` links `randombytes_seed.c`; the KAT build does
+not compile it at all. `kat_no_seed` requires **0** accesses to CSR 0x015 in the
+KAT binary and **at least one** in the entropy binary — the second half is what
+stops the first from being satisfied by a build that does not exist.
+
+**A30's `Zkt` claim is made only with both boundaries, verbatim from §3.5.** It
+is a statement about listed instructions' latency and **not** about control
+flow; and **this core's branch predictor introduces data-dependent timing that
+`Zkt` does not cover and this core does not remove** — the BTB, its counters and
+the RAS are architecturally invisible state that persists across whatever runs
+on the machine, with no flush and no partition. **A `Zkt` claim that omits them
+is a security falsehood, which is worse than no claim.**
+
+**37 instructions are claimed; the rest of the list is reported as
+not-implemented rather than as passing** — `clmul`/`clmulh` (Zbc),
+`xperm4`/`xperm8` (Zbkx), the Zkn/Zks crypto instructions, and `C`.
+`tb/formal/run_zkt.py --list` generates both tables from the same place that
+proves the claim.
+
+**Claim B is proved STRUCTURALLY, by cone of influence, and that is better than
+a BMC here.** `run_zkt.py` computes the transitive fan-in of `done` with Yosys
+and checks the operand ports are absent: **exact rather than depth-bounded**,
+total over operands, and it fails by naming the operand. **The vacuity guard is
+that the OPCODE must be present** — an absence is trivially satisfied by looking
+at nothing, and the first run reported an empty cone because `yosys -q` had
+suppressed the output being parsed. Claim A (`a_zkt_only_muldiv_stalls`) is an
+assertion riscv-formal proves on all 77 checks, stated about `ex_stall` rather
+than instruction by instruction so that a future multi-cycle unit breaks it at
+depth 14 rather than quietly breaking `Zkt`.
+
+**Both claims were observed to FAIL.** The multiplier was given the
+data-dependent early-out a real design would be tempted by — return in one cycle
+when either operand is zero — and the cone check reported 2 operand bits.
+Claim A was broken by giving the bit-manipulation unit a stall.
+
+**The divider is data-independent by construction and that is NOT filed under
+`Zkt`.** §3.5 establishes the extension excludes `div`/`rem` explicitly, so it
+is a property beyond the extension; claiming it as compliance would be claiming
+credit under the wrong heading.
+
+**`misa.K` is deliberately NOT set** — the same recorded boundary as `misa.B`.
+`K` is the umbrella letter and claiming it would claim Zkn and Zks, which this
+core does not implement. **arch-test ships no `Zkr` or `Zkt` suite**, checked
+rather than assumed: the RISCOF report before and after has a byte-identical
+test set. riscv-config accepts both letters; no coverage was gained, and that is
+recorded rather than papered over.
 
 **M7.4 is met by A24, A25, A26, A27 and A28 together, and is hardware-confirmed.**
 **Fmax 96.246 MHz** — up 29.1% from M7.3's 74.577 — **DMIPS 90.096,

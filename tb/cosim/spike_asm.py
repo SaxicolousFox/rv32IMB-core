@@ -25,10 +25,10 @@ LD   = os.path.join(ROOT, "sw", "tests", "link.ld")
 # A21 added B and five of the six were still compiling without it -- which
 # does not fail at compile time, it fails at ASSEMBLE time on the first B
 # mnemonic, in whichever harness happens to emit one first.
-MARCH = "rv32im_zba_zbb_zbs_zbkb_zicond_zicsr"
+MARCH = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr"
 
-ISA_XKNTT = "rv32im_zba_zbb_zbs_zbkb_zicond_zicsr_zicntr_xkntt0p1"
-ISA_BASE  = "rv32im_zba_zbb_zbs_zbkb_zicond_zicsr_zicntr"
+ISA_XKNTT = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr_xkntt0p1"
+ISA_BASE  = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr"
 
 # A bare-metal program that takes a trap with no handler installed loops
 # forever re-taking it.  Every program therefore installs a handler that exits

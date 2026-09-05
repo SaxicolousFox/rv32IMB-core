@@ -44,7 +44,36 @@ module rvntt_core_sim_top #(
   assign dbg_store_data = dmem_wdata;
   assign dbg_store_be   = dmem_be;
 
+  // ---- A29: a DETERMINISTIC stand-in for the noise source -----------------
+  // A free-running LFSR, and it carries NO ENTROPY WHATSOEVER -- that is the
+  // point.  Every simulation in this project must be reproducible to the cycle,
+  // so the one thing the stub must not be is random.
+  //
+  // It exists because the alternative -- tying the stub low -- is a stuck
+  // source, which the health tests correctly kill within 21 samples.  Nothing
+  // in simulation reads `seed`, so a DEAD source would be harmless today and a
+  // baffling failure the first time a directed test tried to read one.
+  //
+  // The stub is NOT exposed as a port on this module.  It was, briefly, and
+  // every testbench that instantiates this top broke with PINMISSING -- the
+  // health tests are driven at the rvntt_seed level by
+  // tb/unit/test_entropy_health.py, which is where they belong, so the port
+  // bought nothing and cost a ripple through five files.
+  // The declaration initialiser is what keeps a four-state simulator from
+  // propagating X out of the LFSR before the first reset; rvntt_muldiv scopes
+  // the same waiver for the same reason.
+  /* verilator lint_off PROCASSINIT */
+  logic [15:0] stub_lfsr_q = 16'hACE1;
+  /* verilator lint_on PROCASSINIT */
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) stub_lfsr_q <= 16'hACE1;
+    else        stub_lfsr_q <= {stub_lfsr_q[14:0],
+                                stub_lfsr_q[15] ^ stub_lfsr_q[13] ^
+                                stub_lfsr_q[12] ^ stub_lfsr_q[10]};
+  end
+
   rvntt_core #(.RESET_PC(RESET_PC)) u_core (
+      .entropy_stub_bit (stub_lfsr_q[0]),
       .clk (clk), .rst_n (rst_n),
       .imem_addr (imem_addr), .imem_rdata (imem_rdata),
       .dmem_addr (dmem_addr), .dmem_wdata (dmem_wdata),

@@ -51,10 +51,21 @@
 `default_nettype none
 
 module rvntt_core #(
-    parameter logic [31:0] RESET_PC = 32'h8000_0000
+    parameter logic [31:0] RESET_PC = 32'h8000_0000,
+    // A29.  1 for every simulation and formal build; the SoC top sets 0 so the
+    // bitstream gets the real ring oscillator.  See rvntt_entropy.sv.
+    parameter bit          ENTROPY_STUB = 1
 ) (
     input  wire         clk,
     input  wire         rst_n,
+
+    // A29.  The stub noise source's raw bit, driven by a testbench.  Tied off
+    // in the SoC, where ENTROPY_STUB is 0 and the ring drives the sampler
+    // instead.  Present in both builds so the port list does not depend on a
+    // parameter, which would make the SoC top conditional on it too.
+    /* verilator lint_off UNUSEDSIGNAL */
+    input  wire         entropy_stub_bit,
+    /* verilator lint_on UNUSEDSIGNAL */
 
     // Instruction port (rvntt_ram port A).  Address out, data back next cycle.
     output logic [31:0] imem_addr,
@@ -880,6 +891,28 @@ module rvntt_core #(
     else        hpm_event_q <= hpm_event_c;
   end
 
+  // ---- A29: Zkr's entropy source ------------------------------------------
+  // STUB=1 here and STUB=0 only in the bitstream, which is what keeps a
+  // combinational ring oscillator out of every simulation and formal build in
+  // this project.  `entropy_stub_bit` is a TOP-LEVEL PORT for the same reason:
+  // the health tests are driven from a testbench, and a source that could only
+  // be exercised by the thing it is meant to police would be untestable.
+  // MODS_A2 3.7 specifies this split.
+  //
+  // THE SEED PATH IS NOT IN THE ML-KEM KAT PATH, and that is structural rather
+  // than a flag: sw/kyber's KAT build links its own deterministic randombytes
+  // and never emits a `seed` access at all.  tb/unit/test_kat_no_seed.py
+  // disassembles the KAT binary and requires zero references to CSR 0x015.
+  wire [31:0] seed_rdata;
+  wire        seed_rd_en;
+  rvntt_seed #(.STUB(ENTROPY_STUB)) u_seed (
+      .clk      (clk),
+      .rst_n    (rst_n),
+      .stub_bit (entropy_stub_bit),
+      .rd_en    (seed_rd_en && !ex_trap),
+      .rdata    (seed_rdata)
+  );
+
   rvntt_csr u_csr (
       .clk              (clk),
       .rst_n            (rst_n),
@@ -899,6 +932,8 @@ module rvntt_core #(
       // this immediately; nothing else would.
       .instret_bump     (id_ex_q.valid && !ex_trap && !ex_stall),
       .hpm_event        (hpm_event_q),
+      .seed_rdata       (seed_rdata),
+      .seed_rd_en       (seed_rd_en),
       .trap_en          (ex_trap),
       .trap_pc          (id_ex_q.pc),
       .trap_cause       (ex_trap_cause),
@@ -1291,6 +1326,21 @@ module rvntt_core #(
     // a LOAD, which is neither a branch nor a jump.  Two independent reasons,
     // one assertion, proved at depth 14.
     a_no_bp_update_under_front_stall: assert (!(front_stall && ex_bp_upd));
+
+    // ---- A30: Zkt, claim A ------------------------------------------------
+    // EVERY Zkt-LISTED INSTRUCTION THIS CORE IMPLEMENTS EXCEPT mul/mulh/mulhsu/
+    // mulhu OCCUPIES EX FOR EXACTLY ONE CYCLE, and this is the whole of the
+    // proof for them: `ex_stall` is the ONLY thing that can extend an
+    // instruction's stay in EX, and it is asserted only for the multi-cycle
+    // unit.  So the base arithmetic, the logical and shift instructions and all
+    // twelve implemented Zbkb-listed bit manipulations are one cycle by
+    // construction, whatever their operands.
+    //
+    // Stated as a property of ex_stall rather than instruction by instruction
+    // BECAUSE that is what makes it total: a new instruction added to any
+    // combinational unit inherits the guarantee, and a new MULTI-CYCLE unit
+    // breaks this assertion at depth 14 rather than quietly breaking Zkt.
+    if (ex_stall) a_zkt_only_muldiv_stalls: assert (id_ex_q.ctrl.is_muldiv);
   end
 
   // ---- A26 lever 2, the half that proves the conclusion -------------------

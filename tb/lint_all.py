@@ -44,7 +44,9 @@ DESIGNS = [
         "rtl/core/rvntt_forward.sv", "rtl/core/rvntt_hazard.sv",
         "rtl/core/rvntt_immgen.sv", "rtl/core/rvntt_regfile.sv",
         "rtl/core/rvntt_muldiv.sv", "rtl/core/rvntt_bpred.sv",
-        "rtl/core/rvntt_bitmanip.sv"]),
+        "rtl/core/rvntt_bitmanip.sv",
+        "rtl/core/rvntt_seed.sv", "rtl/core/rvntt_entropy.sv",
+        "rtl/core/rvntt_entropy_health.sv"]),
     ("rvntt_blinky_top", [
         "rtl/soc/rvntt_blinky_top.sv", "rtl/soc/rvntt_clkgen.sv",
         "rtl/soc/rvntt_uart_tx.sv", "rtl/soc/rvntt_uart_report.sv",

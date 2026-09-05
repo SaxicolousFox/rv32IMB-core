@@ -58,12 +58,32 @@ ifeq ($(TARGET),host)
   BIN     := $(OUT)/kat
 else
   CC      := riscv-none-elf-gcc
-  CFLAGS  := -march=$(MARCH) -mabi=ilp32 -O2 -Wall -fomit-frame-pointer \
-             -ffreestanding $(INC) $(DEFS)
+  # A29.  ENTROPY=1 swaps the deterministic KAT generator for one that reads
+  # Zkr's `seed` CSR.  It is a SOURCE SELECTION and not a runtime flag: the KAT
+  # build does not compile randombytes_seed.c at all, so it cannot reach CSR
+  # 0x015 however it is invoked.  tb/unit/test_kat_no_seed.py checks that by
+  # disassembling the binary rather than trusting this comment.
+  ifeq ($(ENTROPY),1)
+    ENTROPY_SRC  := randombytes_seed.c
+    DEFS         += -DKAT_ENTROPY=1
+    # Reading a CSR needs Zicsr in the -march string, and MARCH defaults to
+    # plain rv32i on purpose -- line 9 says it MUST keep doing so, because it is
+    # the baseline every other measurement is taken against.  So Zicsr is
+    # appended for THIS build only, and only when it is actually needed.  The
+    # assembler's error without it is `unrecognized opcode csrrw ... extension
+    # zicsr required`, which is a build failure and not a silent omission.
+    CFLAGS_EXTRA := _zicsr
+  endif
+  # CFLAGS uses `:=`, which expands NOW -- so the block above has to come
+  # first or CFLAGS_EXTRA is empty and the Zicsr never reaches the assembler.
+  # It did, on the first attempt, and the symptom was `unrecognized opcode
+  # csrrw` with the flag apparently set.
+  CFLAGS  := -march=$(MARCH)$(CFLAGS_EXTRA) -mabi=ilp32 -O2 -Wall \
+             -fomit-frame-pointer -ffreestanding $(INC) $(DEFS)
   # -nostdlib for a bare-metal image.  -lgcc stays whatever MARCH is: rv32i has
   # no multiply instruction at all, and even rv32im has no 64-bit helpers.
   LDFLAGS := -nostdlib -nostartfiles -T link.ld -lgcc
-  SRC     := kat_main.c htif.c crt0.S
+  SRC     := kat_main.c htif.c crt0.S $(ENTROPY_SRC)
   BIN     := $(OUT)/kat.elf
 endif
 

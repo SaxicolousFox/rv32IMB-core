@@ -524,7 +524,7 @@ def discover() -> list:
                    # is the worst kind of green: it programs a real board, gets
                    # byte-perfect UART and reproducible counters, and certifies
                    # a design the repository no longer contains.
-                   "--bit", os.path.join(ROOT, "fpga/build/bench_a28/rvntt_soc_top.bit"),
+                   "--bit", os.path.join(ROOT, "fpga/build/bench_a29/rvntt_soc_top.bit"),
                    # 150 s, and the number is derived rather than guessed.
                    # CoreMark needs 2500 iterations to clear its own ten-second
                    # minimum (A19's predictor made the M extension's 2200 finish
@@ -540,7 +540,11 @@ def discover() -> list:
                    # FOUR blocks, so 108 s of payload, and 150 s left room for
                    # the partial block a capture always starts in the middle of.
                    #
-                   # A28's bitstream runs at 96.246 MHz -- A26's cycle-neutral
+                   # A29's bitstream is A28's machine plus Zkr's entropy path
+                   # and the REAL ring oscillator -- the only build in the
+                   # project with ENTROPY_STUB=0.  Every benchmark counter is
+                   # identical to A28's, which is the point: Zkr costs no
+                   # cycles.  It runs at 96.246 MHz -- A26's cycle-neutral
                    # levers, with A27's floorplans measured and not adopted.  A
                    # FASTER clock is a shorter block, but CoreMark had to go to
                    # 3300 iterations to clear its own 10 s minimum (at 2500 it
@@ -564,7 +568,7 @@ def discover() -> list:
                    # A19: block 1 is cold.  See parse_bench_uart.py.
                    "--parser-arg=--warmup-blocks", "--parser-arg=1",
                    "--parser-arg=--json",
-                   "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a28/a28_regress.json")],
+                   "--parser-arg=" + os.path.join(ROOT, "fpga/build/bench_a29/a29_regress.json")],
                   timeout=1800))
 
     # H1 (MODS_A2).  The ISA string, in all six places it is written, plus
@@ -579,6 +583,53 @@ def discover() -> list:
     t.append(Test("isa_consistency", "meta",
                   [py, os.path.join(ROOT, "tb/unit/test_isa_consistency.py")],
                   timeout=120))
+
+    # ---- A29 (MODS_A2): Zkr's entropy path -----------------------------
+    # The health tests, the seed state machine and the SP 800-90B cutoffs.
+    # MODS_A2 A29's central obligation: "a health test that has never been
+    # observed to fire is not a health test."  This drives the stub source
+    # stuck-at-0, stuck-at-1, biased 7:1, biased 3:1 and PERIODIC, and requires
+    # each to reach DEAD -- and requires an ideal source not to.
+    t.append(Test("entropy_health", "rtl",
+                  [py, os.path.join(ROOT, "tb/unit/test_entropy_health.py")],
+                  requires=["verilator"], timeout=600))
+
+    # The health tests' mechanism, proved.  Instantiated with a SMALL window --
+    # a 1024-sample adaptive-proportion window would make every counterexample
+    # 1024 steps long and prove nothing the mechanism does not already show.
+    # The same trick rvntt_bpred's proof uses for its BTB.
+    t.append(Test("formal_entropy_health", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_entropy_health", "--depth", "30",
+                   "--param", "REP_CUTOFF=5", "--param", "AP_WINDOW=8",
+                   "--param", "AP_CUTOFF=6"],
+                  requires=["sby", "yosys"], timeout=600))
+
+    # The seed CSR's state machine: DEAD latches, a consuming read empties the
+    # buffer, and no entropy leaves the module outside ES16.
+    t.append(Test("formal_seed", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_formal.py"),
+                   "--design", "rvntt_seed", "--depth", "24",
+                   "--extra", "rtl/core/rvntt_entropy.sv",
+                   "--extra", "rtl/core/rvntt_entropy_health.sv",
+                   "--param", "BIST_SAMPLES=4", "--param", "REP_CUTOFF=5",
+                   "--param", "AP_WINDOW=8", "--param", "AP_CUTOFF=6"],
+                  requires=["sby", "yosys"], timeout=600))
+
+    # THE STRUCTURAL SEPARATION OF THE KAT PATH, checked by disassembling both
+    # builds.  A29: the failure is silent in both directions -- a KAT that
+    # passes because the source was bypassed proves nothing, and a keygen that
+    # is deterministic in the field is a catastrophic bug no KAT can catch.
+    t.append(Test("kat_no_seed", "sw",
+                  [py, os.path.join(ROOT, "tb/unit/test_kat_no_seed.py")],
+                  requires=["riscv-none-elf-gcc"], timeout=600))
+
+    # ---- A30 (MODS_A2): Zkt's data-independent-latency proof ------------
+    # Claim B, by cone of influence: `done` is not reached by the operands.
+    # Claim A is an assertion in rvntt_core proved by riscv_formal above.
+    t.append(Test("zkt_latency", "formal",
+                  [py, os.path.join(ROOT, "tb/formal/run_zkt.py")],
+                  requires=["yosys"], timeout=300))
 
     # A24 (MODS_A2).  The Tier-1 timing probe's arithmetic, against the frozen
     # model.  The probe is a MEASUREMENT ARTEFACT and ships nothing, so it would

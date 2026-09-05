@@ -47,6 +47,12 @@ module rvntt_soc_top #(
     parameter int          RAM_WORDS = 32768,               // 128 KB
     parameter logic [31:0] RAM_BASE  = 32'h8000_0000,
     parameter logic [31:0] MMIO_BASE = 32'h4000_0000,
+    // A29.  0 here because THIS module is the bitstream's top: the shipped
+    // design gets the real ring oscillator.  rvntt_soc_sim_top overrides it to
+    // 1, because a combinational loop is something Verilator cannot settle --
+    // it reports DIDNOTCONVERGE, which is what happened the first time this was
+    // hardcoded.  MODS_A2 3.7 predicted exactly this and is why STUB exists.
+    parameter bit          ENTROPY_STUB = 1'b0,
     parameter string       INIT_FILE = "soc_init.mem",
     // Cycles between heartbeat toggles.  Overridden down in simulation, where
     // waiting 37.5 million cycles to see one edge is not an option.
@@ -96,8 +102,28 @@ module rvntt_soc_top #(
   wire [4:0]  commit_rd;
   wire        dbg_unsupported;
 
-  rvntt_core #(.RESET_PC (RAM_BASE)) u_core (
+  // A29: ENTROPY_STUB=0 -- THE ONLY PLACE IN THE PROJECT THAT INSTANTIATES THE
+  // RING OSCILLATOR.  Every simulation and formal build keeps the stub, because
+  // a combinational loop is something Verilator cannot simulate meaningfully
+  // and Yosys cannot represent at all (MODS_A2 3.7).  `entropy_stub_bit` is
+  // tied low here and unused: with STUB=0 the ring drives the sampler.
+  // The stub bit is driven by a deterministic LFSR so that a SIMULATION build
+  // of this top (ENTROPY_STUB=1) has a live source rather than a stuck one, and
+  // it is dead logic in the bitstream -- ENTROPY_STUB is 0 there and the core
+  // ignores the port, so Vivado prunes it.
+  /* verilator lint_off PROCASSINIT */
+  logic [15:0] stub_lfsr_q = 16'hACE1;
+  /* verilator lint_on PROCASSINIT */
+  always_ff @(posedge clk_core or negedge rst_n_core) begin
+    if (!rst_n_core) stub_lfsr_q <= 16'hACE1;
+    else             stub_lfsr_q <= {stub_lfsr_q[14:0],
+                                     stub_lfsr_q[15] ^ stub_lfsr_q[13] ^
+                                     stub_lfsr_q[12] ^ stub_lfsr_q[10]};
+  end
+
+  rvntt_core #(.RESET_PC (RAM_BASE), .ENTROPY_STUB (ENTROPY_STUB)) u_core (
       .clk (clk_core), .rst_n (rst_n_core),
+      .entropy_stub_bit (stub_lfsr_q[0]),
       .imem_addr (imem_addr), .imem_rdata (imem_rdata),
       .dmem_addr (dmem_addr), .dmem_wdata (dmem_wdata),
       .dmem_be (dmem_be),     .dmem_rdata (dmem_rdata),
