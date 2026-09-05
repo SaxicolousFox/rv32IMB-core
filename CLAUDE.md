@@ -44,6 +44,8 @@ Two environment constraints that will otherwise waste a cycle each:
 | `docs/RISC-V_NTT.txt` | **The plan document** — the source of truth for scope, sequencing and milestones. Read §12 before claiming any milestone. **Never edit it**; corrections go in the file below or in "Known errors" here. |
 | `docs/RISC-V_NTT_MODS_A.txt` | **Track A modifications** — A14–A18 and milestones M7.1/M7.2, adding RV32IM and branch prediction. It **OVERRIDES §1.5's `RV32I`** and §A13's expected IPC/DMIPS bands; read its §2 before trusting the original on ISA scope. |
 | `docs/RISC-V_NTT_MODS_A2.txt` | **Track A modifications, round 2** — A20–A30 and milestones M7.3/M7.4/M7.5: hardware performance counters, B + Zbkb, Zicond, a 2-cycle multiply, an Fmax push, `Zkr` and `Zkt`. **OVERRIDES §1.5 a second time.** Its Appendix A is a mechanically-generated encoding table. |
+| **`docs/core-report-a30.md`** | **The Track A closing report** — the post-A30 core in every dimension, the full A1→A30 chronology with the engineering reasoning, and the consolidated measurements. Start here when picking the project up cold. |
+| **`docs/core-roadmap.md`** | **The companion roadmap** — 31 costed proposals beyond A30, each with its bound, difficulty, risk and dependencies, plus what is deliberately *not* recommended. |
 | `docs/isa-spec.md` | The frozen `Xkntt` contract: encodings, semantics, latency, exceptions. |
 | `docs/spike-xkntt.md` | The Spike fork. **Track A needs this** — Spike is the cosim reference. |
 | `docs/insn-bridge.md` | How to emit `Xkntt` instructions from C or a testbench. |
