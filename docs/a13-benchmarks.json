@@ -1,0 +1,51 @@
+{
+  "_note": "A13 measured on hardware: Arty A7-100T, xc7a100tcsg324-1 (-1 speed grade), Vivado 2025.2 default strategy.  Three separate JTAG programming passes, three report blocks each; all nine blocks are identical to the cycle.  DMIPS/MHz and CoreMark/MHz are exact integer ratios of mcycle counts and do not depend on the clock frequency; Dhrystones/sec and the raw CoreMark score do, and are quoted at clk_hz.  See docs/a13-benchmarks.md.",
+  "dmips_per_mhz": 0.7306186811489013,
+  "coremark_per_mhz": 0.9606768164149715,
+  "dhry_ipc": 0.7227215039689017,
+  "cm_ipc": 0.6929945788178666,
+  "dhrystones_per_sec": 90025.50532685163,
+  "coremark_iterations_per_sec": 67.37214024719582,
+  "clk_hz": 70129870,
+  "part": "xc7a100tcsg324-1",
+  "speed_grade": "-1",
+  "vivado": "2025.2",
+  "flags": "-march=rv32i_zicsr -mabi=ilp32 -O2 -ffreestanding -nostdlib -nostartfiles -fno-common -Wall | dhrystone: -std=gnu89 + upstream no-inline pragma | mul/div: libgcc software (no M extension)",
+  "dhrystone": {
+    "runs": 200000,
+    "cycles": 155800003,
+    "instret": 112600032,
+    "cycles_per_run": 779.000015,
+    "instructions_per_run": 563.00016,
+    "seconds": 2.221592639484431,
+    "timer_skew_cycles": 27,
+    "source": "toolchain/riscv-tests/benchmarks/dhrystone @ 2ebecad"
+  },
+  "coremark": {
+    "iterations": 800,
+    "cycles": 832746233,
+    "instret": 577088625,
+    "cycles_per_iteration": 1040932.79125,
+    "instructions_per_iteration": 721360.78125,
+    "seconds": 11.874344455508044,
+    "config": "2K performance (TOTAL_DATA_SIZE=2000)",
+    "seedcrc": 59893,
+    "crclist": 59156,
+    "crcmatrix": 8151,
+    "crcstate": 36410,
+    "source": "toolchain/coremark @ 1f483d5"
+  },
+  "reproducibility": {
+    "programming_passes": 3,
+    "blocks_per_pass": 3,
+    "spread_counts": 0,
+    "spread_ppm": 0.0
+  },
+  "utilisation": {
+    "luts": 2126,
+    "ffs": 913,
+    "bram_tiles": 32,
+    "wns_ns": 0.17,
+    "whs_ns": 0.092
+  }
+}

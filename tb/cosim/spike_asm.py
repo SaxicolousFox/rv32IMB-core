@@ -11,8 +11,24 @@ import os, re, subprocess, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LD   = os.path.join(ROOT, "sw", "tests", "link.ld")
 
-ISA_XKNTT = "rv32i_zicsr_zicntr_xkntt0p1"
-ISA_BASE  = "rv32i_zicsr_zicntr"
+# The M in these strings is A14's (MODS_A).  ISA_BASE is what the extension-
+# gating test in test_spike_xkntt.py runs against to prove an Xkntt encoding
+# traps when the extension is absent -- adding M does not weaken that, because
+# M and Xkntt occupy disjoint opcodes (MODS_A 3.1).
+# B (Zba+Zbb+Zbs) and Zbkb as of A21 (MODS_A2).  Spike knows all four natively
+# -- no fork change, which is why toolchain/patches.sh export spike is
+# unaffected and patches_in_sync stays green.  Verified rather than assumed:
+# spike rejects an unsupported extension outright ("unsupported extension"), so
+# these strings being accepted is evidence and not a silent default.
+# The -march string for every testbench that compiles a program for this
+# core.  ONE constant, because it was six copies of "rv32im_zicsr" until
+# A21 added B and five of the six were still compiling without it -- which
+# does not fail at compile time, it fails at ASSEMBLE time on the first B
+# mnemonic, in whichever harness happens to emit one first.
+MARCH = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr"
+
+ISA_XKNTT = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr_xkntt0p1"
+ISA_BASE  = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr"
 
 # A bare-metal program that takes a trap with no handler installed loops
 # forever re-taking it.  Every program therefore installs a handler that exits
@@ -82,7 +98,7 @@ def build(body, tmp, name="prog", data="", trap_mode="exit"):
         handler = TRAP_HANDLER if trap_mode == "exit" else TRAP_HANDLER_SKIP
         f.write(PROLOGUE + body + EPILOGUE + handler + data)
     r = subprocess.run(
-        ["riscv-none-elf-gcc", "-march=rv32i_zicsr", "-mabi=ilp32",
+        ["riscv-none-elf-gcc", "-march=" + MARCH, "-mabi=ilp32",
          "-nostdlib", "-nostartfiles", "-T", LD, "-o", elf, src],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if r.returncode != 0:

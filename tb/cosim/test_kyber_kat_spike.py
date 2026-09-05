@@ -26,7 +26,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 KYBER = os.path.join(ROOT, "sw", "kyber")
 TVECS = os.path.join(ROOT, "toolchain", "kyber", "tvecs768")
 SUMS  = os.path.join(ROOT, "toolchain", "kyber", "SHA256SUMS")
-ISA   = "rv32i_zicsr_zicntr_xkntt0p1"
+# rv32im as of A14 (MODS_A).  The KAT software is still built -march=rv32i
+# by default -- see sw/kyber/Makefile's MARCH -- and Spike accepting a
+# superset does not change what it executes.  Widening the string here is
+# what lets the same runner check an rv32im build without a second constant.
+ISA   = "rv32im_zicsr_zicntr_xkntt0p1"
 
 LINES_PER_RECORD = 6      # public key, secret key, ciphertext, ss B, ss A, pseudorandom ss
 

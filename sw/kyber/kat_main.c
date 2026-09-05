@@ -25,6 +25,11 @@
 /* Deterministic randombytes, as in test/test_vectors.c: a SHAKE128 stream
  * seeded by absorbing the empty string.  Built from the public API rather than
  * copying the reference's literal state initialiser. */
+/* A29.  Under ENTROPY=1 the build links randombytes_seed.c instead, which
+ * reads Zkr's `seed` CSR.  The two definitions must never coexist -- a link
+ * error is the correct outcome if someone tries, and this guard is what makes
+ * it a link error instead of one silently shadowing the other. */
+#ifndef KAT_ENTROPY
 static keccak_state rngstate;
 static int rng_ready = 0;
 
@@ -37,6 +42,7 @@ void randombytes(uint8_t *x, size_t xlen)
   }
   shake128_squeeze(x, xlen, &rngstate);
 }
+#endif /* !KAT_ENTROPY */
 
 /* ------------------------------------------------------- output plumbing -- */
 #ifdef KAT_DIGEST

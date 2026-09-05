@@ -12,7 +12,15 @@ If any of the four disagrees with this document, the document wins — or the
 document changes first and all four follow. Changing an encoding after Tracks A,
 B and C have forked is expensive, which is the entire reason this exists.
 
-ISA string: **`rv32i_zicsr_zicntr_xkntt0p1`**.
+ISA string: **`rv32im_zicsr_zicntr_xkntt0p1`**.
+
+> **The `m` is A14's, from `RISC-V_NTT_MODS_A.txt`, and it is the only thing in
+> this document that step changed.** Nothing about `Xkntt` moves: `M` lives in
+> `OP` with `funct7 = 0000001`, `custom-0` and `custom-1` are untouched, and
+> every encoding, semantic, latency and exception below is exactly as frozen.
+> `MODS_A` §3.5 listed this file as unchanged and named only `misa` in the
+> exception table; the ISA string is a second stale fact, corrected here rather
+> than left to mislead someone building against it.
 
 ## Normative language
 
