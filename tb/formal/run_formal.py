@@ -35,6 +35,17 @@ def main():
     # 14 kbit of array it will never look at.  Shrinking a design for a proof is
     # only honest when the property does not depend on the size; that argument
     # is in rvntt_bpred.sv's FORMAL header, next to the properties it excuses.
+    # A29.  Every design proved here before rvntt_seed was a LEAF module, so
+    # `with_deps` -- which resolves package imports and nothing else -- was
+    # enough.  rvntt_seed instantiates two submodules, and Yosys's error for a
+    # missing one ("is not part of the design") arrives as sby rc=16 rather than
+    # as a failed assertion, i.e. as an ERROR and not a FAIL.  Worth knowing:
+    # the runner already treats a nonzero return as failure, so this could not
+    # have passed vacuously -- but it could easily have been read as "the proof
+    # is broken" rather than "a file is missing".
+    ap.add_argument("--extra", action="append", default=[],
+                    help="additional RTL sources the top instantiates "
+                         "(repeatable; paths relative to the repo root)")
     ap.add_argument("--param", action="append", default=[],
                     metavar="NAME=VALUE",
                     help="override a module parameter for the proof")
@@ -53,6 +64,12 @@ def main():
     # Verilator, requires a package to be declared before it is referenced, and
     # a module whose port list uses a package type otherwise fails to parse.
     srcs = with_deps(rtl)
+    for e in a.extra:
+        p = e if os.path.isabs(e) else os.path.join(ROOT, e)
+        if not os.path.exists(p):
+            raise SystemExit("FORMAL_FAIL: --extra %s does not exist" % e)
+        if p not in srcs:
+            srcs.append(p)
     reads = "\n".join(f"read -formal {os.path.basename(s)}" for s in srcs)
     params = ""
     if a.param:

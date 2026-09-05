@@ -54,7 +54,12 @@ CC = "riscv-none-elf-gcc"
 ARCH_ALIASES = {
     "rv32i":   "rv32i",
     "rv32im":  "rv32im",
-    "rv32imb": "rv32im_zba_zbb_zbs_zbkb_zicond",
+    # A29/A30 add Zkr and Zkt.  Neither changes a single instruction the
+    # compiler emits -- Zkr is a CSR and Zkt is a timing GUARANTEE -- so the
+    # benchmark images are byte-identical either way.  They are in the string
+    # because isa_consistency requires all six sources to agree, and a source
+    # naming a smaller ISA than the DUT does not fail, it HANGS.
+    "rv32imb": "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt",
     # B WITHOUT Zicond, which exists ONLY to attribute A22's branch delta.
     # Zbb's min/max are themselves if-conversion instructions, so a two-point
     # rv32im-vs-rv32imb comparison cannot tell what Zicond did from what min and

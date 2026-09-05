@@ -73,6 +73,13 @@ module rvntt_csr (
     // independent of the microarchitecture it is counting.
     input  wire  [5:0]  hpm_event,
 
+    // ---- A29: Zkr's entropy source ------------------------------------
+    // The state machine, the health tests and the noise source live in
+    // rvntt_seed.sv; this file owns only the ACCESS RULE, because only it sees
+    // `wen` and can tell a read-write access from a read.
+    input  wire  [31:0] seed_rdata,
+    output wire         seed_rd_en,
+
     // ---- trap entry and return ----------------------------------------
     input  wire         trap_en,
     // trap_pc's low two bits are dropped: IALIGN is 32, so mepc[1:0] read as
@@ -90,6 +97,10 @@ module rvntt_csr (
 );
 
   // ---------------------------------------------------------------- numbers
+  // A29: Zkr's `seed`.  Machine-mode, and NOT a normal CSR -- see the
+  // read-write-only rule below and rvntt_seed.sv's header.
+  localparam logic [11:0] CSR_SEED      = 12'h015;
+
   localparam logic [11:0] CSR_MSTATUS   = 12'h300;
   localparam logic [11:0] CSR_MISA      = 12'h301;
   localparam logic [11:0] CSR_MIE       = 12'h304;
@@ -283,6 +294,8 @@ module rvntt_csr (
       CSR_MINSTRETH, CSR_INSTRETH:  rdata = minstret_q[63:32];
       CSR_MVENDORID, CSR_MARCHID, CSR_MIMPID, CSR_MHARTID: rdata = 32'h0;
       CSR_MCOUNTINHIBIT: rdata = mcountinhibit_rd;
+      // A29.  The value comes from rvntt_seed; the ACCESS RULE is below.
+      CSR_SEED:      rdata = seed_rdata;
       default: begin
         rdata = 32'h0;
         // A20.  Decoded but ZERO for the unimplemented indices 9..31: the spec
@@ -303,7 +316,28 @@ module rvntt_csr (
   // listing them.  Writing one is an illegal instruction, not a silent no-op.
   wire read_only = (addr[11:10] == 2'b11);
 
-  assign illegal = !known || (wen && read_only);
+  // ---- A29: `seed` is READ-WRITE-ONLY -------------------------------------
+  // The Zkr specification requires every access to `seed` to be a read-WRITE:
+  // `csrrs rd, seed, x0`, the ordinary way to read a CSR, raises an illegal
+  // instruction.  That is not fussiness -- reading `seed` DESTROYS the entropy
+  // it returns, and requiring the write is how the architecture stops software
+  // consuming it by accident, for instance in a debugger's register dump.
+  //
+  // `wen` is exactly "this instruction writes the CSR", which rvntt_core
+  // computes from funct3 and the source operand (CSRRS/CSRRC with a zero source
+  // do not write).  So the rule is one term, and this is the only place in the
+  // design that can express it.
+  wire seed_access  = (addr == CSR_SEED);
+  wire seed_illegal = seed_access && !wen;
+
+  assign illegal = !known || (wen && read_only) || seed_illegal;
+
+  // A read that CONSUMES.  Gated on the access being legal, so a trapping
+  // access -- the read-only form above -- must not eat a seed.  `do_write`
+  // below is not usable for this: `seed` ignores the written value, and
+  // conflating "writes the CSR" with "consumes entropy" is how a future
+  // reader would come to believe the write does something.
+  assign seed_rd_en = seed_access && wen;
 
   // ---------------------------------------------------------------- write
   // NO TRAP GATE IS NEEDED HERE, and the reason is worth stating because the
@@ -442,6 +476,29 @@ module rvntt_csr (
   wire f_is_read_only = (addr[11] & addr[10]);
 
   always_comb begin
+    // ---- A29: Zkr's `seed` is READ-WRITE-ONLY --------------------------
+    // Rebuilt from the raw inputs rather than reusing seed_access/seed_illegal,
+    // in the same spirit as the rules below: a property that reads the wire it
+    // is checking proves only that the wire equals itself.  rvntt_forward's
+    // header records what that costs -- a broken supply condition sailed past
+    // properties that were checking it against itself.
+    //
+    // The rule matters because reading `seed` DESTROYS entropy.  If a
+    // read-only access were legal, `csrrs rd, seed, x0` -- which is what a
+    // debugger's register dump or a naive `csrr` macro emits -- would silently
+    // consume a seed every time anyone looked.
+    if ((addr == 12'h015) && !wen)
+      a_seed_read_only_traps: assert (illegal);
+
+    // ...and the consuming read fires ONLY for a legal read-write access.  A
+    // trapping access must not eat a seed: the instruction did not happen.
+    if (seed_rd_en) begin
+      a_seed_consume_is_a_write: assert (wen);
+      a_seed_consume_is_seed:    assert (addr == 12'h015);
+    end
+    if ((addr != 12'h015) || !wen)
+      a_seed_no_stray_consume: assert (!seed_rd_en);
+
     // 1. Every read-only address rejects a write.  This is the whole of the
     //    "CSRRS with rs1 = x0 must not write" contract on the counter shadows:
     //    if the write-enable were computed wrongly upstream, this fires.

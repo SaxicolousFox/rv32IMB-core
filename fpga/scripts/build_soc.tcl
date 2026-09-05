@@ -58,6 +58,21 @@ if {[file exists constraints/pblock.xdc]} {
 # ------------------------------------------------------------------ synthesis
 synth_design -top $TOP -part $PART -include_dirs [list [pwd] [pwd]/rtl]
 
+# A29.  The ring oscillator's exclusion is read AFTER synthesis, because it
+# selects CELLS and there are none before elaboration.  The count is printed
+# and checked: set_disable_timing over an empty collection is a warning, and
+# the build would then fail much later with a combinational-loop error naming a
+# cell nobody recognises.
+if {[file exists constraints/entropy_ring.xdc]} {
+  source constraints/entropy_ring.xdc
+  set nring [llength [get_cells -quiet -hierarchical \
+                        -filter {NAME =~ *u_seed/u_noise/g_ring.g_r*.chain*}]]
+  puts "SOC_ENTROPY_RING: $nring ring cell(s)"
+  if {$nring == 0} {
+    puts "SOC_ENTROPY_RING: NONE -- this build has the STUB source, not the ring"
+  }
+}
+
 # ...and after synthesis, say what the floorplan actually CONTAINS.  A pblock
 # whose add_cells_to_pblock matched nothing -- a renamed instance, a -quiet that
 # swallowed the error -- creates an empty region and constrains nothing, and the

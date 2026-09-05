@@ -41,6 +41,12 @@ module rvntt_soc_sim_top (
   rvntt_soc_top #(
       .CORE_HZ       (4_000_000),
       .HEARTBEAT_DIV (3_000),
+      // A29.  THE ONE OVERRIDE THAT MAKES THIS SIMULATABLE.  rvntt_soc_top
+      // defaults to the real ring oscillator because it is the bitstream's
+      // top; a combinational loop in a Verilator build reports
+      // DIDNOTCONVERGE after 10 000 settle attempts and takes every SoC
+      // simulation with it.
+      .ENTROPY_STUB  (1'b1),
       .INIT_FILE     ("soc_sim.mem")
   ) u_soc (
       .CLK100MHZ (CLK100MHZ), .ck_rst (ck_rst),

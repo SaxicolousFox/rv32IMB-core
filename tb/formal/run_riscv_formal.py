@@ -95,6 +95,13 @@ RTL = [
     "rtl/core/rvntt_muldiv.sv",
     "rtl/core/rvntt_bitmanip.sv",
     "rtl/core/rvntt_bpred.sv",
+    # A29.  The entropy path.  rvntt_entropy is instantiated with STUB=1 here,
+    # as everywhere except the bitstream: the ring oscillator is a
+    # combinational loop that Yosys cannot represent at all, and the stub arm
+    # contains no loop -- it is absent, not disabled.
+    "rtl/core/rvntt_seed.sv",
+    "rtl/core/rvntt_entropy.sv",
+    "rtl/core/rvntt_entropy_health.sv",
     "rtl/core/rvntt_rvfi.sv",
     "rtl/core/rvntt_core.sv",
 ]

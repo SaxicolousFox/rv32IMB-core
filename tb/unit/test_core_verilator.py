@@ -36,6 +36,13 @@ RTL = [
     os.path.join(ROOT, "rtl/core/rvntt_csr.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_muldiv.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_bitmanip.sv"),
+    # A29.  Three files, one list, and this list is imported by
+    # test_riscv_tests.py, the cosim harnesses and the mutation runner -- which
+    # is why it is the one that has to be right.  A21 missed rvntt_bitmanip.sv
+    # in three harnesses for exactly this reason.
+    os.path.join(ROOT, "rtl/core/rvntt_seed.sv"),
+    os.path.join(ROOT, "rtl/core/rvntt_entropy.sv"),
+    os.path.join(ROOT, "rtl/core/rvntt_entropy_health.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_bpred.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_core.sv"),
     os.path.join(ROOT, "rtl/soc/rvntt_ram.sv"),
