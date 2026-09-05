@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""
+Resolve SystemVerilog package dependencies for a source file.
+
+Both Verilator and Yosys read files in the order given and require a package to
+be DECLARED before it is referenced.  Verilator will auto-find `rv32i_pkg.sv`
+from an include directory, but it appends it after the file that imports it, so
+a module whose PORT LIST uses a package type fails with
+
+    Reference to 'alu_op_e' before declaration (IEEE 1800-2023 6.18)
+
+even though the package is right there.  The fix is ordering, not includes:
+putting ``include "rv32i_pkg.sv"` in each module would work under Verilator's
+single compilation unit but risks duplicate definitions under tools that
+compile each file separately.
+
+So: scan for `import <pkg>::`, find `<pkg>.sv` in the RTL tree, and put it
+first.  Kept here rather than in one caller because tb/lint_all.py and
+tb/formal/run_formal.py both need exactly this, and a second copy would drift.
+"""
+import os
+import re
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+RTL_DIRS = ("rtl/common", "rtl/core", "rtl/ntt", "rtl/soc")
+
+# Two ways a file can depend on a package, both of which need it read first:
+#   * `import rv32i_pkg::*;`
+#   * a fully-qualified reference, `rv32i_pkg::ALU_ADD`
+# The second form matters because Yosys rejects `import` entirely (in both the
+# module-header and module-body positions), so the RTL here uses qualified
+# references and has no import statement to find.
+_IMPORT_RE = re.compile(r"\bimport\s+(\w+)\s*::", re.M)
+_QUALIFIED_RE = re.compile(r"\b([A-Za-z_]\w*)::")
+
+
+def find_package(name):
+    """Locate `<name>.sv` in the RTL tree, or return None."""
+    for d in RTL_DIRS:
+        p = os.path.join(ROOT, d, name + ".sv")
+        if os.path.exists(p):
+            return p
+    return None
+
+
+def all_packages():
+    """Every `<name>.sv` in the RTL tree that declares `package <name>;`."""
+    found = []
+    for d in RTL_DIRS:
+        dp = os.path.join(ROOT, d)
+        if not os.path.isdir(dp):
+            continue
+        for f in sorted(os.listdir(dp)):
+            if not f.endswith(".sv"):
+                continue
+            p = os.path.join(dp, f)
+            name = f[:-3]
+            try:
+                if re.search(r"^\s*package\s+" + re.escape(name) + r"\s*;",
+                             open(p).read(), re.M):
+                    found.append(p)
+            except OSError:
+                pass
+    return found
+
+
+def package_deps(path):
+    """
+    Return the package files `path` needs, in declaration-safe order.
+
+    A file's own text is not enough to decide this.  A top level that merely
+    INSTANTIATES rvntt_core references no package itself, but Verilator pulls
+    rvntt_core in from an include directory and then fails on it with
+    "Package/class for ':: reference' not found".  Following instantiations by
+    regex would be fragile, so every package in the tree is simply put first.
+
+    That is safe because a package is a library: reading one costs nothing but
+    parse time, and an unused one produces no warnings (the constants carry a
+    scoped lint_off, see rv32i_pkg.sv).  It stops being adequate only if two
+    packages ever depend on each other, at which point the ordering here needs
+    a real topological sort -- and the symptom will again be a
+    'before declaration' error, which is unmistakable.
+    """
+    try:
+        text = open(path).read()
+    except OSError:
+        return []
+
+    # Strip line comments first: the header comments in these files DISCUSS
+    # `rv32i_pkg::X` and `import rv32i_pkg::*`, and matching prose would be
+    # harmless here but is exactly the kind of thing that silently starts
+    # mattering later.
+    code = re.sub(r"//[^\n]*", "", text)
+
+    deps = []
+    names = _IMPORT_RE.findall(code) + _QUALIFIED_RE.findall(code)
+    for name in names:
+        pkg = find_package(name)
+        if pkg and pkg not in deps:
+            deps.append(pkg)
+    for pkg in all_packages():
+        if pkg not in deps:
+            deps.append(pkg)
+    # A package must not list itself.
+    return [p for p in deps if os.path.abspath(p) != os.path.abspath(path)]
+
+
+def with_deps(path):
+    """`path` preceded by every package it imports."""
+    return package_deps(path) + [path]

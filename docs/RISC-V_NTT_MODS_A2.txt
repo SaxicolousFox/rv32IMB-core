@@ -1,0 +1,1609 @@
+# B, Zicond, Zkt, Zkr, Counters and 110 MHz — Track A Modifications, Round 2
+
+Companion to `RISC-V_NTT.txt`, which it never edits, and to
+`RISC-V_NTT_MODS_A.txt`, which it also never edits. Same target platform, same
+budget: 63,400 LUTs, 126,800 FFs, 240 DSP48E1, 135 × 36 Kb BRAM, 100 MHz
+oscillator, `xc7a100tcsg324-1` at **-1** speed grade. Track A as extended by
+`MODS_A` is finished — A14 through A19, milestones M7.1 and M7.2, tagged
+`m7.1-rv32im-hw` and `m7.2-bpred-77mhz`. This document adds **A20 through A30**
+and milestones **M7.3, M7.4 and M7.5**.
+
+It exists for a different reason than `MODS_A` did. `MODS_A` existed because a
+measurement said the original scope was one extension short of the baseline the
+original document itself assumed — it was a correction. This one is not a
+correction. It is a deliberate widening of the core, taken while the coprocessor
+does not yet exist, because four of the five things in it get harder or become
+impossible once it does.
+
+---
+
+## 0. How to read this against RISC-V_NTT.txt and MODS_A
+
+**`RISC-V_NTT.txt` is never modified.** **`RISC-V_NTT_MODS_A.txt` is never
+modified either** — it is the record of what A14–A19 were planned to be, and the
+two tags above are the record of what that produced. Everything here is
+additive.
+
+The same three markers are used, and they mean the same things:
+
+- **OVERRIDES §x** — the original text is now wrong and this replaces it.
+- **EXTENDS §x** — the original stands and something is added on top. The
+  original's "done when" remains satisfied by what was already built.
+- **CLARIFIES §x** — the original was ambiguous or rested on an unstated
+  assumption. Nothing changes; the assumption is written down.
+
+A marker may now name **either** source document, so every row in §2 says which
+one it is amending. Rows that amend `MODS_A` are marked `MODS_A §x`; rows with a
+bare `§x` amend `RISC-V_NTT.txt`.
+
+**The numbering hazard restated, because this round makes it worse.**
+`RISC-V_NTT.txt` uses `M1`–`M5` in §10 as *measurement* headings and `M0`–`M16`
+in §12 as *milestones*. `MODS_A` added milestones `M7.1` and `M7.2`. This
+document adds milestones `M7.3`, `M7.4` and `M7.5` — all in **§12's** sequence.
+Where §10's measurements are amended they are named "§10 M2", never bare.
+
+**A second numbering hazard, new to this round and easy to trip on.** This
+document adds ISA extensions whose names collide with the plan's own section
+letters. `§B6` is a *plan section about the coprocessor*; `Zbb` is an
+*extension*. The bare letter `B` in this document always means the **ratified B
+extension** (Zba + Zbb + Zbs); the plan's coprocessor track is always written
+`§B<n>` with a section number.
+
+---
+
+## 1. Why this exists
+
+Five reasons, in the order they were arrived at rather than the order they are
+built.
+
+**The first: Keccak is the half of ML-KEM that nothing in this project touches,
+and §10 M3 asks for it by name.** §10 M3 says, in the plan's own words, that on
+a small core with no Keccak acceleration *"the SHAKE128/SHAKE256/SHA3 work
+dominates ML-KEM"*, and asks for the breakdown before and after. There is no
+ratified RISC-V Keccak extension. There is, however, `rori` and `andn` — the
+two operations a Keccak round is built out of — and they are in Zbb, which is
+ratified, which Spike executes natively, for which riscv-formal ships instruction
+models, and for which the pinned arch-test branch ships a compliance suite. **The
+acceleration path for the half of ML-KEM the NTT does not touch is a standard
+extension, already supported by every reference this project checks itself
+against.** That is an unusually cheap thing to leave on the table.
+
+**The second: every attribution number in this project is inferred from
+simulation.** A18 built a Verilator observer rather than hardware counters, on
+purpose, so that the design A17 was tuning was not perturbed by the instrument
+measuring it. That was right then, and it closed to residual exactly zero. But it
+means the identity `cycles = retired + load-use + multi-cycle EX + 2 × redirects`
+is validated on hardware against **two** counters — `mcycle` and `minstret` — and
+every one of its four terms is a simulation result. `Zihpm` makes the terms
+first-hand. It also makes A19's payoff measurable on the board rather than
+projected onto it, and the same counters are what §10 M2's data-movement cost
+will need when the coprocessor exists.
+
+**The third: the core is slow, and it is slow for a reason that is now
+measured rather than guessed.** 77.501 MHz on a part whose speed grade allows a
+great deal more, at 3.5% utilisation, with **67.6% of the critical path in route
+delay**. That is not congestion. §3.4 reads the post-route path hop by hop and
+finds two structural causes and one physical one, none of which has been
+attacked. A17 raised Fmax 17.3% by taking a single adder off a mux; there is more
+of that available.
+
+**The fourth: a data-independence guarantee is worth more before the
+coprocessor than after.** §B8 already requires the coprocessor to be
+constant-time and says so in security terms. `Zkt` is the same claim for the
+*core*, it is ratified, and this core is unusually well placed to make it: one
+fixed-latency multiplier, one divider that is data-independent by construction,
+and everything else combinational. Making the claim now means the coprocessor
+arrives into a machine that already has it, rather than being the first thing
+asked to justify it.
+
+**The fifth: `Zkr` is the one item here that is easy to over-claim, which is
+why it is specified rather than left to a later "add an RNG" step.** ML-KEM needs
+randomness. The plan's KATs need determinism. Those are not in conflict but they
+are easy to wire together wrongly, and the failure mode — a KAT that passes
+because the entropy source was quietly bypassed, or a keygen that is
+deterministic in the field — is silent in both directions.
+
+**What is deliberately NOT here: the C extension.** §3.1 gives the reasoning at
+length. It is fenced off, not deferred by omission.
+
+---
+
+## 2. Overrides, extensions and clarifications
+
+**Read this table before writing any code.** Everything else in this document
+follows from it. A reader should be able to work out the current truth about any
+section of either source document from this table and `MODS_A` §2 together,
+without diffing anything.
+
+| Original | Marker | What now holds |
+|---|---|---|
+| §1.5 *"RV32I + `Zicsr` + `Zicntr`, machine mode only"*, as already overridden by `MODS_A` §2 to RV32IM | **OVERRIDES** *(second time)* | **RV32IM + Zba + Zbb + Zbs + Zbkb + Zicond + Zicsr + Zicntr + Zihpm + Zkr + Zkt**, machine mode only. Still no `A`, `F`, `D`, **no `C`** (§3.1), no `Zifencei`, no PMP, no user mode, no supervisor mode. `misa` stays `0x40001100` — `I` and `M` only, **with `B` deliberately not asserted**; see the note below the table, which is load-bearing and was rewritten after A21 measured it. |
+| §1.5's CSR list | **EXTENDS** | Adds `mhpmcounter3–31` / `mhpmcounter3h–31h`, `mhpmevent3–31`, `mcountinhibit`, and `seed` (`0x015`). `mcounteren` remains absent — there is no user mode to enable counters for. |
+| §1.6 *"Add a BTB + 2-bit bimodal predictor later, as a measured improvement"* | **CLARIFIES** | Satisfied by A19 and closed. This round does not add a second predictor. It does change *what the existing one is worth*, because Zicond removes branches — see §3.5 and A22, which re-measures rather than re-tunes. |
+| §1.4 *"64 KB instruction and 64 KB data memory is 128 KB"* | **UNCHANGED — and this is a deliberate re-affirmation, not an omission** | A17 measured 64 KB as worth **≥ +3.5 MHz** and did not adopt it, because the Tier-2 coprocessor's buffers do not exist yet and cannot be sized against an array already given away. **This round re-examined that decision under a 110 MHz target and reaches the same answer.** There is therefore **no third OVERRIDES row against §1.4**, and `MODS_A` A17's rule — that adopting it requires one — remains unused on purpose. |
+| §A13 *"Realistic expectation: IPC 0.75–0.95 … DMIPS/MHz 0.8–1.2"*, as already overridden by `MODS_A` §2 | **EXTENDS** | M7.2 brought both inside the band (0.8752 / 0.9346). This round is expected to move them further. **The band is no longer a target and must not be used as one** — a change that raises IPC and lowers DMIPS/MHz, or the reverse, is still to be reported as two numbers. |
+| §B6 *"software NTT … 15,000–30,000 cycles"*, as already clarified by `MODS_A` §2 | **CLARIFIES** *(second time)* | B and a 2-cycle multiply both make the software NTT faster. The figure §B6 quotes moves **again**, and the A16 and M7.2 records are kept rather than replaced — see §3.6. |
+| §10 M2 / M3, kernel and application speedup | **EXTENDS** *(second time)* | The software baseline remains the RV32IM build, now built `-march=rv32im_zba_zbb_zbs_zbkb`. **Pre-committed, before measurement: this makes the reported coprocessor speedup SMALLER. That is the correct direction** — see §3.6, which states it as a numbered expectation so it cannot be discovered afterwards and presented as a finding. |
+| §10 M3's Keccak/NTT breakdown | **EXTENDS** | The breakdown must now be reported **twice**: with and without B. The Keccak fraction is the one B moves, and reporting a single post-B breakdown would hide exactly the effect the step was taken for. |
+| §10 M1, core performance | **EXTENDS** *(second time)* | Report RV32I, RV32IM, and RV32IM+B. The first two are held by `m7-fmax-and-benchmarks` and `m7.2-bpred-77mhz`; neither is replaced. |
+| §9 F1, *"if Fmax drops materially from the core-only number"* | **EXTENDS** *(second time)* | The comparison baseline becomes **M7.4's** Fmax. M7.2's 77.501 MHz becomes the pre-B, pre-floorplan record. |
+| §9 F1 / §B9's *"the coprocessor's standalone Fmax exceeds the core's Fmax"* | **CLARIFIES — the most consequential row in this table** | §B9's criterion is **not sufficient for Tier 1** and never was. Tier-1 `Xkntt` is an EX-stage functional unit, not a bus slave: it *cannot* be in a separate clock domain (§3.3). So raising the core's Fmax raises a **hard floor** the Tier-1 butterfly must meet. A24 measures that floor out-of-context **before** the Fmax work commits to a number, rather than discovering it at M15. |
+| §8 I1, the multi-cycle EX unit | **EXTENDS** | A14 built the handshake generically and I1 inherits it. A25's 2-cycle multiply is the first change to that handshake's *latency*, not its *shape*; I1 still inherits the shape. |
+| §B8, the coprocessor's constant-time property | **EXTENDS** | §B8 constrains the coprocessor. A30 makes the matching claim for the core, under the ratified `Zkt`. **The two claims have different scopes and neither implies the other**, and §3.4 states the boundary in the terms the spec actually uses. |
+| §11 risk register | **EXTENDS** | §5 adds eleven rows, additive to §11 and to `MODS_A` §5. |
+| §12 milestones | **EXTENDS** | §6 adds M7.3, M7.4 and M7.5. M5, M6, M7, M7.1 and M7.2 are **not reopened**; where this round adds compliance or formal coverage, the result is recorded under the new milestone. |
+| `MODS_A` §2's row on the four-way agreement | **EXTENDS** | B, Zicond and Zkr all grow §C4's `SchedMachineModel` obligations, and Track B/C may be scoped by an agent that does not know it. §3.2 writes the consequence where they will find it. |
+| `MODS_A` §3.1's *"§B6's done-when gets easier"* | **OVERRIDES** | `MODS_A` observed that lowering the core's Fmax makes §B9's criterion easier to meet, and said it should be read as a warning that the criterion is weak. **This round raises the core's Fmax on purpose, so the criterion gets harder again** — and §3.3 shows that for Tier 1 it was the wrong criterion regardless. |
+| `CLAUDE.md`, *"`model/` is a frozen contract"* | **NOT overridden** | The frozen files remain `modarith.py`, `ntt_ref.py`, `ntt_math.py`, `isa/xkntt.py`, and this round does not touch one of them. `model/rv32i_ref.py` and `model/bpred.py` are not among them and are extended freely. |
+| `docs/isa-spec.md`, the frozen `Xkntt` contract | **UNCHANGED** | Verified, not assumed — §3.1. No encoding in this round touches `custom-0` or `custom-1`, and the strict reserved-field rule survives with one new legal `funct7` in `OP` and two new legal `funct7`s elsewhere, each enumerated. |
+
+**The `misa` note, REWRITTEN AFTER A21 MEASURED IT.** This paragraph originally
+said that `misa` bit 1 must be set, and that not setting it *"silently drops the
+entire B compliance suite"*. **Both halves turned out to be wrong**, and the
+correction is worth more than the original claim:
+
+- **arch-test does not select suites from `misa`.** It selects them by regex on
+  the ISA string — `check ISA:=regex(.*I.*Zbb.*)` — so
+  `RV32IMZicsr_Zba_Zbb_Zbkb_Zbs` selects all 34 B and Zbkb tests with bit 1
+  clear. Nothing is dropped.
+- **riscv-config 3.18.3 cannot express `B` at all.** Every spelling of the
+  letter — `RV32IMB…`, `RV32IMB_Zicsr…` — is rejected as *"does not match
+  accepted canonical ordering"*, and it derives the expected `misa` from the
+  single-letter extensions only. Setting bit 1 makes the config invalid, and
+  RISCOF then runs **nothing**.
+- It also requires `Zbs` to come **after** `Zbkb` in the string, which is why
+  the canonical form here is `Zba_Zbb_Zbkb_Zbs` and not alphabetical.
+
+**So `misa.B` is deliberately not asserted, and that is a recorded boundary in
+the sense M5 and M6 use the word.** The extension is implemented, selected,
+compliance-tested (29/29 ratified-B, 5/5 Zbkb) and formally verified; only the
+reporting bit is withheld, because asserting it would break the tooling that
+proves the rest. `rvntt_csr.sv` carries the reasoning next to the constant.
+
+The original paragraph's last sentence stands unchanged and is the reason this
+was caught at all: the reset value, the YAML's `reset-val`, the YAML's
+`bitmask`, and the `--isa` strings in `tb/cosim/` move in **one commit** or they
+do not move.
+
+---
+
+## 3. Conflict analysis
+
+`MODS_A` §3 looked for things that become intractable later and found four
+non-problems, two genuinely hard parts and one budget. This round reaches into
+Track B and beyond, so the same exercise is done wider: **six checked
+non-problems, three genuinely hard parts, one cross-track obligation, one set of
+moving baselines and two budgets.**
+
+Everything below marked *"verified"* was checked by running something. The
+commands are in the step that depends on the answer.
+
+### 3.1 What is *not* a conflict, and why — each of these was checked
+
+**Opcode space. Verified.** The catastrophe would be a new extension landing on
+`Xkntt`. It does not, and this was checked rather than assumed:
+
+| Space | Opcode | Owner | Touched this round? |
+|---|---|---|---|
+| `custom-0` | `0b0001011` (`0x0B`) | `Xkntt` Tier 1 | **No** |
+| `custom-1` | `0b0101011` (`0x2B`) | `Xkntt` Tier 2 | **No** |
+| `custom-2` | `0b1011011` (`0x5B`) | free | No — see below |
+| `custom-3` | `0b1111011` (`0x7B`) | free | No |
+
+Everything added this round lands in `OP` (`0x33`), `OP-IMM` (`0x13`) or
+`SYSTEM` (`0x73`), all of them standard. **`custom-2` is noted as the natural
+home for a future `Xkeccak`** — mentioned so the space is not spent by accident,
+and **not reserved, not encoded, and not implemented**. Leaving the door open
+costs a sentence; walking through it is a different project.
+
+**The strict reserved-field rule survives, and this is where it would erode if
+it were going to.** `MODS_A` added exactly one legal `funct7` to `OP` — `0000001`
+for `M`. This round adds nine, and **the list below is
+read off Appendix A's mechanically-generated table, not written from memory** —
+the distinction between `OP` and `OP-IMM` is exactly where a hand-written version
+goes wrong.
+
+In **`OP` (`0x33`)**, nine `funct7` values become legal: `0010000` (Zba
+`sh1add`/`sh2add`/`sh3add`), `0100000` (**already legal** for `SUB`/`SRA`, now
+also `andn`/`orn`/`xnor`), `0000101` (`min`/`minu`/`max`/`maxu` — this is also
+`clmul`'s group, and **`clmul` itself is not implemented**, see below),
+`0110000` (`rol`/`ror`), `0000100` (`zext.h`/`pack`/`packh`), `0010100`
+(`bset`), `0100100` (`bclr`/`bext`), `0110100` (`binv`), and `0000111` (Zicond
+`czero.eqz`/`czero.nez`).
+
+In **`OP-IMM` (`0x13`)** the single-operand and shift-immediate forms carry their
+own strict `imm[11:5]` decode: `0110000` (`rori`, and the `clz`/`ctz`/`cpop`/
+`sext.b`/`sext.h` group), `0010100` (`orc.b`/`bseti`), `0100100`
+(`bclri`/`bexti`), `0110100` (`rev8`/`binvi`/`brev8`), and `0000100`
+(`zip`/`unzip`).
+
+**Every other `funct7` in `OP` remains illegal**, and every other `imm[11:5]` in
+the `OP-IMM` shift forms remains illegal.
+
+**One decode trap, visible in Appendix A and easy to miss.** `clz`, `ctz`,
+`cpop`, `sext.b` and `sext.h` **share `opcode`, `funct3` and `imm[11:5]`
+entirely** — they are `0x60059513`, `0x60159513`, `0x60259513`, `0x60459513` and
+`0x60559513`, distinguished **only by the `rs2` field** (`imm[4:0]` = 0, 1, 2, 4,
+5). Values 3, 6 and 7 in that field are **reserved and must trap**, and a decoder
+that treats the field as a don't-care will accept three illegal encodings while
+passing every functional test, because no functional test ever emits them. This
+is precisely the class A3's sweep exists to catch. The point of A3's 10⁶-word RTL-vs-Python decoder equivalence sweep is
+that a lax and a strict decoder disagree on exactly these words; **A21 extends
+that sweep to the new encodings rather than trusting the paragraph above.**
+
+**Toolchain. Verified, not assumed** — the same check `MODS_A` §3.1 ran, re-run
+for the new strings. `riscv-none-elf-gcc 15.2.0` compiles
+`-march=rv32im_zba_zbb_zbs_zicsr`, `…_zbkb_zicsr` and `…_zbkb_zicond_zicsr`, all
+with `-mabi=ilp32`, without error. **`-print-libgcc-file-name` for the B build
+resolves to the existing `rv32im/ilp32/libgcc.a`** — the same multilib the
+project already uses. So there is **no new multilib, no toolchain rebuild, and no
+new pin**. libgcc itself stays a plain RV32IM build and simply does not use B
+instructions internally, which costs nothing that matters: after `M`, libgcc is
+no longer on the hot path of either benchmark.
+
+**Spike. Verified, and the check was fault-injected.** `spike --isa=` accepts
+`rv32im_zba_zbb_zbs_zbkb_zicond_zicsr_zicntr_xkntt0p1`, and accepts `zkt` and
+`zkr`. The fork already contains `czero_eqz.h`, `czero_nez.h`, the full Zb
+instruction set, and `seed_csr_t` with `CSR_SEED = 0x015` behind `EXT_ZKR`.
+**The acceptance test was fault-injected**: `rv32im_znonsense_zicsr` and
+`rv32im_zbq_zicsr` are both rejected with *"unsupported extension"*, so the
+ACCEPT results are real and not a test that passes on everything. **No fork
+change is needed**, so `toolchain/patches.sh export spike` is unaffected and
+`patches_in_sync` stays green. Only the `--isa` strings in `tb/cosim/*` change.
+
+**riscv-formal ships usable Zb models — this was the item most expected to be
+absent, and it is present in full.** The instruction models exist for every one
+of the 34 instructions this round adds, **and so do pre-built ISA bundles**:
+`isa_rv32ib.txt` (66 instructions = RV32I + Zba + Zbb + Zbs, confirming ratified
+B's composition from a local source rather than from memory) and
+`isa_rv32iZbkb.txt` (49 = RV32I + Zbkb). `generate.py` defines `Zba`, `Zbb`,
+`Zbs`, `Zbkb` as first-class groups and composes `rv32ib` from the first three.
+
+**And they add no BMC depth pressure, which is the thing that made `M` hard.**
+`MODS_A` §3.2's whole problem was that a 34-cycle iterative divider pushes the
+required depth to ~46. **Every instruction added this round is single-cycle and
+combinational** — `clz`, `ctz` and `cpop` included. The existing depth of 14
+stands unchanged, and the only real work is that **no `isa_rv32imb` bundle
+exists**, so the check list must be composed as the union of `rv32im`, `rv32ib`
+and `rv32iZbkb` — mechanical, and A21's job.
+
+**The arch-test branch has B coverage — also present, also expected to be
+absent.** `toolchain/riscv-arch-test`, pinned to `old-framework-3.x`, ships
+`riscv-test-suite/rv32i_m/B/` with **32 tests**, `Zicond/` with **2**
+(`czero.eqz`, `czero.nez` — exactly the extension), and `K/` with **55**, of
+which `pack`, `packh`, `brev8_32`, `zip` and `unzip` are the Zbkb instructions
+that Zbb does not already cover.
+
+**But the B suite is the OLD grouping, and this is a real trap rather than a
+tidy result.** Its 32 tests include `clmul-01`, `clmulh-01` and `clmulr-01`,
+which are **`Zbc`, not `B`** — ratified B is Zba + Zbb + Zbs and contains no
+carry-less multiply. The suite predates that split. So selecting the B suite
+selects three tests for an extension this round does not implement. There are two
+honest responses and one dishonest one:
+
+1. **Deselect `clmul*` by name and record the boundary**, exactly as M5 records
+   the `pmp` exclusion and for exactly the same reason — riscf 1.25.3 ignores
+   the `verify` clause these tests would otherwise use to deselect themselves.
+   **This is the choice.** The result is reported as *29/29 of the ratified-B
+   tests, with 3 `Zbc` tests excluded by name*, never as "32/32" and never as
+   "B passes".
+2. Implement `Zbc` as well. Rejected: a 32×32 carry-less multiplier is real area
+   on a design whose Fmax is the point of the round, Keccak does not use it,
+   ML-KEM does not use it, and `Zbc` is not in B.
+3. Claim the B suite passes without saying which tests ran. **This is the
+   failure this project has now seen four times** — A10's RISCOF exit code,
+   A11's sby exit code, A14's `synth_ooc.sh` `DSP=0`, and A19's stale
+   `bench_hardware` fixture. The shape is always the same: a report whose green
+   is not about the thing it names.
+
+**DSP budget.** Unchanged and still not close. `M` takes 4 DSP48E1; A25's 2-cycle
+multiply changes *where the pipeline registers sit inside those DSPs*, not how
+many there are. §B1's 3-per-Montgomery-multiplier plus 2 for Barrett still
+projects ~65 of 240 at P=16. B adds none — no B instruction is a multiply.
+
+**The C extension is fenced off, and here is the reasoning rather than an
+omission.** It is genuinely tempting: code density feeds the memory-size Fmax
+lever, and it is the one remaining standard extension with a large effect on this
+workload. It is rejected for this round, on four grounds, three of which are
+specific to what has already been built:
+
+- **It deletes a trap that two independent checkers currently watch.** With `C`,
+  `IALIGN` becomes 16, and `ex_target_misaligned = ex_ctrl_xfer &&
+  ex_jump_target[1]` — A9's instruction-address-misaligned trap — **stops
+  existing**. That is not a modification to the trap logic; it is the removal of
+  a behaviour that riscv-formal's `pc_fwd`/`pc_bwd`, RISCOF's `privilege` suite
+  and A9's directed tests all assert today. Every one of those has to be
+  re-taught simultaneously, and until they are, the safest-looking outcome —
+  they all still pass — would mean they are testing a machine that no longer
+  exists.
+- **It breaks A19's BTB indexing by construction.** The BTB entry is `{valid,
+  tag[21:0], kind[1:0], cnt[1:0], target[31:2]}` and both the index and the tag
+  are derived from a **word** address, which is what makes a tag hit provably the
+  same instruction that allocated the entry — the property A19's specification
+  leans on to argue that a taken prediction on a non-control-transfer cannot
+  happen. Halfword PCs invalidate that argument, not just that arithmetic.
+- **It puts a decompressor in IF, which is where the Fmax goal is already
+  fighting.** §3.4's path ends at `id_ex_q[pc]` through the redirect. Adding a
+  16-bit realignment buffer and an expander in front of decode is logic on the
+  fetch path in the same round that is trying to shorten it.
+- **The density argument does not actually bind.** The benchmark image is
+  21.8 KB in 128 KB. Density would buy a smaller image; the reason 128 KB is not
+  being cut is not that the image is too big (§2), it is that the Tier-2 buffers
+  are unsized. `C` does not help with that.
+
+**If `C` is ever adopted it is its own late milestone with a full
+re-measurement — never folded into a batch**, because it moves cycle counts, code
+size, the trap surface, the predictor's indexing and `misa` simultaneously, and a
+batched result would be unattributable across all five.
+
+### 3.2 The cross-track obligation: the four-way agreement, and what Track B and C inherit
+
+`CLAUDE.md` requires that **the RTL decoder, `model/isa/xkntt.py`, Spike and the
+LLVM `SchedMachineModel` agree exactly, strict reserved fields included.** Three
+of the four exist; the LLVM `SchedMachineModel` is §C4 and is not built.
+
+**This round does not add a fifth party, and it does not touch `Xkntt`.** B,
+Zicond, Zkr and Zihpm are standard: Spike knows them natively, LLVM knows them
+natively, and none of them has an entry in `model/isa/xkntt.py` because none of
+them is an `Xkntt` instruction. The agreement's *subject* is unchanged.
+
+**What does change is the size of §C4's obligation, and Track B/C may be scoped
+by an agent that does not know it.** So it is written here, in the document their
+own scoping will be told to read:
+
+> **To whoever scopes Track C's C4.** The `SchedMachineModel` you write must
+> cover, in addition to `Xkntt`'s six instructions and `M`'s eight: the ~34 B and
+> Zbkb instructions (all 1-cycle, all `IntALU`-class, and therefore cheap to
+> model but **not** free to omit — an omitted instruction gets default
+> scheduling, not zero scheduling), Zicond's two, and the `seed` CSR read, which
+> is **not** a normal CSR read: it has a side effect, it may return
+> `WAIT`/`BIST`, and software is expected to poll it. Modelling `csrrw seed` as a
+> plain CSR access will produce a scheduler that hoists or CSEs a polling loop.
+> §C3's warning about intrinsic attributes applies to it directly.
+>
+> **And the latency table in `CLAUDE.md` moves this round.** A25 changes `MUL`
+> from 4 cycles to 2. `CLAUDE.md`'s rule is that RTL, Spike and the
+> `SchedMachineModel` change **together, in one commit**. Spike is untimed and
+> `M`'s RTL latency is not in `docs/isa-spec.md` — that table is `Xkntt`'s — so
+> for `M` the rule reduces to: **the `SchedMachineModel`, when it is written,
+> must be written against A25's 2-cycle multiply and not against A14's
+> 4-cycle one.** There is no commit that can enforce this today because the file
+> does not exist. This paragraph is the enforcement.
+
+**`toolchain/llvm-project` is an empty, uninitialised checkout.** Nothing in this
+round changes that, and nothing in this round depends on it.
+
+### 3.3 Genuinely hard, first: the coprocessor's clock — decided, not deferred
+
+This was named the most important cross-track question in the round. It has an
+answer, and the answer is different for the two tiers.
+
+**Tier 1 must share the core's clock. This is not a decision; it is a
+consequence, and it follows from documents that are already frozen.**
+`docs/isa-spec.md` is the frozen `Xkntt` contract, and it gives Tier-1
+instructions latencies of **4 to 9 cycles** of EX occupancy — `kmm` 4, `kbfct` 5,
+`kbfgs` 5, `kbmul0` 9, `kmac` 6, `kbmul1` 5. A Tier-1 instruction reads the
+register file through the forwarding network, occupies EX, and writes back. **A
+clock-domain crossing costs two to three flops of synchroniser in each
+direction** — four to six cycles minimum, before the unit does any arithmetic,
+and only if the request is a level rather than a pulse. `kmm`'s entire budget is
+four. **A separate clock domain for Tier 1 would make the frozen latency table
+unimplementable**, and that table is a contract the RTL decoder, Spike and the
+LLVM scheduler are all required to agree on.
+
+So: **Tier 1 is single-domain, and therefore the core's Fmax is a hard floor the
+Tier-1 butterfly must meet.** §B9's criterion — *"the coprocessor's standalone
+Fmax exceeds the core's Fmax"* — is the right shape for a bus slave and the wrong
+shape for an EX-stage functional unit, because for Tier 1 it is not a comparison
+between two independently-clocked things. It is a constraint on one thing.
+
+**This is the direct conflict between goal 1 and the rest of the project, and it
+is what the Fmax stop rule is anchored to.** Every megahertz added to the core is
+a megahertz the Tier-1 Montgomery butterfly must also close at. Pushing the core
+to 110 MHz and discovering at M15 that the butterfly closes at 95 would be
+exactly the §9 failure mode — fired far from its cause, after both tracks are
+built.
+
+**So the evidence is brought forward.** A24 synthesises a representative Tier-1
+butterfly out-of-context, at the target frequency, **before A26 and A27 commit
+the core to a number**. That converts *"state precisely what evidence would
+decide it and when that evidence arrives"* into evidence that arrives in this
+round, for the cost of one Vivado OOC run. It is deliberately placed as the first
+step of the performance phase rather than the last.
+
+**Tier 2 may have its own domain, and that decision is deferred with a named
+trigger.** Tier 2 is a block coprocessor behind `kntt.start`/`kntt.wait` with its
+own RAM and, per §B7, a memory-mapped register interface. Its interface is a
+register write and a poll against an operation of hundreds of cycles, so a
+two-flop synchroniser is a rounding error rather than a latency contract. The
+trigger is explicit: **if §B9's OOC sweep shows the P≥4 datapath closing below
+the core's shipped Fmax, Tier 2 goes into its own domain and the register
+interface gets a proper CDC** — not a re-timed core. Recorded here so that
+decision is made against a measurement rather than under M15's schedule
+pressure.
+
+**One consequence worth stating now.** If Tier 2 does end up in its own domain,
+§B7's `CYCLES` counter counts *coprocessor* cycles, and §10 M2's speedup must
+then be computed in **time**, not cycles, or it will silently compare two
+different clocks. §B7 does not say which, because when it was written there was
+only one clock.
+
+### 3.4 Genuinely hard, second: B and the Fmax goal want the same mux
+
+**These two goals fight, and they fight in one specific place.** The fight is
+avoidable, but only if the avoidance is designed in from the start — retrofitting
+it after B is in the ALU means re-doing the step.
+
+**The measured critical path today**, from
+`fpga/build/fmax_a19/mhz_77.94/post_route_critical.rpt`, the closest failing
+point to the shipped 77.501 MHz. Source `mem_wb_q_reg[rd_addr][1]`, destination
+`id_ex_q_reg[pc][24]`, **12.954 ns, 19 logic levels, logic 4.202 ns (32.4%),
+route 8.752 ns (67.6%)**:
+
+| # | segment | signal reached | ~delay |
+|---|---|---|---|
+| 1 | MEM/WB `rd_addr` → forwarding compare → forwarding mux | `b[0]`, `uses_rs2` | 3.35 ns |
+| 2 | operand select → **ALU adder**, 2 × CARRY4 | `data0[4]` | 2.67 ns |
+| 3 | **ALU result mux**, LUT5 + 2 × LUT6 + LUT3 | `ex_alu_y[2]` | 1.55 ns |
+| 4 | JALR target form → | `ex_jump_target[2]` | 1.13 ns |
+| 5 | **mispredict compare**, LUT6 + 3 × CARRY4 | `ex_mispredict` | 2.03 ns |
+| 6 | flush → IF/ID valid (fanout 131) → ID/EX `pc` | `id_ex_q[pc][24]` | 2.22 ns |
+
+**Segment 3 is the ALU result mux, and the B extension's natural implementation
+makes it four times wider.** `alu_op_e` is 4 bits with 11 members. B and Zbkb add
+34 instructions; folding them into `rvntt_alu`'s `unique case` takes the enum to
+6 bits and roughly 45 members, and the mux that produces `ex_alu_y` grows by two
+LUT levels. That mux is on the critical path, and everything downstream of it —
+the JALR target, the mispredict compare, the flush — is on it too. **Adding B the
+obvious way would cost roughly 1 ns on a path with 0.003 ns of slack, while the
+round's other goal is to remove 3.9 ns from it.**
+
+**The resolution, and it is cheap: B does not go in the ALU.** The core already
+has the right structure and it is being used for `M` and `Zicsr` today:
+
+    ex_result = is_muldiv ? ex_md_result
+              : is_csr    ? ex_csr_rdata
+              :             ex_alu_y;
+
+`ex_result` terminates at a **pipeline register**, `ex_mem_q.ex_result`. It is
+not on the critical path; `ex_alu_y` is on it only because `ex_jump_target` taps
+`ex_alu_y` *before* this mux. So a new `rvntt_bitmanip.sv` with its own operation
+enum, joined as one more arm of `ex_result`, adds **one LUT level to a path with
+slack and zero levels to the path without it.** The cost is a second 32-bit
+operand fan-out and a wider `ex_result` mux; the benefit is that segment 3 does
+not grow at all.
+
+**This also removes the reason `alu_op_e` would have to widen**, which matters
+beyond timing: every downstream `case` on `alu_op_e` — including
+`rvntt_alu.sv`'s `FORMAL` block, which mirrors each operation in a second idiom —
+stays exactly as verified.
+
+**And segments 3 and 4 can be deleted outright, which is A26's largest lever.**
+`ex_jump_target` taps `ex_alu_y` for one instruction: JALR. Its target is
+`(rs1 + imm) & ~1`. **A17 already built an adder that computes exactly
+`ex_rs1_fwd + id_ex_q.imm`** — `ex_mem_addr`, for load and store addresses — and
+A19 built a second, `ex_pc_target = pc + imm`, for branches and JAL. The comment
+at `rvntt_core.sv` where JALR is left on the ALU says its target *"genuinely
+depends on a register, which is the whole difference between it and the other two
+shapes"* — which is true, and is also exactly why **A17's register-sourced adder
+is the right one and was already there**. Nobody noticed, because A17 added it
+for loads and A19 added a different one for branches, and JALR is neither.
+
+Routing JALR through `ex_mem_addr` removes segments 3 **and** 4 from the path —
+about 2.7 ns of the 12.954 — for **zero new logic**, and it is checkable the way
+A17 checked its adder: `a_addr_adder_matches_alu` already asserts
+`ex_mem_addr == ex_alu_y` for loads and stores; the JALR form asserts the same
+equality under `ctrl.jalr`.
+
+**Sequencing consequence, and it is load-bearing:** this makes A21 (B) and A26
+(cycle-neutral Fmax) interact, so they are ordered **B first**. Doing the Fmax
+work first and then adding B would put a 1 ns regression on top of a
+freshly-tuned path and make A26's measured contribution a fiction. Doing B first,
+in its own lane, means A26 measures the machine it will ship on.
+
+### 3.5 Genuinely hard, third: Zkt is a claim about a machine that has a branch predictor
+
+**The ratified list was read, not recalled**, from
+`riscv/riscv-crypto`'s `doc/scalar/riscv-crypto-scalar-zkt.adoc`. Three of its
+properties are surprising enough that reconstructing the list from memory would
+have produced a wrong claim:
+
+**First: `Zkt` excludes division and remainder.** The specification's own words
+are *"Cryptographers typically assume division to be variable-time (while
+multiplication is constant time)"*. `div`, `divu`, `rem` and `remu` are **not**
+on the list; `mul`, `mulh`, `mulhsu` and `mulhu` are. So the premise that
+`rvntt_muldiv`'s data-independent divider "pays a second dividend" at `Zkt` is
+**wrong** — `Zkt` never asked for it. The divider's data independence is a real
+and useful property of this core, it is worth stating, and it is **beyond `Zkt`,
+not required by it.** Claiming it as `Zkt` compliance would be claiming credit
+under the wrong heading.
+
+**Second: `Zkt` excludes loads, stores and conditional branches**, explicitly:
+*"Loads, stores, conditional branches are excluded, along with a set of
+instructions that are rarely necessary to process secret data."* `Zicsr` is
+excluded too.
+
+**Third: `Zkt`'s bit-manipulation coverage is Zbkb/Zbkx/Zbc, not B.** The listed
+instructions are `clmul`, `clmulh`, `xperm4`, `xperm8`, `ror`, `rol`, `rori`,
+`andn`, `orn`, `xnor`, `pack`, `packh`, `brev8`, `rev8`, `zip`, `unzip`.
+**`sh1add`/`sh2add`/`sh3add` (Zba) are not on it. `clz`/`ctz`/`cpop`/`min`/`max`/
+`minu`/`maxu`/`sext.b`/`sext.h`/`zext.h`/`orc.b` (Zbb-only) are not on it.
+`bset`/`bclr`/`binv`/`bext` and their immediate forms (Zbs) are not on it.**
+So of the 34 instructions A21 adds, the ones `Zkt` constrains are exactly the
+Zbb∩Zbkb overlap plus Zbkb's own five — and the rest are simply out of scope.
+They are all combinational here anyway, so the *implementation* is uniform; the
+*claim* is not, and the claim is what gets written down.
+
+**The two boundaries that must be stated before the claim is made.** A `Zkt`
+claim that omits them is a security falsehood, which is worse than no claim:
+
+> **Boundary 1 — `Zkt` is a statement about listed instructions' latency, and
+> not about control flow.** It says nothing about which instructions a program
+> executes or in what order. Constant-time *code* is the programmer's
+> obligation; `Zkt` only guarantees that the primitives it lists do not leak
+> through their own timing. Branches are excluded from the list by name.
+>
+> **Boundary 2 — this core has a branch predictor, and it introduces
+> data-dependent timing that `Zkt` does not cover and this core does not
+> remove.** A19's 256-entry BTB, its 2-bit counters and its 8-entry RAS are
+> **architecturally invisible state that persists across whatever runs on the
+> core.** There is no flush, no partition and no privilege boundary — there is
+> only machine mode. So: a mispredict costs 2 cycles and whether it occurs
+> depends on branch history, which depends on data; and BTB and counter state
+> **survive from one program to the next**, which is the standard precondition
+> for a branch-predictor side channel. A `Zkt`-conformant core is not a
+> constant-time machine, and this one specifically is not.
+
+**Boundary 2 is not a defect being confessed — it is what `Zkt` is for.** The
+extension exists precisely because "constant-time" is not a property a whole
+machine has; it is a property individual instructions can be guaranteed to have,
+so that code written to avoid secret-dependent control flow can rely on its
+primitives. Saying so is the difference between a useful claim and a misleading
+one.
+
+**The proof obligation, and the vacuity risk.** On `rvntt_muldiv` the property is
+close to a single formal statement: EX occupancy depends only on the opcode. The
+danger is that it passes without constraining anything — the same failure as
+A11's first riscv-formal run, which reported 43/43 over a broken adder. **A30's
+done-when therefore requires the proof to FAIL under an injected fault**: give
+the multiplier a data-dependent early-out and confirm the property catches it.
+A `Zkt` proof that has never been observed to fail is a security claim resting on
+nothing.
+
+### 3.6 The moving baselines, stated before they are measured
+
+`MODS_A` amended §B6 and §10 M2/M3 once. **This round amends them again, and the
+amendment is written here, before the measurement, so it cannot later be
+presented as a discovery.**
+
+**Two changes in this round make the software NTT faster**, and the software NTT
+is the denominator of §10 M2's kernel speedup and a term in §10 M3's Amdahl
+breakdown:
+
+1. **B and Zbkb.** Effect on the NTT itself: **small** — the reference NTT is
+   multiply-and-add over 16-bit coefficients and has little for Zbb to do. Effect
+   on Keccak: **large**, which is §10 M3's other term, not §10 M2's.
+2. **A 2-cycle multiply (A25).** Effect on the NTT: **large.** A18 measured
+   multi-cycle EX stalls at ~20% of the RV32IM software-NTT region, and this
+   halves the stall term.
+
+**The pre-committed consequence, numbered so it can be checked against later:**
+
+> **P1. The reported Tier-1 and Tier-2 speedup ratios in §10 M2 will get
+> SMALLER**, because their denominator — the software NTT — gets faster while
+> their numerator does not change. **This is the correct direction.** A speedup
+> measured against a deliberately weak baseline is the thing §10 M2's own text
+> warns about: *"If you benchmark against a naive `-O0` triple-loop, your speedup
+> number is meaningless and anyone who knows the field will see it
+> immediately."* A faster baseline is a more honest number, not a worse result.
+>
+> **P2. §10 M3's application-level speedup will get smaller too, and by more than
+> P1**, because B accelerates Keccak — the dominant term — while the NTT
+> coprocessor does not touch it. Amdahl's denominator shrinks where the
+> accelerator has no effect.
+>
+> **P3. Dhrystone and CoreMark will improve, and the two will not agree.** As at
+> A16: CoreMark is multiply- and bit-manipulation-heavy, Dhrystone is
+> string- and branch-heavy. If they move together by similar amounts, something
+> is wrong with the measurement.
+>
+> **P4. IPC may FALL while performance rises**, and this must not be reported as
+> a regression. B replaces instruction sequences with single instructions, so
+> retired-instruction count drops faster than cycles do. `MODS_A` §3.4's rule
+> applies unchanged: per-MHz ratios and IPC measure different things than
+> absolute throughput, and an improvement in one may show as a decline in
+> another.
+
+**The earlier records are kept, not replaced** — as M7's RV32I figures were kept
+when M7.1 replaced them, and as M7.1's were kept at M7.2. After this round the
+record is four deep: `docs/a13-benchmarks.md` (RV32I),
+`docs/a16-benchmarks.md` (RV32IM), `docs/a19-benchmarks.md` (RV32IM + predictor)
+and this round's (RV32IM + B + Zicond + 2-cycle multiply). **The dual software
+NTT baseline is measured at both M7.3 and M7.4** — once after the ISA additions
+and once after the multiplier change — because those are two different machines
+and a single number would attribute the whole change to whichever step happened
+to be reported.
+
+### 3.7 Two budgets, not conflicts
+
+**The memory budget — re-examined under a 110 MHz target and NOT changed.**
+A17 measured 64 KB (16 tiles) as **≥ +3.5 MHz** against 128 KB's 86.490 MHz and
+declined to adopt it, on the grounds that ML-KEM-768's keys, ciphertext and
+Keccak state, the coefficient arrays, and above all **the Tier-2 coprocessor's
+own buffers — which do not exist yet** — cannot be sized against an array already
+given away. A 110 MHz goal is a reason to re-open that, so it was re-opened, and
+the answer is the same: **nothing about this round changes what Tier 2 will
+need**, and §3.3 has just concluded that Tier 1's requirements are *tighter* than
+previously assumed, not looser. Spending memory now to buy clock, in a round
+whose own analysis says the coprocessor's demands are less well understood than
+they looked, is the wrong order. **There is no third OVERRIDES row against
+§1.4.** If the levers in A26 and A27 fall short of target and this becomes the
+difference, it is re-opened again — with the row written, per `MODS_A` A17's
+rule.
+
+**The entropy budget — the one genuinely new resource question.** A ring
+oscillator is a combinational loop, which every tool in this flow is built to
+refuse: Vivado will optimise it away without `DONT_TOUCH`/`KEEP_HIERARCHY`, and
+will error on the loop without an explicit `set_disable_timing` /
+`create_clock`-free exclusion. Verilator will not simulate it meaningfully at
+all, and Yosys/SymbiYosys cannot — **so the entropy source is the first module in
+this project that cannot be verified by the project's own primary methods.**
+That is not a reason to skip it; it is a reason to structure it so that
+everything *except* the oscillator is verifiable: the health tests, the
+`seed` CSR's return-code state machine, and the conditioning are all ordinary
+synchronous logic and get ordinary formal and simulation coverage, driven by a
+**stub source** the testbench can make stuck, biased or ideal at will. §A29
+specifies exactly that split, and it is the reason the step's done-when is about
+the health tests firing rather than about the oscillator running.
+
+### 3.8 Everything this touches
+
+Checked by search, not by memory. Anything not on this list should be treated as
+a surprise worth stopping for. **The ripples are batched deliberately** — the
+verification surface is paid once per phase, not once per extension, which is the
+whole reason B, Zicond and the counters are one milestone.
+
+**RTL** — `rv32i_pkg.sv` (new `funct7`/`funct3` constants, a new result-select
+member, a new bitmanip op enum, `BP_*` untouched), `rvntt_decode.sv` (the bulk of
+A21 and A22), `rvntt_core.sv` (the `ex_result` mux gains an arm; JALR moves to
+the address adder; counter event wires), `rvntt_csr.sv` (`misa`, `mhpmcounter*`,
+`mhpmevent*`, `mcountinhibit`, `seed`), `rvntt_muldiv.sv` (A25's 2-cycle
+multiply), `rvntt_hazard.sv` (the multi-cycle latency term), `rvntt_alu.sv`
+(**deliberately unchanged** — §3.4), plus new `rvntt_bitmanip.sv`,
+`rvntt_hpmcounter.sv`, `rvntt_entropy.sv` and `rvntt_entropy_health.sv`.
+
+**Model** — `model/rv32i_ref.py` extended to decode B, Zbkb and Zicond (a
+permitted addition; the four frozen files are untouched), `model/bpred.py`
+unchanged in structure but re-run against a different branch stream after A22.
+
+**Verification** — `tb/cosim/gen_random_prog.py` (emit B/Zicond at controlled
+density), `tb/cosim/cycle_model.py` (A25's latency term; B and Zicond are
+single-cycle and add no term), `tb/cosim/spike_asm.py` and every `--isa` string
+under `tb/cosim/`, `tb/cosim/test_riscv_tests.py`, `tb/cocotb/test_decode_cocotb.py`
+(A3's 10⁶-word equivalence sweep extended to the new encodings — §3.1),
+`tb/riscof/rvntt/rvntt_isa.yaml` (ISA string, `misa` reset value **and**
+bitmask), the RISCOF suite selection including the `clmul*` exclusion by name,
+`tb/formal/run_riscv_formal.py` (the union check list — §3.1), new
+`tb/formal/rvntt_bitmanip/`, `tb/formal/rvntt_entropy_health/` and
+`tb/formal/rvntt_zkt/`, `tb/mutate/run_mutation.py`, `tb/perf/` (A20 validates
+against A18's instrument), `tb/run_regress.py`.
+
+**Software and build** — `sw/kyber/Makefile` and `sw/bench/` (`-march`),
+`fpga/scripts/build_bench_image.py` and `build_soc_image.py` (`ARCH`),
+`fpga/scripts/hw_bringup.py` and `sw/bench/bench_main.c` (report the new
+counters), `docs/kyber-backends.md`.
+
+**Unchanged, deliberately** — `docs/isa-spec.md` (§3.1: disjoint opcode space,
+no `Xkntt` encoding touched), `toolchain/` (**no fork touched, no new pin** —
+§3.1 verified Spike, GCC and both external suites already support everything
+here), `model/`'s four frozen files, and `rvntt_alu.sv`.
+
+**A note on `tb/run_regress.py` and `rtl/common/`, which are shared with Track
+B.** Both are on the collision list in `CLAUDE.md`. This round adds tests to the
+registry and no modules to `rtl/common/`. The A19 lesson applies and is now a
+standing rule: **a test's fixture must be re-pointed in the same commit as the
+step that supersedes it.** `bench_hardware` pointed at A16's bitstream for three
+steps and would have certified a design the repository no longer contained.
+
+---
+
+## 4. Track A additions
+
+Eleven steps, in three phases. The phase boundaries are the milestones in §6, and
+each phase is coherent, tagged and defensible on its own if everything after it
+is abandoned.
+
+**Sequencing, and why it is this way.** Instrument before optimising, so A20's
+counters come first — A18's lesson, and A5's before it. Cheap decoder-only
+additions before expensive datapath ones, so B and Zicond precede the multiplier
+and the floorplan. **Fmax work that changes cycle counts is kept strictly
+separate from Fmax work that does not**: A25 changes cycles and has its own
+before/after; A26 and A27 change none and are held to A17's bit-identical
+standard. B lands before the Fmax work for the reason in §3.4 — tuning a path and
+then widening it measures nothing. And **Zkt is last**, because it is a proof
+*about* everything else and has to be re-proved after every functional addition.
+
+### Phase 1 — the ISA round (M7.3)
+
+### A20 — Hardware performance counters (`Zihpm`)
+
+**Instrument before optimising.** Every attribution number in this project is a
+simulation result validated against two hardware counters (§1). This step makes
+the terms first-hand.
+
+**Build:** `mhpmcounter3–31` and `mhpmcounter3h–31h` as 64-bit counters, with
+`mhpmevent3–31` selectors and `mcountinhibit`. Not all 29 need to be real —
+the specification permits a subset, with unimplemented counters **read-only
+zero** — and implementing 29 × 64 bits of counter on a design whose Fmax is the
+point of the round would be self-defeating. **Implement 6 real counters** and
+tie the rest to zero, with the event set chosen to close A18's identity:
+
+| Event | Why it is one of the six |
+|---|---|
+| branch mispredicts | A19's payoff, measured on the board for the first time |
+| BTB hits | separates "predicted correctly" from "not predicted at all" |
+| load-use interlock cycles | A18 identity term |
+| multi-cycle EX stall cycles | A18 identity term; A25 changes it directly |
+| taken control transfers retired | the denominator for a mispredict *rate* |
+| instruction-fetch redirects | closes the identity against `mcycle`/`minstret` |
+
+**The check that makes it trustworthy is the one A18 used**, and it is now
+checkable on hardware rather than only in simulation:
+
+    mcycle = minstret + load_use + muldiv_stalls + 2 × redirects
+
+**Verify:** `mcountinhibit` actually inhibits (write it, run a loop, confirm the
+counter does not move); the counters are WARL and writable; a 32-bit overflow
+carries into the `h` half. **Fault-inject:** miscount one event by one per
+occurrence and confirm the identity's residual becomes nonzero — a counter set
+that cannot be shown to break the identity is not validating it.
+**Cross-validate against A18**: run both instruments over the same delimited
+region and require agreement **to the count**, not to within a tolerance. That is
+the whole point of having built the simulation instrument first.
+
+**Realistic expectation:** 6 × 64-bit counters plus selectors is roughly 400 FFs
+and 250 LUTs — the counters themselves are not on any critical path, but the
+**event wires are**, because several of them are derived from `ex_mispredict` and
+`ex_redirect`, which §3.4 shows are on it. Expect a small Fmax cost, and measure
+it rather than assuming it is zero.
+
+**Stop rule:** if the event wiring costs more than ~1 MHz, register the events
+one stage later — a counter does not care when it is incremented as long as it is
+incremented exactly once. **Do not** solve it by dropping counters; the whole
+step is the measurement.
+
+**Done when:** the six counters agree with A18's instrument to the count on both
+benchmarks, the identity closes with residual **exactly zero on hardware**,
+`mcountinhibit` is shown to inhibit, and the miscount fault-injection is shown to
+break the residual.
+
+---
+
+### A21 — B (Zba + Zbb + Zbs) and Zbkb, in a separate result lane
+
+**The largest step in the round by instruction count and the cheapest by
+risk**, because everything it adds is combinational, single-cycle, externally
+referenced and already supported by every checker this project uses (§3.1).
+
+**Build:** `rvntt_bitmanip.sv` — 34 instructions: Zba's 3, Zbb's 18, Zbs's 8 and
+Zbkb's 5 beyond the Zbb overlap. **It is a separate module with its own operation
+enum and its own result, joined as one more arm of `ex_result`, and
+`rvntt_alu.sv` is not touched.** §3.4 is the reason and it is not negotiable:
+folding these into the ALU puts two LUT levels on the critical path in the round
+whose other goal is to shorten it.
+
+Structurally the unit is four groups sharing operands: a shift-and-rotate group
+(`rol`, `ror`, `rori`) that reuses the existing barrel-shifter idiom; a
+count/compare group (`clz`, `ctz`, `cpop`, `min`, `max`, `minu`, `maxu`); a
+byte/bit-permute group (`rev8`, `orc.b`, `brev8`, `zip`, `unzip`, `pack`,
+`packh`, `sext.b`, `sext.h`, `zext.h`); and a single-bit group (`bset`, `bclr`,
+`binv`, `bext` and immediate forms) which is a shifter plus a mask. `sh1add`/
+`sh2add`/`sh3add` are a shift-by-constant into the existing adder and are the one
+group with a plausible claim to belong in the ALU — **put them in the bitmanip
+unit anyway**, so that the rule "B is not in the ALU" has no exceptions to
+remember.
+
+**`misa` bit 1 is NOT set, and §2's note says why** — riscv-config 3.18.3
+cannot express the `B` letter, and arch-test selects the suites from the ISA
+string rather than from `misa`, so asserting it would cost the whole compliance
+run and buy nothing.
+
+**Verify — and this is the step where the verification surface is paid:**
+
+1. **RISCOF, the B suite**, with `clmul`, `clmulh` and `clmulr` **excluded by
+   name** and the exclusion recorded the way M5 records `pmp` (§3.1). Report
+   *29/29 ratified-B tests, 3 `Zbc` tests excluded*, never "32/32".
+2. **RISCOF, the Zbkb subset of the `K` suite** — `pack`, `packh`, `brev8_32`,
+   `zip`, `unzip`. The rest of `K` is AES/SHA/SM3/SM4 and is not implemented;
+   exclude by name and record that boundary too.
+3. **riscv-formal**, with the check list composed as the union of `rv32im`,
+   `rv32ib` and `rv32iZbkb` (§3.1 — no `isa_rv32imb` bundle exists). **Depth
+   stays 14**; every instruction here is combinational and adds no window.
+4. **Cosim**: 1000 random programs with B and Zbkb at high density, against
+   Spike, byte-identical.
+5. **A3's decoder equivalence sweep extended to the new encodings** — 10⁶ random
+   words, RTL decoder against `model/rv32i_ref.py`, with the strict
+   reserved-field rule intact. This is the check that a lax decoder fails and it
+   is the reason §3.1 enumerates the newly-legal `funct7` values instead of
+   describing them.
+6. **Mutations.** At minimum: a `rori` that rotates the wrong way, a `clz` that
+   is off by one on a zero input (the specification says 32, and off-by-one here
+   is the classic), a `sext.b` that zero-extends, a `bext` that reads the wrong
+   bit, and a `zip`/`unzip` pair that are each other's inverse but both wrong.
+   Each must be caught and by which test recorded.
+
+**Realistic expectation:** +600 to +900 LUTs — the count/permute groups are the
+expensive ones, and `zip`/`unzip`/`brev8` are pure wiring. **Fmax cost near zero
+by construction**, because the unit is off the critical path; if it is not near
+zero, the lane separation was not achieved and that is the thing to fix, not the
+Fmax. Keccak speedup on the ML-KEM profile is the point of the step and is
+measured at A23, not asserted here.
+
+**Stop rule:** if `rvntt_bitmanip` lands on the critical path, stop and fix the
+lane before continuing — that is a structural failure of the step's central
+decision, and carrying it forward would corrupt A26's and A27's before/after.
+
+**Done when:** all six verification items above pass with the two exclusions
+recorded by name, `misa` reads `0x40001100` with the `B`-bit boundary recorded, `rvntt_isa.yaml`'s reset value and
+bitmask agree with the hardware, and `rvntt_alu.sv` is untouched in the diff.
+
+---
+
+### A22 — Zicond, and re-measuring what the predictor is worth
+
+**Two instructions, `czero.eqz` and `czero.nez`**, one `funct7`, no new operand
+paths — the cheapest ISA addition in the project. They are specified as their own
+step anyway, because of what they do to a *measurement* rather than what they
+cost to build.
+
+**Build:** decode `funct7 = 0000111` in `OP`, `funct3 = 101` (`czero.eqz`) and
+`111` (`czero.nez`). The result is `rs2 == 0 ? 0 : rs1` and its complement —
+a 32-bit AND with a replicated zero-detect. Put it in the bitmanip lane, for the
+same reason as everything in A21.
+
+**The measurement-ordering trap, and the choice made.** Zicond converts short
+if-then-else into straight-line code, so it **removes branches**, so it changes
+what A19's predictor is worth. The prompt's two options were to sequence it
+before the predictor's numbers are final, or to re-run A18's instrument
+afterwards and report the delta.
+
+**The choice is to re-measure afterwards, and the reason is that the first option
+no longer exists.** M7.2 is complete, committed, tagged `m7.2-bpred-77mhz` and
+pushed. Reopening it to re-sequence a later extension would violate the
+project's own rule — the same rule that kept M7 from being retagged when M7.1
+superseded its numbers. So:
+
+**A22's own done-when includes re-running A18's instrument and A20's counters
+over both benchmarks and reporting, separately:** total branches retired before
+and after; mispredicts before and after; and **the predictor's payoff recomputed
+on the post-Zicond branch stream**. The expected shape is that Zicond removes
+*easy, well-predicted* branches — a hammock around a single instruction is almost
+always correctly predicted — so **the mispredict rate may go UP while the
+mispredict count goes DOWN.** Report both; either alone is misleading.
+
+> **REVISED AFTER MEASURING, AND THE REVISION IS THE POINT OF THE STEP.** Two
+> builds are not enough. `Zbb`'s `min`/`max` are themselves if-conversion
+> instructions and `Zba`'s `sh*add` replace multiplies, so an `rv32im` versus
+> `rv32im+B+Zicond` comparison **cannot separate what Zicond did from what B
+> did** — and run that way, Dhrystone appears to lose 2,000 branches and 3,999
+> mispredicts together, which reads as Zicond removing a fifth of the
+> mispredicts. **A third build, B without Zicond, says B removed all 3,999 and
+> Zicond removed none.**
+>
+> So this step's done-when now requires **three** points — `rv32im`,
+> `rv32im+B`, `rv32im+B+Zicond` — and `build_bench_image.py` grew an
+> `rv32imzb` arch that exists for no other purpose. The predicted shape was
+> half right: the count did not move at all and the rate rose 0.11 points
+> purely because the denominator shrank. See `docs/a22-zicond.md`.
+
+**Verify:** RISCOF's `Zicond` suite, both tests. Cosim against Spike, whose
+`czero_eqz.h`/`czero_nez.h` already exist. `model/bpred.py` re-run against the
+new stream and required to still match the RTL redirect count **to the unit**,
+which is M7.2's second closure and is the check that Zicond has not perturbed
+anything it should not have. **Fault-inject:** swap `eqz` and `nez` — cosim must
+catch it; and make `czero` return `rs2` instead of zero.
+
+**Realistic expectation:** under 50 LUTs. Dhrystone barely moves; CoreMark and
+the ML-KEM rejection-sampling loop are where conditional-select code lives.
+**Do not expect much.** The step's value is that a cheap, ratified,
+constant-time-friendly primitive is present and measured, not that it is fast.
+
+**Stop rule:** none needed — if it does not help, it still costs almost nothing
+and it is on `Zkt`-adjacent ground (§3.5 notes `Zicond` is *not* on the ratified
+`Zkt` list, which is itself worth recording).
+
+**Done when:** both RISCOF tests pass, cosim passes, the predictor's payoff is
+re-reported on the post-Zicond stream **from three builds, so B's contribution
+and Zicond's are separated**, with count and rate shown separately, and
+`model/bpred.py` still matches RTL redirects to the unit in every build.
+
+---
+
+### A23 — Re-measurement, and the first of the two moving baselines
+
+**Structurally A16, repeated.** A16 exists in `MODS_A` because adding an
+extension without re-measuring the machine leaves every downstream number
+attributed to the wrong cause.
+
+**Build:** nothing. **Measure:**
+
+1. Fmax by A12's binary search on post-route WNS — **six or more full
+   implementation runs**, never `1/(T − WNS)`. Report the fastest constraint that
+   failed, and the spread, per A19's non-monotonicity finding.
+2. Dhrystone and CoreMark on hardware, three JTAG programming passes, all report
+   blocks identical to the cycle.
+3. **The dual software NTT baseline**, `-march=rv32im` and
+   `-march=rv32im_zba_zbb_zbs_zbkb`, linked into one image, one core, one clock,
+   with all 256 output coefficients identical between builds. This is the number
+   §10 M2 depends on and §3.6 P1 pre-commits its direction.
+4. **§10 M3's Keccak/NTT breakdown, reported with and without B** (§2). This is
+   the measurement the whole B step was taken for and the only one that can show
+   whether it was worth taking.
+5. **A13's exact RV32I image re-run**, as A16 did, to confirm this round cost
+   RV32I code nothing.
+
+**Done when:** all five are recorded in `docs/a23-benchmarks.md` and
+`.json`, the earlier records are unmodified, and every headline figure is from
+the board rather than from simulation.
+
+---
+
+### H1 — the harness, before the harness becomes the cost
+
+**NOT AN A-NUMBER, DELIBERATELY.** The A-series is referenced by the pushed
+`m7.3-bitmanip-hw` tag and by `docs/a23-benchmarks.md`, both of which name A24
+as the Tier-1 timing probe and A26 as the cycle-neutral Fmax levers.
+Renumbering to slot this in would silently invalidate a tag annotation someone
+will land on cold, which is a worse cost than an odd letter. `H` is for
+harness; there may be more of them.
+
+**Not in the original A2 scope, and it is here because the regression grew from
+four minutes to twenty-six while M7.3 was being built.** Instrument before
+optimising applies to the workflow as much as to the core.
+
+**Where the time actually was, measured rather than assumed:** three tests were
+**84%** of a 49-test regression — `mutation_pipeline` (1284 s), `riscv_formal`
+(295 s) and `formal_muldiv` (181 s) — and the other 46 together were 180 s.
+
+**What was reclaimed.** `mutation_pipeline` rebuilt the simulator once per
+mutation and ran them one at a time, which was never a design decision: it was
+written before it was slow. It is now parallel, **1151 s → 547 s**, and the
+serial and parallel reports are **byte-identical** because results print in
+manifest order rather than completion order.
+
+Making that safe meant finding the shared mutable state, and there was more of
+it than expected: a single `image.hex` baked into every simulator at build
+time, one riscv-formal `cores/rvntt` directory that every worker generated its
+checks into, a lazily-populated ELF cache, and a generated ISA bundle written
+non-atomically. **The riscv-formal one is the instructive failure** — it did not
+corrupt anything, it made every `rvfi:` mutation die at once on the first
+parallel run, which is the good outcome. A quieter version of the same bug would
+have produced a check that described some other worker's design.
+
+**And the baseline turned out to be the real floor.** With mutations parallel,
+566 s of the run was the baseline validating 44 distinct catchers serially —
+including `formal:rvntt_muldiv` at depth 37. Seventeen of those touch neither
+the simulator nor its image, so they are now parallel too; the rest share one
+image and stay together in a single serial task.
+
+**What was NOT done, and why.** Running only the steps whose RTL changed was
+considered and rejected: `--step` is right for an edit loop and wrong as a
+default, because an escape in an untouched step would hide indefinitely and a
+partial default is only honest with a scheduled full run, which this project
+does not have. **Parallelising `tb/run_regress.py` itself was also rejected** —
+its 53 tests share build directories, `fpga/build` paths and a JTAG cable, and
+auditing all of that is exactly the shared-state hazard that had just cost this
+step three separate bugs. The concentrated 84% was worth attacking; the
+distributed 16% was not, at that risk.
+
+**Two things were added rather than removed.** `isa_consistency` (0.02 s) checks
+the ISA string in all six places it is written, plus `misa` in both — the
+failure it catches does not fail, it **hangs**, and it has cost two runs here
+already. And `fmax_search.py --probe MHZ` makes A23's one-run "did this lever
+help?" question a flag instead of a remembered trick, and says in its own output
+that a probe is a bound and not an Fmax.
+
+**Realistic expectation:** roughly half the regression back, and nothing given
+up. **Stop rule:** no change that makes a check weaker, later, or conditional on
+someone remembering to run it. **Done when:** the parallel and serial mutation
+reports are byte-identical, the tiers are documented with measured numbers
+rather than estimates, and the full run is still the default.
+
+---
+
+### Phase 2 — performance (M7.4)
+
+### A24 — The Tier-1 timing probe: what Fmax is Track B allowed to inherit?
+
+**This is the cheapest step in the round and the one with the largest
+consequence, and it is deliberately first in the phase.** §3.3 concluded that
+Tier-1 `Xkntt` cannot be in a separate clock domain, so the core's Fmax is a hard
+floor for the Tier-1 butterfly. **Committing the core to a number the butterfly
+cannot meet is the §9 failure mode fired at M15, two tracks away from its
+cause.** So the evidence is taken before the commitment, not after.
+
+**Build:** a *representative* Tier-1 datapath — not the real one, which is §B1's
+and §B2's job. It needs to be pessimistic in the right way: a 16×16 modular
+multiply with Montgomery reduction against `q = 3329`, feeding a
+conditional add/subtract, pipelined to the depth `docs/isa-spec.md`'s 4-cycle
+`kmm` and 5-cycle `kbfct` allow. That is enough to find the frequency at which
+the reduction's carry chain stops closing, which is the thing being asked.
+
+**Measure:** out-of-context synthesis and implementation with
+`fpga/scripts/synth_ooc.sh`, on the same part and speed grade, at successively
+tighter constraints. **Report its Fmax, its DSP count and its LUT count.**
+
+**Read `CLAUDE.md`'s warning about this script before trusting its output.**
+A14's first version reported `DSP=0` over a netlist containing four DSP48E1s
+because it filtered on guessed `PRIMITIVE_TYPE` group names. **A checking script
+that guesses is worse than none**, and this step's entire value is its number.
+Confirm the DSP count against the synthesis log independently before using it.
+
+**Realistic expectation:** a DSP48E1 with its internal pipeline registers runs
+far above 110 MHz; the risk is not the multiply, it is the Montgomery reduction's
+conditional subtract and the fabric around it. Expect **comfortably above
+110 MHz** for a pipelined single butterfly, and treat any result below 120 MHz as
+a finding that changes A26's and A27's target.
+
+**Stop rule — and this is the round's Fmax ceiling, stated in advance:**
+**do not adopt a core Fmax that this probe says the Tier-1 butterfly cannot
+meet with at least 10% margin.** If the probe returns 105 MHz, the core's target
+becomes ~95 MHz and the 110 MHz goal is reported as *bounded by Track B*, not as
+missed. Chasing core clock past the point where the coprocessor can follow makes
+the integrated design slower, not faster, because §9 will have to re-time the
+whole thing downward.
+
+**Done when:** the probe's Fmax, DSP and LUT numbers are recorded with the DSP
+count independently confirmed, and A26/A27's target frequency is stated as a
+number derived from it.
+
+---
+
+### A25 — A two-cycle multiply
+
+**The first step in this round that changes cycle counts**, and it is kept in its
+own step with its own before/after for exactly that reason.
+
+**Build:** A14's `rvntt_muldiv.sv` computes a 33×33 product on 4 DSP48E1 with
+**4 cycles** of EX occupancy. The DSP48E1 has internal `AREG`/`BREG`/`MREG`/
+`PREG` pipeline registers; using them properly is the difference between a
+multiplier that closes at 400 MHz and one that closes at 90. Target **2 cycles**.
+The divider is untouched — it stays at 34 cycles and stays data-independent by
+construction, which §3.5 establishes is a property beyond `Zkt` rather than one
+`Zkt` requires.
+
+**This helps the Fmax goal rather than fighting it**, which is unusual for a
+latency reduction and is why it is in this phase: moving multiplication into DSP
+internal registers takes fabric logic *off* the design, and A14's own note says
+neither the multiplier nor the divider is on the critical path today. Confirm
+that is still true afterwards rather than assuming it survived.
+
+**Verify:** all 8 `rv32um` tests; RISCOF's `M` suite; `formal_muldiv`'s
+standalone proof re-run at whatever depth 2 cycles now needs — **lower than 37,
+so this gets easier**; riscv-formal at depth 14 with the arithmetic still
+abstracted per M6's recorded boundary; cosim with `M` at high hazard density.
+**`tb/cosim/cycle_model.py`'s multi-cycle term changes from 3 to 1** and the
+model must still predict the RTL's span exactly — that is the check that the
+latency really is 2 and not 3-with-a-lucky-forwarding-case.
+**Fault-inject:** make the result available one cycle early and confirm cosim's
+span check fails; a latency change that no timing check notices means the model
+was not actually watching.
+
+**Realistic expectation:** A18 measured multi-cycle EX stalls at ~20% of the
+RV32IM software-NTT region, so halving `MUL`'s latency should remove roughly
+**10% of that region's cycles**. Dhrystone's IPC should *rise* — A16 measured
+Dhrystone giving back almost all of `M`'s instruction-count win in 4-cycle `MUL`
+stalls, and this is the direct reversal of that. CoreMark less so. **§3.6 P1
+applies: this makes the §10 M2 denominator smaller.**
+
+**Stop rule:** if 2 cycles cannot be reached without a data-dependent path,
+**stay at 3** — a variable-latency multiply would break `Zkt` (§3.5, where `mul`
+*is* on the ratified list) and A30 would then have to report a failure caused by
+this step. Latency is worth less than the guarantee.
+
+**Done when:** `rv32um`, RISCOF `M`, `formal_muldiv`, riscv-formal and cosim all
+pass; the cycle model's changed term still predicts spans exactly; the
+fault-injection is shown to be caught; and the multi-cycle EX stall term is
+re-measured with A20's counters on hardware.
+
+---
+
+### A26 — Fmax, part 1: the levers that change no cycles
+
+**Held to A17's standard: not one cycle count may change.** Dhrystone and
+CoreMark on this SoC are deterministic to the cycle, so before and after must be
+**identical except for the clock** — same `dhry_cycles`, same `cm_cycles`, same
+`minstret`, same CRCs. A lever that moves a cycle count is a microarchitecture
+change wearing a timing change's clothes and belongs in its own step.
+
+**Build, in this order, and measure each one separately** — bundling makes the
+result unattributable, which is the mistake A17 was careful not to make:
+
+1. **JALR onto A17's address adder.** §3.4: `ex_jump_target` taps `ex_alu_y` for
+   JALR alone, and `ex_mem_addr = ex_rs1_fwd + id_ex_q.imm` is already the same
+   sum. Removes the **ALU result mux and the JALR target form** — segments 3 and
+   4, about **2.7 ns of 12.954** — for zero new logic. Expect the largest single
+   contribution in the round. Check it the way A17 checked its own adder:
+   assert `ex_mem_addr == ex_alu_y` under `ctrl.jalr`, so the claim is proved
+   rather than reasoned.
+2. **Precompute the forwarding-mux selects in ID.** Segment 1 is 3.35 ns and
+   starts at a `rd_addr` comparator. The comparison for an instruction in EX is
+   against producers in MEM and WB; computed a stage earlier it is against
+   producers in EX and MEM, which is the same decision reached one cycle sooner.
+   **This is the delicate one**: the ID-stage computation must be correct across
+   a load-use interlock, a multi-cycle EX stall and a flush, and getting any of
+   the three wrong produces a forwarding bug — the exact class riscv-formal found
+   at A11. Expect **1.0–1.5 ns**. Run the full formal set, not a subset.
+3. **Shorten the mispredict comparison.** Segment 5 is a 30-bit equality on
+   `pred_target` against `ex_jump_target`, 2.03 ns of CARRY4. It only has to be
+   *correct*, not *fast*, if the redirect it drives can tolerate being registered
+   — but it cannot, because A19 already established that a late redirect puts the
+   ALU back in the fetch cone. So the lever is narrowing the comparison, not
+   delaying it: compare a **hash** of the target rather than the target, accept
+   the vanishingly rare false match as a *correct-but-slower* prediction — it
+   redirects to the right place regardless, because the redirect target is
+   `ex_jump_target`, not the prediction. **This costs no correctness and may cost
+   a few cycles**; if it costs any, it moves to A27's phase or is dropped. Verify
+   with `model/bpred.py`, which must still match RTL redirects to the unit.
+4. **Re-check `MAX_FANOUT`.** A17 tried this on `ex_trap` and it did nothing.
+   Segment 6 crosses a fanout-131 net (`if_id_q[valid]`) and segment 1 a
+   fanout-66. **A17's result says aim it by measurement and expect little**; it
+   is listed because it is nearly free, not because it is promising.
+
+**Verify:** the full regression, riscv-formal at depth 14, RISCOF, cosim, and
+the benchmark cycle counts bit-identical to A23's. Lever 2 touches the forwarding
+network, which is the best-covered logic in the core after the trap path; run
+`formal_forward`, `formal_hazard` and the full riscv-formal set, and
+**fault-inject the ID-stage select**: make it miss the load-use case, and make it
+forward from a flushed instruction. Both must be caught by something other than
+timing.
+
+**Realistic expectation:** levers 1 and 2 together remove ~3.9 ns of 12.954,
+which would be **~110 MHz** if nothing else became critical. **Something else
+will become critical** — that is exactly what happened at A17, where fixing the
+store path promoted decode-and-operand-select to the longest thing in the design.
+So expect **95–110 MHz**, with 110 reachable only if the newly-exposed path is
+also short. Report the new critical path by name either way; that is the input to
+whether A27 has anything to work on.
+
+**Stop rule:** any lever that moves a cycle count is rejected and re-filed.
+A26 does not proceed past the frequency A24's probe permits.
+
+---
+
+### A27 — Fmax, part 2: floorplanning, which has never been tried
+
+**67.6% of the critical path is route delay at 3.5% utilisation.** That is not
+congestion — there is nothing to congest. It is the placer spreading a
+19-level chain across a die it has no reason to keep it on one corner of.
+**No pblock has ever been tried on this design.**
+
+**Build:** no RTL change at all, which makes this the only step in the round that
+is cycle-neutral by construction rather than by measurement.
+
+1. **A pblock around `u_core`**, sized with modest slack over its ~3500 LUTs and
+   placed adjacent to the BRAM column the 32 tiles occupy. The single most likely
+   win, because the core-to-BRAM crossing and the intra-core chain are pulled
+   together instead of competing.
+2. **A tighter nested pblock** around the EX-stage cluster the critical path
+   lives in — forwarding network, adders, mispredict compare — if step 1 helps.
+3. **The BRAM tiles' own placement.** A17's memory experiment showed 16 tiles
+   beats 32 by ≥3.5 MHz, and §3.7 declines to cut memory. **Constraining where
+   the 32 tiles go is the same lever without the cost**, and it has not been
+   tried.
+
+**Verify:** cycle counts bit-identical — trivially true, since no RTL changed,
+and therefore **the check is that the bitstream still works on hardware**, not
+that the counts match. A pblock that is too tight fails to place; one that is
+subtly wrong routes and runs. Run the three-pass hardware benchmark.
+
+**Realistic expectation:** genuinely uncertain, which is why it is its own step
+and last. Route-dominated paths at low utilisation are the case floorplanning is
+*for*, so **1–8 MHz is plausible and a larger number would not be shocking**;
+equally, Vivado's placer may already be doing the sensible thing and the answer
+may be zero. **Both outcomes are results.** A17's lever 2 and lever 3 are the
+precedent in each direction: one aimed by the report and worth nothing, one free
+and worth exactly the measurement spread.
+
+**Stop rule — and this is where the round's Fmax work ends regardless of the
+number reached.** If A26 and A27 together land below 110 MHz having worked
+through the levers above, **that is the result, and it is reported as one.**
+Further Fmax work past this point means pipeline surgery — splitting EX,
+re-timing the register file, a deeper fetch — every one of which changes cycle
+counts, changes the hazard structure, invalidates A18's identity and A19's
+predictor model, and makes §8 I1's Tier-1 integration harder against a moving
+target. **That is explicitly out of scope**, and the reason is the one that
+governs the whole phase: the coprocessor is what this project is for, and a core
+that is 15% faster and harder to integrate is a net loss.
+
+**Done when:** each pblock configuration's Fmax is reported separately, the
+adopted configuration's bitstream is validated on hardware over three passes, and
+the final critical path is named.
+
+---
+
+### A28 — Re-measurement, and the second moving baseline
+
+**The same five measurements as A23**, on the machine A25, A26 and A27 produced.
+Both baselines are kept: A23's is the ISA round's, A28's is the performance
+round's, and §3.6's rule is that neither replaces the other because they are
+measurements of two different machines.
+
+**Additionally, and this is new to this step:** report **A20's hardware counters
+alongside A18's simulation instrument** for the last time as a pair. If they
+agree to the count across every region on both benchmarks — as A20's done-when
+requires — then from this point the hardware counters are the primary source and
+the simulation instrument becomes the cross-check rather than the record. Say so
+explicitly when it happens; it is a change in what the project's numbers *are*.
+
+**Done when:** `docs/a28-benchmarks.md` and `.json` record Fmax with its spread,
+both benchmarks over three passes, the dual NTT baseline, the Keccak/NTT
+breakdown, and the counter agreement — all from the board.
+
+---
+
+### Phase 3 — the cryptographic guarantees (M7.5)
+
+### A29 — `Zkr`: the `seed` CSR and an entropy source
+
+**The highest-risk item in the round and the easiest to over-claim.** The CSR is
+easy. The source is not, and the honest deliverable is a working source with its
+mandatory health tests and an explicit statement of what has *not* been done.
+
+**Build, in three separable pieces**, because §3.7 established that only one of
+them can be verified by this project's normal methods:
+
+1. **`rvntt_entropy.sv` — the noise source.** A ring oscillator: an odd-length
+   inverter chain, sampled by the system clock, with the jitter between the two
+   as the entropy. On Artix-7 this needs `(* DONT_TOUCH = "TRUE" *)` and
+   `(* KEEP_HIERARCHY = "YES" *)` or synthesis will constant-fold the loop away,
+   and an explicit timing exclusion (`set_disable_timing` on the closing arc, and
+   the loop declared to `report_timing` as a false path) or implementation will
+   error on the combinational loop. **Several independent oscillators of
+   different lengths, XORed**, rather than one — a single ring locks to its
+   sampling clock and produces a periodic sequence that looks like entropy to a
+   casual test and is not.
+2. **`rvntt_entropy_health.sv` — the two mandatory SP 800-90B health tests.**
+   The **repetition count test** (a run of identical samples longer than the
+   cutoff is a hard failure) and the **adaptive proportion test** (in a window of
+   1024 samples, a count of any one value above the cutoff is a failure). These
+   are ordinary synchronous logic, they are where the security value is, and
+   **they are fully verifiable.**
+3. **The `seed` CSR (`0x015`) and its state machine.** `seed` is **not a normal
+   CSR**: it is read-write-only — a `csrrw`-class access with `rd = x0` is the
+   read — and it returns a two-bit status in `[31:30]`: `BIST`, `WAIT`, `ES16`
+   (16 bits of entropy in `[15:0]`) or `DEAD`. **`DEAD` is latching**: once a
+   health test fails, the source stays dead until reset. Software polls for
+   `ES16`.
+
+**The KAT path must not touch any of this, and both paths must coexist.** ML-KEM
+KATs need deterministic seeds — that is what makes them KATs. **The entropy
+source must not be wired into the KAT path at all**, and the existing KATs must
+still pass unchanged. This is the failure mode that is silent in both directions:
+a KAT that passes because the source was bypassed proves nothing about the
+source, and a keygen that is deterministic in the field is a catastrophic bug
+that no KAT can ever catch. Keep them structurally separate — a build-time
+selection between "seeds from `seed`" and "seeds from the KAT vector", with the
+KAT build unable to reach the CSR — rather than a runtime flag.
+
+**Verify — and this is the step where fault injection matters more than usual:**
+
+- **The health tests must be shown to FIRE.** Drive the stub source stuck-at-0,
+  stuck-at-1, and with a biased pattern (e.g. 7:1), and confirm the repetition
+  and adaptive tests each trigger and that `seed` latches `DEAD`. **A health test
+  that has never been observed to fire is not a health test.** Prove it formally
+  too: `tb/formal/rvntt_entropy_health/` — a stuck input implies `DEAD` within
+  the cutoff.
+- The `seed` state machine: `BIST` → `WAIT`/`ES16`, `DEAD` is latching and
+  survives further reads, a read returns fresh bits each time (two consecutive
+  `ES16` reads must not return the same value from the same buffer), and
+  a **non-machine-mode access traps** — vacuously true here since only machine
+  mode exists, and worth an assertion anyway so it stays true if that changes.
+- The existing ML-KEM KATs still pass, and the KAT build is shown to contain no
+  reference to the CSR.
+
+**What must be written down, in this document and in the write-up:**
+
+> **No SP 800-90B statistical validation campaign has been run on this entropy
+> source, and it is therefore UNCERTIFIED.** What exists is a noise source of a
+> standard construction and the two health tests SP 800-90B makes mandatory,
+> shown by fault injection to detect a stuck and a biased source. What does not
+> exist is the entropy-rate estimation, the restart tests, or the IID/non-IID
+> track that certification requires — none of which is a simulation exercise and
+> all of which need a large sample captured from the physical device.
+> **`ES16` is returned because the CSR's interface requires a status code, and
+> its specified meaning is entropy meeting SP 800-90B. This implementation does
+> not establish that.** Anyone using this for real key material should treat the
+> source as unvalidated.
+
+**Realistic expectation:** ~200 LUTs and ~150 FFs, none of it on the critical
+path — the source runs asynchronously and the CSR read is a normal CSR path.
+**The ring oscillator will fight the tools**, and the first two attempts will
+probably be optimised away or fail implementation; that is the expected cost of
+the step, not a sign it is going wrong.
+
+**Stop rule:** if the oscillator cannot be made to survive synthesis *and* be
+shown to produce non-periodic output, **ship the health tests, the CSR and the
+state machine against a clearly-labelled deterministic stub, and record that the
+noise source is absent.** A recorded gap is worth more than an unverifiable
+claim — M5 and M6 both do exactly this. What must not happen is a source that is
+present, unverified and quietly assumed to work.
+
+**Done when:** the health tests are shown by fault injection to fire on stuck and
+biased sources and to latch `DEAD`; the `seed` state machine passes its directed
+tests; the ML-KEM KATs pass unchanged with the entropy path structurally absent
+from that build; and the uncertified statement above is in the write-up.
+
+---
+
+### A30 — `Zkt`: the data-independent-latency proof
+
+**Last, deliberately.** It is a proof *about* everything else in the round and
+must be re-proved after every functional addition — so it is proved once, at the
+end, against the machine that ships.
+
+**Build:** nothing, if the rest of the round was built correctly. That is the
+point of doing it last rather than the reason to skip it.
+
+**The claim, scoped from the ratified specification** (§3.5 — read, not
+recalled). This core implements, from `Zkt`'s list: the RV32I base arithmetic,
+logical and shift instructions; `mul`, `mulh`, `mulhsu`, `mulhu`; and from the
+bit-manipulation groups, `ror`, `rol`, `rori`, `andn`, `orn`, `xnor`, `pack`,
+`packh`, `brev8`, `rev8`, `zip`, `unzip`. It does **not** implement `clmul`,
+`clmulh`, `xperm4`, `xperm8`, the RVK crypto instructions, or `C` — so those
+parts of the list are vacuous here and **must be reported as not-implemented
+rather than as passing.**
+
+**Prove:** that each implemented listed instruction's EX occupancy depends only
+on its opcode. For everything except `rvntt_muldiv` this is immediate — the
+instruction is combinational and occupies EX for exactly one cycle — and the
+property is that `ex_stall` is deasserted for it regardless of operand values.
+On `rvntt_muldiv` it is close to a single formal property:
+
+    two executions of the same opcode with ARBITRARY DIFFERENT operands
+    produce the same busy-cycle count
+
+`MODS_A`'s own lesson from A15's divider applies directly and should save the
+same fifteen minutes: **when a property asks a solver to relate two circuits that
+compute the same arithmetic, state the invariant they both maintain rather than
+the conclusion they both reach.** Here the invariant is that the sequencer's
+state is a function of the opcode and the cycle index alone — never of the
+operands — which is a property of one circuit and needs no second copy.
+
+**The vacuity check is the done-when, not an extra.** §3.5: **the proof must be
+observed to FAIL under an injected fault.** Give the multiplier a data-dependent
+early-out — return in 1 cycle when either operand is zero, which is the
+optimisation a real design would actually be tempted by — and confirm the
+property catches it. Then remove it. **A `Zkt` proof that has never failed is a
+security claim resting on nothing**, and this project has twice shipped a
+checker that reported success over a broken design.
+
+**The two boundaries go in the write-up, verbatim from §3.5**, and the claim is
+not made without them: `Zkt` covers listed instructions' latency and **not**
+control flow; and this core's branch predictor introduces data-dependent timing
+through mispredicts and through BTB and counter state that **persists across
+whatever runs on the core**, with no flush and no partition. **A `Zkt` claim that
+omits them is a security falsehood, which is worse than no claim.**
+
+**Also record what `Zkt` does not ask for and this core provides anyway:** the
+divider is data-independent by construction. §3.5 establishes `Zkt` excludes
+`div`/`rem` explicitly, so this is a property beyond the extension — worth
+stating, worth *not* filing under `Zkt` compliance.
+
+**Realistic expectation:** the proof converges quickly, because the invariant
+form is shallow and `rvntt_muldiv`'s sequencer is small. The work is in the
+enumeration and the write-up, not the solver.
+
+**Stop rule:** if any listed instruction turns out to have data-dependent
+occupancy and cannot be fixed cheaply, **do not implement `Zkt`** — report the
+instruction and the reason. A partial `Zkt` is not a thing; the extension is a
+guarantee and a guarantee with an exception is not one.
+
+**Done when:** the property is proved for every implemented listed instruction;
+the injected early-out is shown to break it; the not-implemented portions of the
+list are reported as such; both boundaries are written; and `misa` and the
+`--isa` strings are updated together with the RISCOF YAML.
+
+---
+
+## 5. Risk register additions
+
+In the format of §11, additive to it and to `MODS_A` §5.
+
+| Risk | Impact | Mitigation |
+|---|---|---|
+| B is folded into `rvntt_alu` and lands on the critical path | High — it silently costs ~1 ns on a path with 0.003 ns of slack, and A26/A27 then measure a machine that did not have to be this slow | §3.4: a separate `rvntt_bitmanip.sv` joined at `ex_result`, never at `ex_alu_y`. A21's stop rule makes landing on the critical path a reason to halt the step. |
+| The RISCOF `B` suite's three `Zbc` tests are counted as B coverage | High — it is a compliance claim that is not true, and it is the fourth instance of this exact shape in this project | Exclude `clmul*` by name, record the boundary as M5 records `pmp`, and report "29/29 ratified-B, 3 `Zbc` excluded" — never "32/32". |
+| A `Zkt` claim omits the branch predictor | **Critical — a security falsehood, worse than no claim** | §3.5's two boundaries are written into the document *before* the proof is run, and A30's done-when requires both in the write-up. |
+| The `Zkt` proof passes vacuously | Critical — the same, with a green check in front of it | A30's done-when requires the proof to be **observed to fail** under an injected data-dependent early-out. Precedent: A11's 43/43 over a broken adder. |
+| The entropy source's health tests are believed without being fired | High — an uncertified source presented as validated | A29 drives the source stuck-at-0, stuck-at-1 and biased, and requires each test to trigger and `DEAD` to latch, in simulation and formally. |
+| `ES16` is returned and read as an SP 800-90B claim | High — the status code's specified meaning is exactly that claim | A29's done-when includes the verbatim uncertified statement, in this document and in the write-up. |
+| The entropy source is wired into the ML-KEM KAT path | High — silent in both directions: a vacuous KAT, or a deterministic keygen in the field | Build-time separation, not a runtime flag; the KAT build must be shown to contain no reference to the CSR. |
+| The core is pushed to a frequency Tier-1 `Xkntt` cannot meet | **High — fires at M15, two tracks from its cause** | §3.3 establishes Tier 1 cannot be in its own clock domain. A24 measures the butterfly's OOC Fmax **before** A26/A27 commit, and its stop rule caps the core's target at the probe minus 10%. |
+| An Fmax lever changes cycle counts and is reported as a timing result | Medium — it corrupts both the Fmax attribution and the IPC record | A17's standard, restated as A26's done-when: bit-identical `dhry_cycles`, `cm_cycles`, `minstret` and CRCs. A25 is the one cycle-changing step and is isolated with its own before/after. |
+| Precomputing forwarding selects in ID introduces a forwarding bug | High — it is the exact class riscv-formal caught at A11 | It is lever 2 of 4 and measured alone. Full formal set, not a subset, plus directed fault injection on the load-use and flush cases. |
+| The 2-cycle multiply is achieved with a data-dependent path | High — it silently breaks `Zkt`, and A30 would report the failure two steps later | A25's stop rule: stay at 3 cycles rather than take a data-dependent one. `mul` is on `Zkt`'s ratified list. |
+| Zicond's effect on the predictor is attributed to the predictor | Medium — M7.2's payoff number becomes wrong with nothing saying so | A22's done-when re-runs A18's instrument and A20's counters, and reports mispredict **count and rate** separately, because they move in opposite directions. |
+| The software NTT baseline moves and the speedup is quoted against the old one | Medium — it inflates §10 M2 and M3 in the flattering direction | §3.6's P1–P4 are pre-committed before measurement, and the baseline is re-measured at both A23 and A28 with earlier records kept. |
+| The `SchedMachineModel` is eventually written against A14's 4-cycle multiply | Medium — a stale scheduling model stalls on real hardware, far from the cause | §3.2 writes the consequence into this document, which Track B/C scoping is told to read. There is no commit that can enforce it because the file does not exist. |
+| `C` is adopted mid-round for code density | Medium — it deletes A9's misaligned-target trap and breaks A19's BTB indexing simultaneously | §3.1 fences it off with reasoning. If ever adopted it is its own late milestone with a full re-measurement, never folded into a batch. |
+| A pblock routes and runs but is subtly wrong | Low but invisible | A27's verification is hardware, not simulation — a floorplan cannot change behaviour in simulation, so only the board can check it. Three passes. |
+
+---
+
+## 6. Milestone additions
+
+Added to §12's sequence. `RISC-V_NTT.txt` is not edited and `RISC-V_NTT_MODS_A.txt`
+is not edited; these live here.
+
+- [ ] **M7.3** — **The ISA round: B, Zicond and hardware counters.**
+  *Satisfied by A20, A21, A22 and A23.* The six `Zihpm` counters agree with
+  A18's simulation instrument **to the count** on both benchmarks, and the
+  `cycles = retired + load-use + multi-cycle EX + 2 × redirects` identity closes
+  on hardware to **a small constant residual whose magnitude is accounted for by
+  the counter-read sequence**.
+
+  > **REVISED AFTER MEASURING: "exactly zero on hardware" was unachievable as
+  > written, and the reason is structural rather than a shortfall.** A18's
+  > instrument samples every counter at one instant, so its residual is exactly
+  > zero and that is a real result. **Software cannot do that.** On hardware each
+  > of `mcycle`, `minstret` and the six HPM counters is read by its own
+  > instruction, so the four windows are *nested*, not identical, and the
+  > residual is whatever the nesting makes it — the reads themselves execute
+  > inside some windows and outside others.
+  >
+  > A23 measured −38 on Dhrystone and −168 on CoreMark, and the difference
+  > between them was the finding: the two regions' glue nested the reads in
+  > **different orders**, and CoreMark's put both `bench_hpm_read()` calls
+  > inside the retired-instruction window. Aligning the order (HPM outermost,
+  > then `minstret`, then `mcycle`) makes the residual a property of the read
+  > sequence rather than of which benchmark is being looked at.
+  >
+  > So the requirement becomes: **the residual is small, of a sign and magnitude
+  > the read ordering predicts, and constant rather than proportional** — the
+  > same distinction A20 established for the software-read overhead, and for the
+  > same reason. Residual exactly zero remains the standard for A18's
+  > simulation instrument, where it is achievable and still holds. RISCOF passes the ratified-B suite
+  at 29/29 **with the three `Zbc` tests excluded by name and the boundary
+  recorded**, plus the Zbkb subset of `K` and both `Zicond` tests. riscv-formal
+  passes the union of `rv32im`, `rv32ib` and `rv32iZbkb` at **depth 14
+  unchanged**. 1000 random programs containing B, Zbkb and Zicond at high hazard
+  density are byte-identical against Spike, and A3's 10⁶-word decoder
+  equivalence covers the new encodings with strict reserved fields intact.
+  `misa` reads `0x40001100` with the `B`-bit boundary recorded, and `rvntt_isa.yaml` agrees with the hardware.
+  Fmax, DMIPS/MHz, CoreMark/MHz and IPC are re-measured on hardware over three
+  passes, **the dual software NTT baseline is re-recorded**, and **§10 M3's
+  Keccak/NTT breakdown is reported both with and without B.** The predictor's
+  payoff is re-reported on the post-Zicond branch stream.
+
+- [ ] **M7.4** — **Core performance: a faster multiply and the Fmax the
+  coprocessor can inherit.** *Satisfied by A24, A25, A26, A27 and A28.* The
+  Tier-1 timing probe's OOC Fmax is recorded with its DSP count independently
+  confirmed, and **the core's Fmax target is stated as a number derived from
+  it.** `MUL` is 2 cycles with `rv32um`, RISCOF `M`, `formal_muldiv`,
+  riscv-formal and cosim all passing, and `cycle_model.py`'s changed latency term
+  still predicting spans exactly. A26's levers are each measured separately with
+  **benchmark cycle counts bit-identical throughout** — the proof they were
+  timing changes and nothing else — and A27's floorplan configurations likewise,
+  validated on hardware because simulation cannot see a floorplan. Fmax is
+  re-measured by A12's binary search on post-route WNS with the spread reported
+  per A19's non-monotonicity finding, the final critical path is named, and
+  **§9's core-only baseline is updated to this number.** The software NTT
+  baseline is re-recorded a second time and A23's is kept.
+
+- [ ] **M7.5** — **The cryptographic guarantees: `Zkr` and `Zkt`.**
+  *Satisfied by A29 and A30.* The entropy source's repetition-count and
+  adaptive-proportion health tests are **shown by fault injection to fire** on
+  stuck-at-0, stuck-at-1 and biased sources and to latch `DEAD`; the `seed` state
+  machine passes its directed tests; the ML-KEM KATs pass unchanged with the
+  entropy path **structurally absent** from that build; and the statement that no
+  SP 800-90B validation campaign has been run and the source is **uncertified**
+  is in the write-up. `Zkt` is proved for every implemented listed instruction,
+  the proof is **observed to fail** under an injected data-dependent early-out,
+  the not-implemented portions of the list are reported as not-implemented rather
+  than as passing, and **both boundaries — that `Zkt` does not cover control
+  flow, and that this core's branch predictor introduces data-dependent timing
+  through persistent BTB and counter state — are written down.**
+
+**Why three milestones and not one.** The same reason M7.1 and M7.2 were split:
+**a milestone that other work depends on must stay claimable if everything after
+it is abandoned.**
+
+- **M7.3 is the one the rest of the project depends on.** B changes the software
+  NTT baseline that §10 M2 and M3 are computed against, changes §10 M3's Keccak
+  term, and grows §C4's `SchedMachineModel` obligation. If this round stops after
+  M7.3, Track B and Track C proceed against a correct and final baseline.
+- **M7.4 is performance, and nothing outside it depends on the number.** It is
+  also the milestone with the most external uncertainty — A27's floorplanning may
+  return zero, and A24's probe may cap the target below 110 MHz. Neither outcome
+  blocks anything.
+- **M7.5 is two security claims that stand alone.** They depend on the machine
+  being finished, which is why they are last, but nothing depends on *them*.
+  If the entropy source cannot be made to work, A29's stop rule ships the
+  verifiable two-thirds and records the gap, and `Zkt` is unaffected either way.
+
+**No step in this round gets its own milestone**, following `MODS_A`'s reasoning
+about A17: eleven steps and three milestones is the right ratio, and giving A24
+or A26 a milestone would invite claiming an enabler before the thing it enables.
+
+**What would make this round's plan wrong, and what to do about it.** Three
+measurements could invalidate the sequencing above, and each has a named
+response rather than an assumption that it will not happen:
+
+1. **A24's probe returns below 110 MHz.** Then the Fmax target is Track B's to
+   set, A26 and A27 aim at the lower number, and 110 MHz is reported as *bounded
+   by the coprocessor* rather than missed. This is the most likely of the three.
+2. **A21 lands B on the critical path anyway.** Then §3.4's central design
+   decision failed and the step halts before A22 rather than carrying a
+   regression into the Fmax phase.
+3. **A26's lever 2 cannot be made correct across the interlock and flush cases.**
+   Then it is dropped, A26 reports levers 1, 3 and 4, and the Fmax target falls
+   by roughly 1.0–1.5 ns worth — about 10 MHz at this frequency. Lever 1 alone is
+   still the largest single contribution in the round.
+
+**This plan is a draft, not a contract.** It will be revised as measurements come
+in, and each revision will be stated in the status report at the phase boundary
+where it happens, with the measurement that caused it.
+
+---
+
+## Appendix A — verified encodings for everything this round adds
+
+**This table was generated mechanically by `riscv-none-elf-as` and
+`objdump`, not typed.** `docs/isa-spec.md` does the same for `Xkntt`, and for
+the same reason: an encoding table written by hand is a second place to be
+wrong, and A21's decoder and A3's 10^6-word equivalence sweep both depend on
+this being right. Regenerate rather than edit.
+
+Register operands are `rd=a0 (x10)`, `rs1=a1 (x11)`, `rs2=a2 (x12)`, and the
+shift/bit immediate is 7, so the variable fields are identifiable in the word.
+
+| instruction | ext | word | opcode | funct3 | funct7 / imm[11:5] |
+|---|---|---|---|---|---|
+| `sh1add a0,a1,a2` | Zba | `0x20C5A533` | `0x33` | `010` | `0010000` |
+| `sh2add a0,a1,a2` | Zba | `0x20C5C533` | `0x33` | `100` | `0010000` |
+| `sh3add a0,a1,a2` | Zba | `0x20C5E533` | `0x33` | `110` | `0010000` |
+| `andn a0,a1,a2` | Zbb+Zbkb | `0x40C5F533` | `0x33` | `111` | `0100000` |
+| `orn a0,a1,a2` | Zbb+Zbkb | `0x40C5E533` | `0x33` | `110` | `0100000` |
+| `xnor a0,a1,a2` | Zbb+Zbkb | `0x40C5C533` | `0x33` | `100` | `0100000` |
+| `min a0,a1,a2` | Zbb | `0x0AC5C533` | `0x33` | `100` | `0000101` |
+| `minu a0,a1,a2` | Zbb | `0x0AC5D533` | `0x33` | `101` | `0000101` |
+| `max a0,a1,a2` | Zbb | `0x0AC5E533` | `0x33` | `110` | `0000101` |
+| `maxu a0,a1,a2` | Zbb | `0x0AC5F533` | `0x33` | `111` | `0000101` |
+| `rol a0,a1,a2` | Zbb+Zbkb | `0x60C59533` | `0x33` | `001` | `0110000` |
+| `ror a0,a1,a2` | Zbb+Zbkb | `0x60C5D533` | `0x33` | `101` | `0110000` |
+| `rori a0,a1,0x7` | Zbb+Zbkb | `0x6075D513` | `0x13` | `101` | `0110000` |
+| `clz a0,a1` | Zbb | `0x60059513` | `0x13` | `001` | `0110000` |
+| `ctz a0,a1` | Zbb | `0x60159513` | `0x13` | `001` | `0110000` |
+| `cpop a0,a1` | Zbb | `0x60259513` | `0x13` | `001` | `0110000` |
+| `sext.b a0,a1` | Zbb | `0x60459513` | `0x13` | `001` | `0110000` |
+| `sext.h a0,a1` | Zbb | `0x60559513` | `0x13` | `001` | `0110000` |
+| `zext.h a0,a1` | Zbb | `0x0805C533` | `0x33` | `100` | `0000100` |
+| `orc.b a0,a1` | Zbb | `0x2875D513` | `0x13` | `101` | `0010100` |
+| `rev8 a0,a1` | Zbb+Zbkb | `0x6985D513` | `0x13` | `101` | `0110100` |
+| `bset a0,a1,a2` | Zbs | `0x28C59533` | `0x33` | `001` | `0010100` |
+| `bseti a0,a1,0x7` | Zbs | `0x28759513` | `0x13` | `001` | `0010100` |
+| `bclr a0,a1,a2` | Zbs | `0x48C59533` | `0x33` | `001` | `0100100` |
+| `bclri a0,a1,0x7` | Zbs | `0x48759513` | `0x13` | `001` | `0100100` |
+| `binv a0,a1,a2` | Zbs | `0x68C59533` | `0x33` | `001` | `0110100` |
+| `binvi a0,a1,0x7` | Zbs | `0x68759513` | `0x13` | `001` | `0110100` |
+| `bext a0,a1,a2` | Zbs | `0x48C5D533` | `0x33` | `101` | `0100100` |
+| `bexti a0,a1,0x7` | Zbs | `0x4875D513` | `0x13` | `101` | `0100100` |
+| `pack a0,a1,a2` | Zbkb | `0x08C5C533` | `0x33` | `100` | `0000100` |
+| `packh a0,a1,a2` | Zbkb | `0x08C5F533` | `0x33` | `111` | `0000100` |
+| `brev8 a0,a1` | Zbkb | `0x6875D513` | `0x13` | `101` | `0110100` |
+| `zip a0,a1` | Zbkb | `0x08F59513` | `0x13` | `001` | `0000100` |
+| `unzip a0,a1` | Zbkb | `0x08F5D513` | `0x13` | `101` | `0000100` |
+| `czero.eqz a0,a1,a2` | Zicond | `0x0EC5D533` | `0x33` | `101` | `0000111` |
+| `czero.nez a0,a1,a2` | Zicond | `0x0EC5F533` | `0x33` | `111` | `0000111` |
+
+**Regenerating this table.** Assemble the 36 mnemonics with
+`riscv-none-elf-as -march=rv32im_zba_zbb_zbs_zbkb_zicond -mabi=ilp32` and read
+the words back with `riscv-none-elf-objdump -d`. If a future toolchain disagrees
+with a row here, **the toolchain is the authority and this table is stale** — it
+is a cache of what the assembler says, not an independent claim.
+
+**What this table does not contain, deliberately:** `clmul`, `clmulh`, `clmulr`
+(`Zbc` — not implemented, §3.1), `xperm4`, `xperm8` (`Zbkx` — not implemented),
+and every `Xkntt` encoding, which lives in `docs/isa-spec.md` and is **not
+touched by this round**.

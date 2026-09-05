@@ -1,0 +1,63 @@
+# Third-party TEST SUITES and the Python packages that drive them.
+#
+# These are gitignored checkouts, like spike-src -- reproduced from this file
+# rather than committed.  Kept separate from upstream-pins.txt, which
+# toolchain/patches.sh parses and which is only for the FORKS this project
+# patches (Spike and LLVM).  Nothing here is patched.
+#
+#   name<TAB>commit<TAB>date<TAB>branch/how
+
+riscv-tests	2ebecad997fa58cd9e5724340ba75aa4b59bd1d0	2026-08-14	master, --recurse-submodules (needs env/)
+riscv-arch-test	9bceaf5c02fa1131625bc6228b834e9e884c5801	2026-02-19	old-framework-3.x
+riscv-formal	c992aa61fdfe0846c5ed90324c596202a1c69b76	2026-07-16	main
+coremark	1f483d5b8316753a742cbf5590caf5bd0a4e4777	2025-05-01	main, --depth 1
+
+# How to reproduce:
+#   git clone --depth 1 --recurse-submodules \
+#       https://github.com/riscv-software-src/riscv-tests.git toolchain/riscv-tests
+#   git clone --depth 1 --branch old-framework-3.x \
+#       https://github.com/riscv-non-isa/riscv-arch-test.git toolchain/riscv-arch-test
+#   git clone https://github.com/YosysHQ/riscv-formal.git toolchain/riscv-formal
+#   git clone --depth 1 https://github.com/eembc/coremark.git toolchain/coremark
+#
+# CoreMark is compiled IN PLACE and never edited; the port is sw/bench/
+# coremark_port/, which is exactly the file EEMBC's barebones/ template exists to
+# be replaced by.  It is pinned because the published CRCs in core_main.c are
+# what validates every run, and A13's result is only meaningful against them.
+# Dhrystone comes from riscv-tests above and is treated the same way -- the port
+# lives in sw/bench/include/util.h.
+#
+# riscv-formal needs NO Python packages and no pinned branch: it is a set of
+# SystemVerilog checks plus one generator script, and it runs on the sby and
+# yosys already in toolchain/opt/oss-cad-suite.  It is pinned by commit anyway,
+# because the instruction models in insns/ are the specification the core is
+# proved against -- moving them silently would change what M6 means.
+#
+# WHY old-framework-3.x AND NOT main.  Upstream deprecated RISCOF: the default
+# branch now carries the "ACT4" framework, which replaces it and needs the Sail
+# model plus a UDB configuration.  Plan A10 asks for RISCOF specifically and for
+# its HTML report, and ACT4 produces neither.  The RISCOF-era suite is still
+# maintained on old-framework-3.x, which is what this pins.  Moving to ACT4 is
+# real work -- a Sail build and a UDB config -- and belongs to whoever wants the
+# current certification flow.
+
+# ---------------------------------------------------------------------------
+# RISCOF's Python dependencies need PINNING, and the reason is a real bind:
+#
+#   * riscof 1.25.3 (current) declares gitpython==3.1.17, which predates
+#     Python 3.12 and will not install on this venv's 3.13.  The pin is stale
+#     rather than meaningful -- riscof uses GitPython for a version string --
+#     so it is installed with --no-deps alongside a current GitPython.
+#   * riscof 1.21.1, which uv picks when resolving normally, imports
+#     riscv_config.warl.warl_interpreter.  That was removed in riscv-config
+#     3.0.0, so 1.21.1 needs riscv-config 2.x -- and riscv-config 2.x rejects
+#     the ISA schema this project's yaml is written in.  1.25.3 --no-deps is
+#     the combination that works.
+#
+# Install:
+#   UV=toolchain/opt/uv-x86_64-unknown-linux-gnu/uv
+#   $UV pip install --python .venv/bin/python riscv-config==3.18.3 riscv-isac
+#   $UV pip install --no-deps --python .venv/bin/python riscof==1.25.3
+riscof	1.25.3	-	pip, --no-deps
+riscv-config	3.18.3	-	pip
+riscv-isac	0.18.0	-	pip

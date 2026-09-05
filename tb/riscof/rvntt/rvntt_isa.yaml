@@ -1,0 +1,69 @@
+# riscv-config ISA description of the rvntt core, for RISCOF (plan A10).
+#
+# This is the machine-readable statement of what the core claims to implement,
+# and RISCOF uses it to DECIDE WHICH TESTS TO RUN.  Overstating it is the
+# classic way to get a green compliance report that means nothing: claim
+# Zifencei and fence_i is selected and fails.  Understating it silently drops
+# coverage instead.
+#
+# So this file says exactly RV32IMZicsr_Zba_Zbb_Zbkb_Zbs, machine mode only.
+#
+# THE ORDER IS NOT ARBITRARY: riscv-config 3.18.3 requires Zbs to come AFTER
+# Zbkb ("Within the Zb category extension Zbs must occur after Zbkb"), and it
+# rejects the `B` letter outright.  Both were found by running it, not by
+# reading the schema.
+#
+# A21 ADDED B AND Zbkb, AND THE SUITE SELECTION HAS A TRAP IN IT.  The
+# arch-test B directory is the OLD grouping and contains clmul, clmulh and
+# clmulr, which are Zbc -- ratified B is Zba + Zbb + Zbs and has no carry-less
+# multiply.  Those three are excluded BY NAME, exactly as the pmp tests are and
+# for the same reason (riscof 1.25.3 ignores the `verify` clause they would
+# otherwise use to deselect themselves).  The result is reported as 29/29 of the
+# ratified-B tests with 3 Zbc tests excluded -- never as 32/32, and never as
+# "B passes".  MODS_A2 section 3.1 has the reasoning.  M was added by MODS_A A14, and the note this
+# file used to carry -- "claim M and the multiply tests are selected and fail"
+# -- is now the INTENT rather than the warning: the eight rv32i_m/M tests are
+# selected on purpose, and they pass.
+#
+# THE ISA STRING AND THE misa RESET VALUE MUST MOVE TOGETHER, and so must
+# rvntt_csr.sv's MISA_VALUE.  RISCOF reads this file, the core reports the
+# register, and the arch-test privilege suite compares them; a mismatch shows up
+# as a failing misa test rather than as "the wrong suites were selected", which
+# points nowhere near the cause.
+hart_ids: [0]
+hart0:
+  ISA: RV32IMZicsr_Zicond_Zba_Zbb_Zbkb_Zbs_Zkr_Zkt
+  physical_addr_sz: 32
+  User_Spec_Version: '2.3'
+  supported_xlen: [32]
+  misa:
+    reset-val: 0x40001100      # MXL = 1 (RV32), extension bits I and M.
+                               # NOT bit 1 (B), although B is implemented --
+                               # riscv-config 3.18.3 cannot express the B letter
+                               # and derives misa from single-letter extensions
+                               # only.  rvntt_csr.sv has the full reasoning.
+    rv32:
+      accessible: true
+      mxl:
+        implemented: true
+        type:
+          warl:
+            dependency_fields: []
+            legal:
+              - mxl[1:0] in [0x1]
+            wr_illegal:
+              - Unchanged
+      extensions:
+        implemented: true
+        type:
+          warl:
+            dependency_fields: []
+            legal:
+              - extensions[25:0] bitmask [0x0001100, 0x0000000]
+            wr_illegal:
+              - Unchanged
+  # There is no PMP node.  Plan 1.5 excludes PMP, rvntt_csr.sv has neither
+  # pmpcfg* nor pmpaddr*, and accessing one is an illegal-instruction trap.
+  # riscv-config 3.18 has no `PMP` key at all -- it spells the granularity
+  # `pmp_granularity` and describes the registers individually -- so absence is
+  # how "not implemented" is expressed, not a negative claim.
