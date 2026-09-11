@@ -32,6 +32,11 @@ SUMS  = os.path.join(ROOT, "toolchain", "kyber", "SHA256SUMS")
 # what lets the same runner check an rv32im build without a second constant.
 ISA   = "rv32im_zicsr_zicntr_xkntt0p1"
 
+# The -march the KAT software is built with, passed to make EXPLICITLY rather
+# than inherited from the Makefile's default (which is rv32i, and which
+# sw/kyber/Makefile says must stay rv32i).
+MARCH = "rv32i"
+
 LINES_PER_RECORD = 6      # public key, secret key, ciphertext, ss B, ss A, pseudorandom ss
 
 fails = []
@@ -39,14 +44,43 @@ def fail(m): fails.append(m)
 
 
 def make(target, backend, ntests):
+    """Build one KAT binary and return the path make actually wrote it to.
+
+    OUT is passed on the command line -- the pattern test_kat_no_seed.py uses --
+    so the path returned is the path make was told to write, and not a copy of
+    the Makefile's naming rule.  A copy is what this function used to hold.
+    A14 put MARCH into that rule (build/host-SW-rv32i-n10000-d0) and this
+    function kept the old spelling (build/host-SW-n10000-d0), so from A14 until
+    this fix make rebuilt the real binaries in one directory while every check
+    here ran binaries left over from 2026-08-28 in another.  It passed
+    throughout, because those leftovers were correct; a clean checkout, which
+    has none, is what exposed it.
+
+    The binary is DELETED before make runs, so whatever this returns was built
+    by this call and nothing older can stand in for it.  An existence check on
+    its own is not enough, and was measured not to be: with a leftover already
+    at the path, a Makefile that wrote its binary elsewhere still handed this
+    function a file to run, and the check passed.  A rebuild is about a second
+    per binary.
+    """
+    rel = os.path.join("build", f"{target}-{backend}-{MARCH}-n{ntests}-d0")
+    name = "kat" if target == "host" else "kat.elf"
+    binary = os.path.join(KYBER, rel, name)
+    if os.path.lexists(binary):
+        os.remove(binary)
     out = subprocess.run(
-        ["make", f"TARGET={target}", f"BACKEND={backend}", f"NTESTS={ntests}"],
+        ["make", f"TARGET={target}", f"BACKEND={backend}", f"NTESTS={ntests}",
+         f"MARCH={MARCH}", f"OUT={rel}"],
         cwd=KYBER, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if out.returncode != 0:
         raise RuntimeError(f"build {target}/{backend} failed:\n"
                            + out.stdout.decode()[-3000:])
-    name = "kat" if target == "host" else "kat.elf"
-    return os.path.join(KYBER, "build", f"{target}-{backend}-n{ntests}-d0", name)
+    if not os.path.isfile(binary):
+        raise RuntimeError(f"make {target}/{backend} succeeded but wrote no "
+                           f"{os.path.relpath(binary, ROOT)} -- the Makefile "
+                           f"no longer honours OUT, or names its binary "
+                           f"differently")
+    return binary
 
 
 def run(binary, target, timeout=7200):
