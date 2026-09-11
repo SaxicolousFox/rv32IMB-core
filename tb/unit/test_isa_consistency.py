@@ -5,7 +5,8 @@ H1 (MODS_A2): the ISA string, in every place it is written, must agree.
 WHY THIS EXISTS.  `CLAUDE.md` says "THE ISA STRING AND THE misa RESET VALUE
 MUST MOVE TOGETHER", and until now exactly one pair was checked: run_riscof.py
 compares its YAML against rvntt_csr.sv before every compliance run.  The string
-is written in SIX places, and the other four were on the honour system:
+is written in SIX places across four files, with misa in a fifth, and the five
+strings run_riscof.py does not read were on the honour system:
 
     rtl/core/rvntt_csr.sv                MISA_VALUE
     tb/riscof/rvntt/rvntt_isa.yaml       ISA:, misa reset-val, misa bitmask
@@ -24,9 +25,20 @@ This check costs about a tenth of a second and is registered in the regression
 next to `mutation_anchors`, which exists for the same reason: a cheap pre-flight
 that fails in seconds beats an expensive run that hangs.
 
+THE DOCUMENTED COPIES.  Five more places state the current ISA string in prose
+for a human to build against -- DOC_COPIES below, the frozen docs/isa-spec.md
+first among them.  None of them can hang a run, so they drifted instead: all
+five still said rv32im_zicsr_zicntr_xkntt0p1 after A21-A30 had widened the ISA
+seven extensions past it, and nothing noticed.  Every `rv32...xkntt0p1` string
+in each of those files must now name exactly the extensions ISA_XKNTT does, and
+each file must contain at least one, so deleting the line fails rather than
+passing vacuously.  Files that quote an OLDER string on purpose -- the plan,
+MODS_A2's pre-A21 Spike probe, patch-discipline.md's history of patch 0001 --
+are historical records and deliberately not listed.
+
 WHAT IT DOES NOT CHECK.  That the ISA string is CORRECT -- that is RISCOF's job,
 and riscv-config's, and the decoder equivalence sweep's.  This checks only that
-the six copies say the same thing, which is the failure mode that has actually
+the copies say the same thing, which is the failure mode that has actually
 occurred.
 """
 import io
@@ -49,6 +61,17 @@ ALLOWED_EXTRA = {
     "spike_asm.MARCH":      set(),
     "rvntt_isa.yaml":       set(),
 }
+
+# Files that state the CURRENT ISA string in prose or comments.  Each must
+# match spike_asm.ISA_XKNTT exactly; see "THE DOCUMENTED COPIES" above.
+DOC_COPIES = [
+    "docs/isa-spec.md",
+    "docs/spike-xkntt.md",
+    "rtl/core/CLAUDE.md",
+    "rtl/core/rvntt_decode.sv",
+    "model/rv32i_ref.py",
+]
+DOC_ISA_RE = re.compile(r"\brv32[a-z0-9_]*xkntt0p1\b")
 
 
 def exts(s):
@@ -131,6 +154,33 @@ def main():
               "together; see this file's header.")
         return 1
 
+    # The documented copies, against ISA_XKNTT -- which the block above has
+    # just tied to every executable source, so agreement here is transitive.
+    want = sets["spike_asm.ISA_XKNTT"]
+    doc_bad = []
+    n_doc = 0
+    for path in DOC_COPIES:
+        hits = DOC_ISA_RE.findall(read(path))
+        if not hits:
+            doc_bad.append((path, "no rv32...xkntt0p1 string found -- the "
+                            "check cannot be vacuous"))
+        for s in hits:
+            n_doc += 1
+            if exts(s) != want:
+                doc_bad.append((path, "%s  extra=%s missing=%s" % (
+                    s, sorted(exts(s) - want) or "-",
+                    sorted(want - exts(s)) or "-")))
+    print("documented copies: %d string(s) in %d file(s)"
+          % (n_doc, len(DOC_COPIES)))
+    if doc_bad:
+        print("\nISA_FAIL: %d documented copy/copies disagree with "
+              "spike_asm.ISA_XKNTT (%s)" % (len(doc_bad), found["spike_asm.ISA_XKNTT"]))
+        for path, why in doc_bad:
+            print("  %-26s %s" % (path, why))
+        print("\nThese do not hang anything; they mislead whoever builds "
+              "against them.  Update the text, not the constant.")
+        return 1
+
     # misa: the RTL constant, the YAML reset value and the YAML bitmask.
     misa_rtl = int(grab("rtl/core/rvntt_csr.sv",
                         r"MISA_VALUE\s*=\s*32'h([0-9A-Fa-f_]+)",
@@ -208,7 +258,8 @@ def main():
               % ", ".join(overrides))
         return 1
 
-    print("\nISA_OK: %d sources agree" % len(found))
+    print("\nISA_OK: %d sources and %d documented copies agree"
+          % (len(found), n_doc))
     return 0
 
 

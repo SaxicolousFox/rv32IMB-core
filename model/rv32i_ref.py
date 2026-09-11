@@ -484,8 +484,12 @@ def decode(insn):
     for why they are not one rule:
       1. Xkntt reserved fields are strict (delegated to model/isa/xkntt.py).
       2. FENCE's unused fields are ignored, per the base ISA.
-      3. Anything outside rv32im_zicsr_zicntr_xkntt0p1 is illegal.  M is IN it
-         as of A14 (MODS_A); Zifencei is not, so FENCE.I stays illegal.
+      3. Anything outside
+         rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr_xkntt0p1
+         (tb/cosim/spike_asm.py ISA_XKNTT) is illegal.  M is IN it as of A14
+         (MODS_A); B, Zbkb and Zicond as of A21/A22 (MODS_A2), each legal only
+         at the exact encodings in _BM_OP_R and _bm_op_i.  Zifencei is not, so
+         FENCE.I stays illegal.
     """
     insn = u32(insn)
     opcode = bits(insn, 6, 0)
