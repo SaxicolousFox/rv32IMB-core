@@ -10,7 +10,7 @@
 param(
   [string]$Port    = "COM7",
   [int]   $Baud    = 115200,
-  [string]$Out     = "C:\Users\liamf\rvntt-hw\uart.log",
+  [string]$Out     = "C:\Users\liamf\rv32imb-core-hw\uart.log",
   [int]   $Seconds = 8,
   [int]   $SendByte = -1
 )

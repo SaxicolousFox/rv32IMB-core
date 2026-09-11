@@ -36,8 +36,8 @@ for a in "${EXTRA[@]}"; do
 done
 
 VIVADO_WIN="${VIVADO_WIN:-C:\\AMDDesignTools\\2025.2\\Vivado\\bin\\vivado.bat}"
-STAGE_WIN="${STAGE_WIN:-C:\\Users\\liamf\\rvntt-ooc}"
-STAGE_WSL="${STAGE_WSL:-/mnt/c/Users/liamf/rvntt-ooc}"
+STAGE_WIN="${STAGE_WIN:-C:\\Users\\liamf\\rv32imb-core-ooc}"
+STAGE_WSL="${STAGE_WSL:-/mnt/c/Users/liamf/rv32imb-core-ooc}"
 
 echo "=== staging sources to $STAGE_WSL ==="
 rm -rf "$STAGE_WSL"

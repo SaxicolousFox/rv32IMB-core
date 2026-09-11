@@ -30,8 +30,8 @@ sys.path.insert(0, os.path.join(ROOT, "tb", "fpga"))
 
 VIVADO_WIN = os.environ.get(
     "VIVADO_WIN", r"C:\AMDDesignTools\2025.2\Vivado\bin\vivado.bat")
-STAGE_WIN  = os.environ.get("STAGE_WIN_HW", r"C:\Users\liamf\rvntt-hw")
-STAGE_WSL  = os.environ.get("STAGE_WSL_HW", "/mnt/c/Users/liamf/rvntt-hw")
+STAGE_WIN  = os.environ.get("STAGE_WIN_HW", r"C:\Users\liamf\rv32imb-core-hw")
+STAGE_WSL  = os.environ.get("STAGE_WSL_HW", "/mnt/c/Users/liamf/rv32imb-core-hw")
 BIT_DEFAULT = os.path.join(ROOT, "fpga/build/soc/rvntt_soc_top.bit")
 PARSER_DEFAULT = os.path.join(ROOT, "tb/fpga/parse_soc_uart.py")
 
