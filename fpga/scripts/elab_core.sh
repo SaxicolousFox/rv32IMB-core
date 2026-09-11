@@ -15,8 +15,8 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 TOP="${1:-rvntt_regfile}"
 
 VIVADO_WIN="${VIVADO_WIN:-C:\\AMDDesignTools\\2025.2\\Vivado\\bin\\vivado.bat}"
-STAGE_WIN="${STAGE_WIN:-C:\\Users\\liamf\\rvntt-elab}"
-STAGE_WSL="${STAGE_WSL:-/mnt/c/Users/liamf/rvntt-elab}"
+STAGE_WIN="${STAGE_WIN:-C:\\Users\\liamf\\rv32imb-core-elab}"
+STAGE_WSL="${STAGE_WSL:-/mnt/c/Users/liamf/rv32imb-core-elab}"
 
 echo "=== staging core sources to $STAGE_WSL ==="
 rm -rf "$STAGE_WSL"

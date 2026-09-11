@@ -22,8 +22,8 @@ WANT_BIT="${2:-1}"
 STRATEGY="${3:-${SOC_STRATEGY:-default}}"
 
 VIVADO_WIN="${VIVADO_WIN:-C:\\AMDDesignTools\\2025.2\\Vivado\\bin\\vivado.bat}"
-STAGE_WIN="${STAGE_WIN:-C:\\Users\\liamf\\rvntt-soc}"
-STAGE_WSL="${STAGE_WSL:-/mnt/c/Users/liamf/rvntt-soc}"
+STAGE_WIN="${STAGE_WIN:-C:\\Users\\liamf\\rv32imb-core-soc}"
+STAGE_WSL="${STAGE_WSL:-/mnt/c/Users/liamf/rv32imb-core-soc}"
 OUT="${OUT:-$ROOT/fpga/build/soc}"
 # Which program is baked into the BRAM.  $readmemh runs at SYNTHESIS time, so
 # the image is part of the bitstream and a different program means a different

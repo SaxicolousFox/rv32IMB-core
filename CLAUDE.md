@@ -1,5 +1,11 @@
 # riscv-ntt
 
+> **This repository is `rv32IMB-core`, a standalone copy of `riscv-ntt` taken
+> at `ec887a1` (tag `core-fork-point`) and not yet cleaned.** It is being
+> reduced to just the RV32 core. It shares history with `riscv-ntt` but no
+> remote, no GitHub fork link, and no local paths. Everything below still
+> describes the original project until the cleanup rewrites it.
+
 An RV32IM pipeline, an ML-KEM-768 NTT coprocessor, and the `Xkntt` custom ISA
 extension that binds them, targeting a Digilent Arty A7-100T.
 
@@ -475,8 +481,9 @@ git push origin --tags
 
 Push at milestone boundaries and at the end of a track or phase — not after
 every commit, and never leave a completed milestone unpushed. `origin` is
-`github.com/SaxicolousFox/riscv-ntt`, authenticated, and `main` tracks
-`origin/main`.
+`github.com/SaxicolousFox/rv32IMB-core`, authenticated, and `main` tracks
+`origin/main`. Never add `riscv-ntt` as a remote here: the two repositories
+are deliberately independent.
 
 > **`main` is this repo; `master` is upstream Spike.** The default branch here
 > was renamed to `main`. The `origin/master` in `toolchain/patches.sh` and
