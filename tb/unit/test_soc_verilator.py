@@ -27,7 +27,7 @@ def main() -> int:
     a = ap.parse_args()
     base = a.rtl_dir or ROOT
 
-    build = a.build_dir or os.path.join(tempfile.gettempdir(), "rvntt_obj_soc")
+    build = a.build_dir or os.path.join(tempfile.gettempdir(), "rv32imb_core_obj_soc")
     os.makedirs(build, exist_ok=True)
 
     # The simulation image: same C source, short inter-block delay.  Built here

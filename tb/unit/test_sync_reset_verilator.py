@@ -7,7 +7,7 @@ RTL  = os.path.join(ROOT, "rtl/common/rvntt_sync_reset.sv")
 TB   = os.path.join(ROOT, "tb/unit/tb_sync_reset.cpp")
 
 def main():
-    build = os.path.join(tempfile.gettempdir(), "rvntt_obj_sync_reset")
+    build = os.path.join(tempfile.gettempdir(), "rv32imb_core_obj_sync_reset")
     cmd = ["verilator", "--cc", RTL, "--exe", TB, "--build", "-j", "4",
            "-Wall", "--Mdir", build, "--prefix", "Vrvntt_sync_reset"]
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

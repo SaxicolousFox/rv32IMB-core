@@ -7,7 +7,7 @@ RTL  = os.path.join(ROOT, "rtl/core/rvntt_regfile.sv")
 TB   = os.path.join(ROOT, "tb/unit/tb_regfile.cpp")
 
 def main():
-    build = os.path.join(tempfile.gettempdir(), "rvntt_obj_regfile")
+    build = os.path.join(tempfile.gettempdir(), "rv32imb_core_obj_regfile")
     cmd = ["verilator", "--cc", RTL, "--exe", TB, "--build", "-j", "4",
            "-Wall", "--Mdir", build, "--prefix", "Vrvntt_regfile"]
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)

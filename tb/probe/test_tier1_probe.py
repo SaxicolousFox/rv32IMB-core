@@ -61,14 +61,14 @@ def vectors(seed=20260903):
 
 def main() -> int:
     vs = vectors()
-    vecfile = os.path.join(tempfile.gettempdir(), "rvntt_tier1_vectors.txt")
+    vecfile = os.path.join(tempfile.gettempdir(), "rv32imb_core_tier1_vectors.txt")
     with open(vecfile, "w") as fh:
         for op, rs1, rs2, exp in vs:
             fh.write(f"{op} {rs1:08x} {rs2:08x} {exp:08x}\n")
 
     rc = 0
     for stages in (4, 3, 2):
-        build = os.path.join(tempfile.gettempdir(), f"rvntt_obj_tier1_{stages}")
+        build = os.path.join(tempfile.gettempdir(), f"rv32imb_core_obj_tier1_{stages}")
         cmd = ["verilator", "--cc", RTL, "--exe", TB, "--build", "-j", "4",
                "-Wall", f"-GSTAGES={stages}", "--Mdir", build,
                "--prefix", "Vrvntt_tier1_probe",

@@ -83,7 +83,7 @@ def main() -> int:
         rc = 1
 
     # ---- 2. the tests fire ----------------------------------------------
-    build = os.path.join(tempfile.gettempdir(), "rvntt_obj_entropy")
+    build = os.path.join(tempfile.gettempdir(), "rv32imb_core_obj_entropy")
     cmd = ["verilator", "--cc"] + RTL + ["--exe", TB, "--build", "-j", "4",
            "-Wall", "--Mdir", build, "--prefix", "Vrvntt_seed",
            "--top-module", "rvntt_seed",

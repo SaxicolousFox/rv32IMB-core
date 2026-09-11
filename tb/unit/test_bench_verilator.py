@@ -49,7 +49,7 @@ def main() -> int:
     a = ap.parse_args()
     base = a.rtl_dir or ROOT
 
-    build = a.build_dir or os.path.join(tempfile.gettempdir(), "rvntt_obj_bench")
+    build = a.build_dir or os.path.join(tempfile.gettempdir(), "rv32imb_core_obj_bench")
     os.makedirs(build, exist_ok=True)
 
     # rvntt_soc_sim_top hard-codes INIT_FILE("soc_sim.mem") and the simulator is

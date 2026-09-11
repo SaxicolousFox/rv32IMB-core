@@ -6,7 +6,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 GEN  = os.path.join(ROOT, "fpga", "generated")
 
 def main() -> int:
-    build = os.path.join(tempfile.gettempdir(), "rvntt_obj_blinky")
+    build = os.path.join(tempfile.gettempdir(), "rv32imb_core_obj_blinky")
     os.makedirs(build, exist_ok=True)
     # $readmemh resolves relative to the simulator's cwd.
     shutil.copy(os.path.join(GEN, "bram_init.mem"), build)

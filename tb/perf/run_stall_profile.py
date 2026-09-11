@@ -298,7 +298,7 @@ def main() -> int:
                     help="break the accounting four ways and require each to be caught")
     a = ap.parse_args()
 
-    build = a.build_dir or os.path.join(tempfile.gettempdir(), "rvntt_obj_prof")
+    build = a.build_dir or os.path.join(tempfile.gettempdir(), "rv32imb_core_obj_prof")
     os.makedirs(build, exist_ok=True)
 
     got = build_and_run(a, build)

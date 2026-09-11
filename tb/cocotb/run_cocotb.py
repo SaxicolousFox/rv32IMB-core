@@ -90,7 +90,7 @@ def main() -> int:
                                  % src)
     # Keep mutated builds out of the pristine build cache.
     suffix = "_mut" if a.rtl_dir else ""
-    build_dir = Path(tempfile.gettempdir()) / f"rvntt_cocotb_{a.design}{suffix}"
+    build_dir = Path(tempfile.gettempdir()) / f"rv32imb_core_cocotb_{a.design}{suffix}"
 
     runner = get_runner("verilator")
     runner.build(
