@@ -78,10 +78,11 @@ performed at all. R-type, not R4 — `c1` needs no zeta, and encoding an unused
 `rs3` would burn a register-file read port.
 
 **3. Reserved encoding fields are strict.** A nonzero reserved field is an
-illegal instruction, not "ignored". Do not relax this. A14 added exactly one
-legal `funct7` to `OP` — `0000001`, the M extension, for all eight `funct3`
-values — and every other `funct7` there is still illegal, which is what keeps
-this rule intact rather than eroded. Plan A3 compares the RTL
+illegal instruction, not "ignored". Do not relax this. A14 made `funct7 =
+0000001` (M) legal in `OP` for all eight `funct3` values, and A21/A22 added the
+B, Zbkb and Zicond forms — each **only** at its exact `(funct7, funct3)` pairs.
+Every other pair there is still illegal, which is what keeps this rule intact
+rather than eroded. Plan A3 compares the RTL
 decoder against the Python decoder over 10⁶ random words; a lax and a strict
 decoder disagree on exactly those words, and the divergence would surface
 during cosimulation as an unexplained mismatch.

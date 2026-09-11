@@ -115,8 +115,8 @@ and a formal proof that restates each result in a second, different idiom.
 
 ### `rvntt_decode.sv`
 
-RV32I + Zicsr + Xkntt, combinational, producing `ctrl_t` plus the four register
-addresses. Compared against `model/rv32i_ref.py::decode` over 10⁶ random words.
+RV32IM + B + Zbkb + Zicond + Zicsr + Xkntt, combinational, producing `ctrl_t`
+plus the four register addresses. Compared against `model/rv32i_ref.py::decode` over 10⁶ random words.
 
 **Three different legality rules, and they are genuinely different:**
 
@@ -129,11 +129,17 @@ addresses. Compared against `model/rv32i_ref.py::decode` over 10⁶ random words
    fm/pred/succ/rs1/rd are reserved for future fences and base implementations
    *shall ignore* them. Ignoring is spec-mandated, so nonzero there is legal.
    Copying rule 1 onto FENCE would diverge from Spike, which is A5's reference.
-3. **Anything outside `rv32im_zicsr_zicntr_xkntt0p1` is illegal.** M is *in*
-   it as of A14, so OP with `funct7=0000001` is legal for all eight `funct3`
-   values — and every *other* `funct7` in OP is still illegal, which is what
-   keeps the strict-reserved-field claim intact. No Zifencei, so FENCE.I is
-   still illegal.
+3. **Anything outside
+   `rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr_xkntt0p1` is
+   illegal** (`ISA_XKNTT` in `tb/cosim/spike_asm.py`). A14 made OP with
+   `funct7=0000001` (M) legal for all eight `funct3` values; A21 and A22 added
+   the B, Zbkb and Zicond forms, each legal **only** at its exact
+   `(funct7, funct3)` pairs — the table in `rvntt_decode.sv`, mirrored by
+   `_BM_OP_R` in `model/rv32i_ref.py` — and, for the OP-IMM unary forms, its
+   exact `rs2`. Every other pair is still illegal (`czero` under
+   `funct7=0000111` is legal at `funct3` 101 and 111 only), which is what keeps
+   the strict-reserved-field claim intact. No Zifencei, so FENCE.I is still
+   illegal.
 
 **The Python side delegates custom-0/custom-1 to `model/isa/xkntt.py`** rather
 than reimplementing the rules. That is deliberate: the four-way agreement is

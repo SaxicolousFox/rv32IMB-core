@@ -1,5 +1,6 @@
 // ============================================================================
-// rvntt_decode -- the RV32I + Zicsr + Xkntt instruction decoder (plan A3).
+// rvntt_decode -- the RV32IM + B + Zbkb + Zicond + Zicsr + Xkntt instruction
+// decoder (plan A3).
 //
 // Combinational.  Produces the ctrl_t bundle plus the four register addresses.
 //
@@ -22,10 +23,13 @@
 //      FENCE would diverge from Spike, which is A5's reference.
 //
 //   3. Anything outside the ISA string is illegal.  The core is
-//      rv32im_zicsr_zicntr_xkntt0p1 (tb/cosim/spike_asm.py).  M IS in it as of
-//      A14, so OP with funct7 = 0000001 is legal for all eight funct3 values;
-//      every other funct7 in OP remains illegal.  No Zifencei, so FENCE.I is
-//      still illegal.
+//      rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr_xkntt0p1
+//      (tb/cosim/spike_asm.py ISA_XKNTT).  M IS in it as of A14, so OP with
+//      funct7 = 0000001 is legal for all eight funct3 values.  B, Zbkb and
+//      Zicond (A21, A22) are legal only at the exact (funct7, funct3) pairs in
+//      the bm_op_r table below, and the OP-IMM unary forms only at their exact
+//      rs2; every other pair in OP remains illegal.  No Zifencei, so FENCE.I
+//      is still illegal.
 //
 // An illegal instruction produces EXACTLY the reset bundle.  The whole ctrl_t
 // is cleared at the bottom of the always_comb, not just the side-effect flags:

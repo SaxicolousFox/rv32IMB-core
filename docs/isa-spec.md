@@ -12,15 +12,23 @@ If any of the four disagrees with this document, the document wins — or the
 document changes first and all four follow. Changing an encoding after Tracks A,
 B and C have forked is expensive, which is the entire reason this exists.
 
-ISA string: **`rv32im_zicsr_zicntr_xkntt0p1`**.
+ISA string: **`rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr_xkntt0p1`**.
 
-> **The `m` is A14's, from `RISC-V_NTT_MODS_A.txt`, and it is the only thing in
-> this document that step changed.** Nothing about `Xkntt` moves: `M` lives in
-> `OP` with `funct7 = 0000001`, `custom-0` and `custom-1` are untouched, and
-> every encoding, semantic, latency and exception below is exactly as frozen.
-> `MODS_A` §3.5 listed this file as unchanged and named only `misa` in the
-> exception table; the ISA string is a second stale fact, corrected here rather
-> than left to mislead someone building against it.
+> **Everything between `rv32i` and `_zicsr` was added after the freeze, and
+> this line is the only thing in this document those steps changed.** The `m`
+> is A14's, from `RISC-V_NTT_MODS_A.txt`; `zba_zbb_zbs_zbkb` (A21), `zicond`
+> (A22), `zkr` (A29) and `zkt` (A30) are from `RISC-V_NTT_MODS_A2.txt`.
+> Nothing about `Xkntt` moves: M, B, Zbkb and Zicond encode in `OP` and
+> `OP-IMM`, Zkr adds only the `seed` CSR, and Zkt adds no encodings at all — so
+> `custom-0` and `custom-1` are untouched, and every encoding, semantic, latency
+> and exception below is exactly as frozen.
+>
+> This is `ISA_XKNTT` in `tb/cosim/spike_asm.py`, the string Spike is actually
+> run with, and `tb/unit/test_isa_consistency.py` fails if the two disagree.
+> That check exists because this line went stale twice: `MODS_A` §3.5 listed
+> this file as unchanged, and A21–A30 widened the ISA without revisiting it.
+> The full ISA scope — including `Zihpm`, which adds CSRs rather than encodings
+> and is not named in the string — is `MODS_A2` §2.
 
 ## Normative language
 

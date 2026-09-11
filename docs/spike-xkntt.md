@@ -31,8 +31,12 @@ The fork is `toolchain/spike-src` on branch `xkntt`, rebased onto the pin in
 
 ```sh
 source toolchain/env.sh
-spike --isa=rv32im_zicsr_zicntr_xkntt0p1 prog.elf   # m is A14's; the fork is unchanged
+spike --isa=rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr_xkntt0p1 prog.elf
 ```
+
+That is `ISA_XKNTT` in `tb/cosim/spike_asm.py`. Everything between `rv32i` and
+`_zicsr` came later (A14, A21, A22, A29, A30) and is native to Spike, so the
+fork is unchanged by it.
 
 Omit `xkntt` and every custom instruction becomes an illegal instruction —
 `require_extension(EXT_XKNTT)` in each body — which the regression checks in
