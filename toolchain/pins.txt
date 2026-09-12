@@ -1,0 +1,37 @@
+# Third-party checkouts and Python packages, pinned.  All are gitignored and
+# reproduced from this file; nothing here is patched.
+#
+#   name<TAB>commit<TAB>date<TAB>branch/how
+
+spike	650c1a25a15d9de58026d2129c7b81794ed279fe	2026-08-27	riscv-software-src/riscv-isa-sim master, built by 10-spike.sh into toolchain/install
+riscv-tests	2ebecad997fa58cd9e5724340ba75aa4b59bd1d0	2026-08-14	master, --recurse-submodules (needs env/)
+riscv-arch-test	9bceaf5c02fa1131625bc6228b834e9e884c5801	2026-02-19	old-framework-3.x
+riscv-formal	c992aa61fdfe0846c5ed90324c596202a1c69b76	2026-07-16	main
+coremark	1f483d5b8316753a742cbf5590caf5bd0a4e4777	2025-05-01	main, --depth 1
+
+# How to reproduce:
+#   git clone https://github.com/riscv-software-src/riscv-isa-sim.git toolchain/spike-src
+#   git clone --depth 1 --recurse-submodules \
+#       https://github.com/riscv-software-src/riscv-tests.git toolchain/riscv-tests
+#   git clone --depth 1 --branch old-framework-3.x \
+#       https://github.com/riscv-non-isa/riscv-arch-test.git toolchain/riscv-arch-test
+#   git clone https://github.com/YosysHQ/riscv-formal.git toolchain/riscv-formal
+#   git clone --depth 1 https://github.com/eembc/coremark.git toolchain/coremark
+#   (then `git checkout <commit>` in each)
+#
+# CoreMark and Dhrystone (from riscv-tests) are compiled in place and never
+# edited; the ports live in sw/bench/.  riscv-formal's instruction models are
+# the specification the core is proved against, so it is pinned by commit.
+# riscv-arch-test is pinned to old-framework-3.x because RISCOF is deprecated
+# upstream in favour of ACT4 (which needs Sail and a UDB config).
+
+# RISCOF's Python dependencies.  riscof 1.25.3 pins gitpython==3.1.17, which
+# does not install on Python 3.13, so it goes in with --no-deps beside a
+# current GitPython; riscof 1.21.1 needs riscv-config 2.x, which rejects this
+# project's ISA yaml.
+#   UV=toolchain/opt/uv-x86_64-unknown-linux-gnu/uv
+#   $UV pip install --python .venv/bin/python riscv-config==3.18.3 riscv-isac
+#   $UV pip install --no-deps --python .venv/bin/python riscof==1.25.3
+riscof	1.25.3	-	pip, --no-deps
+riscv-config	3.18.3	-	pip
+riscv-isac	0.18.0	-	pip

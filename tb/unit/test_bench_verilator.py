@@ -1,16 +1,10 @@
 #!/usr/bin/env python3
 """
-Run the A13 benchmark image on the SoC RTL under Verilator.
+Run the benchmark image on the SoC RTL under Verilator.
 
-This is the gate between the host functional run and the board.  The host run
-proves the port is correct; this proves the RTL executes it -- and it is the
-first workload on this core that runs libgcc's hand-written __divsi3/__mulsi3,
-since there is no M extension and neither the cosimulation's random programs nor
-the compliance suite links libgcc.
-
-The iteration counts are small on purpose: this is a functional check, and its
-cycle counts are Verilator's, not the board's, so the parser runs with
---allow-short.  The measurement is A13's hardware run and nothing else.
+A functional check with small iteration counts (the parser runs with
+--allow-short); the measurement is the hardware run.  Also cross-checks mcycle
+against Verilator's own clock-edge count, which nothing else does.
 """
 import argparse, json, os, re, subprocess, sys, tempfile
 
@@ -31,20 +25,11 @@ def main() -> int:
     ap.add_argument("--iterations", type=int, default=1)
     ap.add_argument("--blocks", type=int, default=1)
     ap.add_argument("--max-cycles", type=int, default=400_000_000)
-    # A16.  Defaults reproduce A13's image exactly, so the mutation harness and
-    # the regression keep measuring what they measured before; the two flags are
-    # for validating A16's image before it costs a fourteen-minute Vivado run.
     ap.add_argument("--arch", choices=["rv32i", "rv32im", "rv32imzb", "rv32imb"],
                     default="rv32i")
-    ap.add_argument("--ntt", action="store_true")
     ap.add_argument("--hpm", action="store_true")
-    ap.add_argument("--keccak", action="store_true")
-    # A19.  Cycle counts are no longer equal between report blocks: the branch
-    # predictor carries state across them, and CoreMark was still moving by
-    # 4 cycles in 833,259 between the second and third.  ARCHITECTURAL keys are
-    # still required to be exactly equal with no tolerance at all, and the
-    # exact-cycle claim moved to bench_compare across programming passes -- see
-    # parse_bench_uart.check_reproducible.
+    # Cycle counts may differ between blocks (the predictor carries state);
+    # architectural keys must still be exactly equal.
     ap.add_argument("--tolerance-ppm", type=float, default=50.0)
     a = ap.parse_args()
     base = a.rtl_dir or ROOT
@@ -52,9 +37,8 @@ def main() -> int:
     build = a.build_dir or os.path.join(tempfile.gettempdir(), "rv32imb_core_obj_bench")
     os.makedirs(build, exist_ok=True)
 
-    # rvntt_soc_sim_top hard-codes INIT_FILE("soc_sim.mem") and the simulator is
-    # run with cwd=build, so the benchmark image simply takes that name in its
-    # own build directory.  Nothing is shared with the A12 sim.
+    # rvntt_soc_sim_top hard-codes INIT_FILE("soc_sim.mem"); the simulator runs
+    # with cwd=build, so the image takes that name in its own build directory.
     r = subprocess.run([sys.executable,
                         os.path.join(ROOT, "fpga/scripts/build_bench_image.py"),
                         "--out", os.path.join(build, "soc_sim.mem"),
@@ -64,9 +48,7 @@ def main() -> int:
                         "--iterations", str(a.iterations),
                         "--gap-cycles", "2000",
                         "--arch", a.arch]
-                       + (["--ntt"] if a.ntt else [])
-                       + (["--hpm"] if a.hpm else [])
-                       + (["--keccak"] if a.keccak else []),
+                       + (["--hpm"] if a.hpm else []),
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     print(r.stdout.decode("utf-8", "replace").strip())
     if r.returncode != 0:
@@ -117,9 +99,7 @@ def main() -> int:
     p = subprocess.run([sys.executable,
                         os.path.join(ROOT, "tb/fpga/parse_bench_uart.py"), cap,
                         "--allow-short", "--min-blocks", str(a.blocks),
-                        # A19: the first block runs on a cold predictor.  It is
-                        # discarded from the equality check and reported
-                        # separately -- see parse_bench_uart.check_reproducible.
+                        # Block 1 runs on a cold predictor; discard it.
                         "--warmup-blocks", "1",
                         "--tolerance-ppm", str(a.tolerance_ppm),
                         "--dhry-runs", str(a.dhry_runs),
@@ -130,13 +110,9 @@ def main() -> int:
     if p.returncode != 0:
         return 1
 
-    # Is mcycle a real cycle counter?  Nothing else in this project checks that.
-    # rtl/core/rvntt_csr.sv says so in a comment and notes that Spike disagrees
-    # (its mcycle advances once per instruction), so the model cannot be the
-    # reference here -- but Verilator knows the ground truth, because it counted
-    # the clock edges itself.  The timed regions must fit inside the simulated
-    # run and must account for most of it; the rest is UART transmit time, which
-    # is computable to within a byte.
+    # Is mcycle a real cycle counter?  Verilator counted the clock edges itself;
+    # the timed regions plus the computable UART time must account for most of
+    # the simulated run.
     m = re.search(r"^cycles=(\d+) bytes=(\d+)", out, re.M)
     if not m:
         print("BENCH_FAIL: the testbench printed no cycle count")
@@ -144,21 +120,9 @@ def main() -> int:
     tb_cycles, uart_bytes = int(m.group(1)), int(m.group(2))
     with open(js) as f:
         blocks = json.load(f)["blocks"]
-    # EVERY timed region, or the check turns into a check on which regions were
-    # remembered.  A16 added the NTT pair, and leaving it out dropped the
-    # accounted fraction from 95.9% to 73.8% -- which reads exactly like "mcycle
-    # counts slower than the clock" and is in fact "the accountant forgot a
-    # quarter of a million cycles".
-    #
-    # A23 ADDED THE KECCAK PAIR AND IT HAPPENED AGAIN, to 58.0%, on the first
-    # run with --keccak.  Same message, same non-cause.  The list is now built
-    # from a NAMED SET rather than written out inline, so the next region has
-    # one obvious place to be added -- and the region names are the parser's
-    # own keys, so a region present in the capture and missing here is a typo
-    # rather than an omission.
-    REGION_CYCLE_KEYS = ("dhry_cycles", "cm_cycles",
-                         "ntt_cycles_rv32i", "ntt_cycles_rv32im",
-                         "kc_cycles_rv32im", "kc_cycles_rv32imb")
+    # Every timed region must be listed here, or the accounted fraction drops
+    # and reads exactly like "mcycle counts slower than the clock".
+    REGION_CYCLE_KEYS = ("dhry_cycles", "cm_cycles")
     measured = sum(sum(b.get(k, 0) for k in REGION_CYCLE_KEYS) for b in blocks)
     # 34 cycles per bit, 10 bits per byte, at CORE_HZ/BAUD for the sim clock.
     uart_cycles = uart_bytes * 10 * (SIM_CORE_HZ // 115200)

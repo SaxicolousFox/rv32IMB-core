@@ -27,7 +27,6 @@ LD   = os.path.join(ROOT, "sw", "tests", "link.ld")
 # mnemonic, in whichever harness happens to emit one first.
 MARCH = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr"
 
-ISA_XKNTT = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr_xkntt0p1"
 ISA_BASE  = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr"
 
 # A bare-metal program that takes a trap with no handler installed loops
@@ -107,7 +106,7 @@ def build(body, tmp, name="prog", data="", trap_mode="exit"):
     return elf
 
 
-def run(elf, isa=ISA_XKNTT, log_commits=True, timeout=600):
+def run(elf, isa=ISA_BASE, log_commits=True, timeout=600):
     """Run under Spike.  Returns (returncode, [(pc, insn_word, [(rd, val)])])."""
     cmd = ["spike", f"--isa={isa}"]
     if log_commits:

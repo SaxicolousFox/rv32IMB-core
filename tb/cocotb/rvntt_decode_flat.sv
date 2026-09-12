@@ -37,7 +37,6 @@ module rvntt_decode_flat (
     output wire logic [2:0]  imm_fmt,
     output wire logic        uses_rs1,
     output wire logic        uses_rs2,
-    output wire logic        uses_rs3,
     output wire logic        is_ecall,
     output wire logic        is_ebreak,
     output wire logic        is_mret,
@@ -46,14 +45,11 @@ module rvntt_decode_flat (
     output wire logic [2:0]  muldiv_op,
     output wire logic        is_bitmanip,
     output wire logic [5:0]  bm_op,
-    output wire logic        is_xkntt,
-    output wire logic [3:0]  xkntt_op,
     output wire logic        is_illegal,
 
     output wire logic [4:0]  rd_addr,
     output wire logic [4:0]  rs1_addr,
-    output wire logic [4:0]  rs2_addr,
-    output wire logic [4:0]  rs3_addr
+    output wire logic [4:0]  rs2_addr
 );
 
   rv32i_pkg::ctrl_t ctrl;
@@ -63,8 +59,7 @@ module rvntt_decode_flat (
       .ctrl     (ctrl),
       .rd_addr  (rd_addr),
       .rs1_addr (rs1_addr),
-      .rs2_addr (rs2_addr),
-      .rs3_addr (rs3_addr)
+      .rs2_addr (rs2_addr)
   );
 
   assign is_bitmanip = ctrl.is_bitmanip;
@@ -83,15 +78,12 @@ module rvntt_decode_flat (
   assign imm_fmt    = ctrl.imm_fmt;
   assign uses_rs1   = ctrl.uses_rs1;
   assign uses_rs2   = ctrl.uses_rs2;
-  assign uses_rs3   = ctrl.uses_rs3;
   assign is_ecall   = ctrl.is_ecall;
   assign is_ebreak  = ctrl.is_ebreak;
   assign is_mret    = ctrl.is_mret;
   assign is_csr     = ctrl.is_csr;
   assign is_muldiv  = ctrl.is_muldiv;
   assign muldiv_op  = ctrl.muldiv_op;
-  assign is_xkntt   = ctrl.is_xkntt;
-  assign xkntt_op   = ctrl.xkntt_op;
   assign is_illegal = ctrl.is_illegal;
 
 endmodule

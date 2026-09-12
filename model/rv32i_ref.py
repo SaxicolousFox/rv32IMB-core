@@ -331,17 +331,12 @@ if __name__ == "__main__":
 # be a fourth thing to keep in sync, and it could agree with the RTL while both
 # disagreed with the contract.
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "isa"))
-import xkntt as _xkntt   # noqa: E402
-
 # ------------------------------------------------------------------ opcodes
 OPC_LOAD     = 0x03
-OPC_CUSTOM_0 = 0x0B
 OPC_MISC_MEM = 0x0F
 OPC_OP_IMM   = 0x13
 OPC_AUIPC    = 0x17
 OPC_STORE    = 0x23
-OPC_CUSTOM_1 = 0x2B
 OPC_OP       = 0x33
 OPC_LUI      = 0x37
 OPC_BRANCH   = 0x63
@@ -354,29 +349,17 @@ SRCA_RS1, SRCA_PC, SRCA_ZERO = 0, 1, 2
 # -------------------------------------------------------------- alu_src_b_e
 SRCB_RS2, SRCB_IMM = 0, 1
 # ------------------------------------------------------------- result_sel_e
-RES_ALU, RES_MEM, RES_PC4, RES_CSR, RES_XKNTT = 0, 1, 2, 3, 4
-# --------------------------------------------------------------- xkntt_op_e
-XK_NONE, XK_KMM, XK_KBFCT, XK_KBFGS, XK_KBMUL0, XK_KMAC, XK_KBMUL1 = range(7)
-XK_NTT_CFG, XK_NTT_START, XK_NTT_WAIT, XK_NTT_STAT = 7, 8, 9, 10
-
-# Xkntt mnemonic (as model/isa/xkntt.py names it) -> xkntt_op_e encoding.
-XK_BY_MNEMONIC = {
-    "kmm": XK_KMM, "kbfct": XK_KBFCT, "kbfgs": XK_KBFGS,
-    "kbmul0": XK_KBMUL0, "kmac": XK_KMAC, "kbmul1": XK_KBMUL1,
-    "kntt.cfg": XK_NTT_CFG, "kntt.start": XK_NTT_START,
-    "kntt.wait": XK_NTT_WAIT, "kntt.stat": XK_NTT_STAT,
-}
+RES_ALU, RES_MEM, RES_PC4, RES_CSR = 0, 1, 2, 3
 
 # The fields of ctrl_t, in the order the struct declares them.  Used by the
 # testbench to compare and to report a mismatch by name.
 CTRL_FIELDS = [
     "reg_write", "mem_read", "mem_write", "mem_op", "branch", "jump", "jalr",
     "alu_op", "alu_src_a", "alu_src_b", "result_sel", "imm_fmt",
-    "uses_rs1", "uses_rs2", "uses_rs3",
+    "uses_rs1", "uses_rs2",
     "is_ecall", "is_ebreak", "is_mret", "is_csr",
     "is_muldiv", "muldiv_op",
     "is_bitmanip", "bm_op",
-    "is_xkntt", "xkntt_op",
     "is_illegal",
 ]
 
@@ -501,7 +484,6 @@ def decode(insn):
         "rd":  bits(insn, 11, 7),
         "rs1": bits(insn, 19, 15),
         "rs2": bits(insn, 24, 20),
-        "rs3": bits(insn, 31, 27),
     }
 
     c = _blank()
@@ -620,24 +602,6 @@ def decode(insn):
             c.update(is_csr=1, reg_write=1, imm_fmt=IMM_Z,
                      result_sel=RES_CSR, is_illegal=0)
         # funct3 == 0b100 is reserved.
-
-    elif opcode in (OPC_CUSTOM_0, OPC_CUSTOM_1):
-        c["is_xkntt"] = 1
-        d = _xkntt.decode(insn)          # the frozen contract decides legality
-        if d is not None:
-            op = XK_BY_MNEMONIC[d["mnemonic"]]
-            c.update(xkntt_op=op, is_illegal=0)
-            if opcode == OPC_CUSTOM_0:
-                c.update(reg_write=1, uses_rs1=1, uses_rs2=1,
-                         result_sel=RES_XKNTT)
-                if op in (XK_KBMUL0, XK_KMAC):
-                    c["uses_rs3"] = 1
-            elif op == XK_NTT_CFG:
-                c.update(uses_rs1=1, uses_rs2=1)
-            elif op == XK_NTT_START:
-                c.update(uses_rs1=1, reg_write=1, result_sel=RES_XKNTT)
-            else:                        # kntt.wait / kntt.stat
-                c.update(reg_write=1, result_sel=RES_XKNTT)
 
     # An illegal instruction has no architectural effect.  The WHOLE bundle is
     # reset, not just the side-effect flags: several branches above set

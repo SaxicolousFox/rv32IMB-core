@@ -50,9 +50,6 @@ cp "$ROOT"/rtl/common/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
 # reach.  The RVFI port is excluded -- it is compiled only under RISCV_FORMAL,
 # and reading it here would need the define plus riscv-formal's macros.
 cp "$ROOT"/rtl/soc/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
-# rtl/probe/ holds MODS_A2 A24's Tier-1 timing probe.  It is a measurement
-# artefact and is deliberately NOT in rtl/ntt/, which is Track B's.
-cp "$ROOT"/rtl/probe/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
 cp "$ROOT"/fpga/generated/*.svh "$STAGE_WSL/" 2>/dev/null
 cp "$ROOT"/fpga/generated/*.svh "$STAGE_WSL/rtl/" 2>/dev/null
 # $readmemh resolves against Vivado's WORKING directory, not the source file's.

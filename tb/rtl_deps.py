@@ -22,7 +22,7 @@ import os
 import re
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RTL_DIRS = ("rtl/common", "rtl/core", "rtl/ntt", "rtl/soc")
+RTL_DIRS = ("rtl/common", "rtl/core", "rtl/soc")
 
 # Two ways a file can depend on a package, both of which need it read first:
 #   * `import rv32i_pkg::*;`

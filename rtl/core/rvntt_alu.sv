@@ -1,36 +1,15 @@
 // ============================================================================
-// rvntt_alu -- the RV32I integer ALU (plan A2).
+// rvntt_alu -- the RV32I integer ALU.  Purely combinational.
 //
-// Purely combinational.  ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND,
-// plus ALU_PASS_B, which carries LUI's immediate straight through instead of
-// forcing it onto the adder.
+// ADD, SUB, SLL, SLT, SLTU, XOR, SRL, SRA, OR, AND, and ALU_PASS_B (LUI's
+// immediate, kept off the adder).  Shifts use b[4:0] only, per the ISA; SRA
+// needs a $signed left operand, because `>>>` on an unsigned vector is a
+// logical shift.  The branch comparator is a separate module (rvntt_branch) so
+// the branch path does not inherit the operation mux delay.
 //
-// Two things here are the usual sources of silent wrongness:
-//
-//   * The shift amount is b[4:0], NOT all of b.  RV32I defines shifts to use
-//     only the low five bits of the source, so `sll x1, x2, x3` with x3 = 32
-//     is a no-op, not a zeroing.  Using the full operand would also infer a
-//     32-bit-wide shifter and cost fabric for behaviour the ISA forbids.
-//
-//   * SRA needs a SIGNED left operand.  `a >>> b` on an unsigned `logic`
-//     vector is an ordinary logical shift in SystemVerilog -- the `>>>`
-//     operator does not by itself make the shift arithmetic.  This is the bug
-//     plan A5 suggests injecting to prove the cosim differ works, which is a
-//     fair hint about how often it is written wrong.
-//
-// No branch comparator here.  Plan §1.6 resolves branches in EX and A8 owns
-// that logic; keeping it out of the ALU means the branch path does not
-// inherit the operation mux delay.
-//
-// NOTE ON THE PACKAGE REFERENCES BELOW.  Every package name here is written out
-// in full as `rv32i_pkg::X`, and there is no `import` statement anywhere in this
-// file.  That is a tool constraint, not a style preference: Yosys rejects BOTH
-// the module-header form (`module <name> import rv32i_pkg::*; (...)`) and a
-// module-body `import`, failing with "syntax error, unexpected TOK_IMPORT", so
-// the formal flow could not read the file at all.  Fully-qualified references
-// with a package-typed port are the only form Verilator, Yosys and Vivado all
-// accept, and they keep the port's enum type rather than degrading it to a
-// plain vector.
+// Package references are fully qualified with no `import`: Yosys rejects every
+// import form, and the qualified form is the one Verilator, Yosys and Vivado
+// all accept.
 // ============================================================================
 `default_nettype none
 
@@ -58,29 +37,21 @@ module rvntt_alu
       rv32i_pkg::ALU_OR:     y = a | b;
       rv32i_pkg::ALU_AND:    y = a & b;
       rv32i_pkg::ALU_PASS_B: y = b;
-      // alu_op_e is 4 bits wide but has 11 members, so the remaining five
-      // encodings are unreachable by construction -- the decoder only ever
-      // assigns a named member.  A default arm is still required: without one
-      // this always_comb would infer a latch on those codes, and `unique`
-      // only warns at simulation time, it does not synthesise a value.
+      // The five unused encodings are unreachable (the decoder only assigns
+      // named members); a default arm is still needed to avoid a latch.
       default:    y = 32'b0;
     endcase
   end
 
 `ifdef FORMAL
-  // Every operation is checked against a SECOND, independently-written
-  // expression.  These are deliberately not copies of the always_comb above:
-  // SUB is stated as two's-complement addition, SLT as a sign-aware case split
-  // on the operand signs, SLTU as the borrow-out of a 33-bit subtraction, and
-  // SRA as a right shift of a 64-bit sign-extended value.  A wrong answer would
-  // have to be written twice, in two different idioms, to survive.
+  // Every operation checked against a second, independently-written
+  // expression in a different idiom, so a wrong answer would have to be
+  // written twice.
 
   // 33-bit subtraction: bit 32 is the borrow, i.e. exactly a < b unsigned.
   wire [32:0] f_sub33 = {1'b0, a} - {1'b0, b};
 
-  // Signed less-than without using the `<` operator on signed operands: when
-  // the sign bits differ the negative one is smaller, otherwise the unsigned
-  // comparison already gives the right answer.
+  // Signed less-than without `<` on signed operands.
   wire f_slt = (a[31] != b[31]) ? a[31] : f_sub33[32];
 
   // Arithmetic right shift as a logical shift of a sign-extended 64-bit value.
@@ -101,11 +72,8 @@ module rvntt_alu
     if (op == rv32i_pkg::ALU_SRL)  assert (y == (a >> b[4:0]));
   end
 
-  // Structural sanity nets, independent of the mirrored expressions above: an
-  // arithmetic right shift can never turn a negative value positive, and a
-  // logical right shift by a nonzero amount can never leave bit 31 set.  These
-  // catch a signedness slip even in the case where both formulations were
-  // written wrong the same way.
+  // Structural sanity nets independent of the mirrored expressions: SRA never
+  // turns a negative value positive; SRL by a nonzero amount clears bit 31.
   always_comb begin
     if (op == rv32i_pkg::ALU_SRA && a[31])   assert (y[31]);
     if (op == rv32i_pkg::ALU_SRL && shamt != 5'd0) assert (!y[31]);

@@ -660,17 +660,6 @@ MUTATIONS = [
                        "      mw_q           <= ex_pkt;")],
          caught=["rvfi:pc_fwd_ch0"]),
 
-    dict(step="A11", name="fwd_xkntt_disagrees_with_writeback",
-         why="RESTORES A REAL BUG that riscv-formal found on its first clean "
-             "run: the MEM forwarding mux sent every result_sel that is not "
-             "RES_PC4 to ex_result, while mem_result sends RES_XKNTT to zero. "
-             "A legal Xkntt instruction therefore forwarded its ALU output and "
-             "wrote zero to the register file.  No RV32I program can reach it, "
-             "which is why five suites and 35 mutations had not",
-         edits=[(CORE, "      default:            ex_mem_fwd_data = 32'h0;",
-                       "      default:            ex_mem_fwd_data = ex_mem_q.ex_result;")],
-         caught=["rvfi:reg_ch0"]),
-
     # --------------------------------------------------------------- A14 ----
     # The M extension, and the multi-cycle EX mechanism under it.  Two of these
     # are the interesting ones and neither changes an architectural value:
