@@ -1,7 +1,4 @@
-# RV32I + NTT coprocessor -- top-level build/test entry points.
-#
-# `make regress` is the contract from plan P0.2: it runs every test, prints a
-# pass/fail table, and returns nonzero on failure.
+# rv32IMB-core -- top-level build/test entry points.
 
 SHELL := /bin/bash
 ROOT  := $(patsubst %/,%,$(dir $(abspath $(lastword $(MAKEFILE_LIST)))))
@@ -10,28 +7,25 @@ PY    ?= python3
 # Tools live in toolchain/; env.sh puts them on PATH without polluting the shell.
 ENV := source $(ROOT)/toolchain/env.sh &&
 
-.PHONY: help regress regress-v list lint formal model models clean tools bitstream elab
+.PHONY: help regress regress-v list lint formal clean tools bitstream soc-bitstream bench-bitstream elab
 
 help:
-	@echo "make regress    - run the full regression (nonzero exit on failure)"
-	@echo "make regress-v  - same, verbose (show output of every test)"
-	@echo "make list       - list registered tests"
-	@echo "make lint       - Verilator lint over all RTL"
-	@echo "make formal     - run formal checks"
-	@echo "make model      - run Python golden-model self-tests"
-	@echo "make models     - build the instrumented C golden model"
-	@echo "make tools      - print resolved tool versions"
-	@echo "make bitstream  - build the P0.5 FPGA bitstream via Windows Vivado"
-	@echo "make elab       - Vivado elaboration check on rtl/core (TOP=<module>)"
-	@echo "make clean      - remove build/sim artifacts"
+	@echo "make regress         - run the full regression (nonzero exit on failure)"
+	@echo "make regress-v       - same, verbose (show output of every test)"
+	@echo "make list            - list registered tests"
+	@echo "make lint            - Verilator lint over all RTL"
+	@echo "make formal          - run formal checks"
+	@echo "make tools           - print resolved tool versions"
+	@echo "make bitstream       - build the blinky/BRAM self-test bitstream via Windows Vivado"
+	@echo "make soc-bitstream   - build the hello-world SoC bitstream"
+	@echo "make bench-bitstream - build the Dhrystone/CoreMark SoC bitstream"
+	@echo "make elab            - Vivado elaboration check on rtl/core (TOP=<module>)"
+	@echo "make clean           - remove build/sim artifacts"
 
-models:
-	@$(MAKE) -s -C $(ROOT)/model/cref
-
-regress: models
+regress:
 	@$(ENV) $(PY) $(ROOT)/tb/run_regress.py
 
-regress-v: models
+regress-v:
 	@$(ENV) $(PY) $(ROOT)/tb/run_regress.py -v
 
 list:
@@ -42,9 +36,6 @@ lint:
 
 formal:
 	@$(ENV) $(PY) $(ROOT)/tb/run_regress.py -k formal
-
-model:
-	@$(ENV) $(PY) $(ROOT)/tb/run_regress.py -k model
 
 tools:
 	@$(ENV) echo "verilator : $$(verilator --version 2>&1 | head -1)"; \
@@ -59,15 +50,20 @@ bitstream:
 	@$(ROOT)/fpga/scripts/gen_bram_init.py
 	@$(ROOT)/fpga/scripts/build_fpga.sh
 
-# Plan A1's "Done when" requires the package to elaborate under Vivado as well
-# as lint under Verilator; the two front ends disagree often enough on packages,
-# structs and array initialisation that this is a real check, not a formality.
-#
-# Deliberately NOT in `make regress`: it needs the Windows Vivado over the
-# WSL interop socket, which the agent sandbox blocks, and a regression that
-# cannot run its own test would report SKIP -- which is exactly the
-# green-looking-but-vacuous outcome the root CLAUDE.md warns about.  Same
-# precedent as `make bitstream`.
+# The Vivado flows need the Windows Vivado over the WSL interop socket and are
+# deliberately not part of `make regress`.  Both SoC builds use the clock in
+# fpga/generated/soc_clk.svh (gen_soc_clk.py --mhz N to change it).
+soc-bitstream:
+	@$(ENV) $(PY) $(ROOT)/fpga/scripts/build_soc_image.py --out $(ROOT)/fpga/generated/soc_init.mem
+	@SOC_MEM=$(ROOT)/fpga/generated/soc_init.mem OUT=$(ROOT)/fpga/build/soc \
+	  bash $(ROOT)/fpga/scripts/build_soc.sh 1 1 explore_postroute
+
+bench-bitstream:
+	@$(ENV) $(PY) $(ROOT)/fpga/scripts/build_bench_image.py --out $(ROOT)/fpga/generated/bench.mem \
+	  --dhry-runs 2000000 --iterations 3300 --arch rv32imb --hpm
+	@SOC_MEM=$(ROOT)/fpga/generated/bench.mem OUT=$(ROOT)/fpga/build/bench \
+	  bash $(ROOT)/fpga/scripts/build_soc.sh 1 1 explore_postroute
+
 TOP ?= rvntt_regfile
 elab:
 	@$(ROOT)/fpga/scripts/elab_core.sh $(TOP)

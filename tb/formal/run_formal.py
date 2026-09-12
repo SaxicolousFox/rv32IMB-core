@@ -13,7 +13,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 sys.path.insert(0, os.path.join(ROOT, "tb"))
 from rtl_deps import with_deps   # noqa: E402
 
-SEARCH = ["rtl/common", "rtl/core", "rtl/ntt", "rtl/soc"]
+SEARCH = ["rtl/common", "rtl/core", "rtl/soc"]
 
 def find_rtl(design):
     for d in SEARCH:

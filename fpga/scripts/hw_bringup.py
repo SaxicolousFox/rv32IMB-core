@@ -1,27 +1,13 @@
 #!/usr/bin/env python3
 """
-The hardware loop, with no human in it.  Built for A12; A13 reuses it verbatim
-with --parser, --seconds and --send-byte, because "program, capture, parse" is
-the same loop whatever program is in the BRAM.
+The hardware loop: program the Arty over JTAG, capture its UART, parse the
+capture.  Vivado's hardware manager runs in batch from WSL through cmd.exe; the
+COM port is opened by a PowerShell helper whose output file is read via /mnt/c.
+The program on the board repeats its report block forever, so the board is
+programmed first and the port opened afterwards.
 
-    program the board over JTAG  ->  capture the UART  ->  parse the capture
-
-Each of the three is something the agent side can drive: Vivado's hardware
-manager runs in batch from WSL through cmd.exe, and the COM port is opened by a
-PowerShell helper whose output file is readable through /mnt/c.  What is left for
-a person is the part that genuinely needs eyes: the LEDs, and deciding whether
-the board should be plugged in at all.
-
-Ordering note: the program on the board REPEATS its report block forever, so
-programming and capturing do not have to be interleaved.  The board is
-configured first and the port opened afterwards, which avoids having two
-processes racing for the FT2232.
-
-Exit codes follow the project's third-party-checkout convention (riscv_tests,
-riscof, riscv-formal): 0 with a `SOC_HW_SKIP:` line when the board or the
-bitstream is absent, 1 when hardware genuinely failed.  tb/run_regress.py reads
-that line and reports SKIP -- a missing board must never FAIL, and must never
-look like a passing test either.
+Exit codes: 0 with a `SOC_HW_SKIP:` line when the board or the bitstream is
+absent (the regression reports SKIP), 1 when hardware genuinely failed.
 """
 import argparse, os, re, subprocess, sys
 
@@ -35,20 +21,11 @@ STAGE_WSL  = os.environ.get("STAGE_WSL_HW", "/mnt/c/Users/liamf/rv32imb-core-hw"
 BIT_DEFAULT = os.path.join(ROOT, "fpga/build/soc/rvntt_soc_top.bit")
 PARSER_DEFAULT = os.path.join(ROOT, "tb/fpga/parse_soc_uart.py")
 
-# Every directory whose contents end up inside a bitstream.  Used only for the
-# stale-bitstream warning below, but it has to be complete: a source tree that is
-# newer than the .bit and is NOT listed here is precisely the case the warning
-# exists to catch, and A13 added sw/bench/ and a second generated image.
+# Every directory whose contents end up inside a bitstream, for the
+# stale-bitstream warning.  The upstream checkouts are pristine by policy.
 SOURCE_DIRS = ("rtl", "sw/soc", "sw/bench", "fpga/constraints", "fpga/generated",
-               # A13 and A16 compile these UPSTREAM checkouts directly into the
-               # image, so they belong in a list whose stated invariant is
-               # "every directory whose contents end up inside a bitstream".
-               # They are pristine by policy and will therefore never be newer
-               # than the .bit in practice -- which is the point: the list is
-               # complete, and stays quiet.
                "toolchain/riscv-tests/benchmarks/dhrystone",
-               "toolchain/coremark",
-               "toolchain/kyber/ref")
+               "toolchain/coremark")
 
 
 def run(cmd, **kw):
@@ -56,20 +33,13 @@ def run(cmd, **kw):
     return r.returncode, r.stdout.decode("utf-8", "replace")
 
 
-# The Arty's FT2232H exposes TWO interfaces on one USB device: channel A is the
-# JTAG programmer and channel B is the USB-UART bridge.  They share a serial
-# number with an A/B suffix, which is what makes this identification exact
-# rather than "some COM port exists" -- a USB modem or an Arduino would satisfy
-# the loose test and then fail confusingly at the first read.
+# The Arty's FT2232H: channel A is JTAG, channel B is the USB-UART bridge.
 ARTY_PNP = "FTDIBUS*VID_0403+PID_6010*"
 
 
 def find_arty_port():
-    """The Arty's COM port (e.g. 'COM7'), or None if it is not plugged in.
-
-    PowerShell rather than Vivado: Vivado takes about forty seconds to tell you
-    the board is absent, and this runs on every regression.
-    """
+    """The Arty's COM port (e.g. 'COM7'), or None.  PowerShell rather than
+    Vivado, which takes ~40 s to report an absent board."""
     rc, out = run(["powershell.exe", "-NoProfile", "-Command",
                    "Get-CimInstance Win32_PnPEntity | Where-Object { "
                    "$_.PNPDeviceID -like '%s' -and $_.Name -match 'COM[0-9]+' } "
@@ -88,9 +58,7 @@ def program(bit):
     with open(bit, "rb") as a, open(os.path.join(STAGE_WSL, "soc.bit"), "wb") as b:
         b.write(a.read())
 
-    # -log/-journal MUST precede -tclargs: everything after -tclargs is handed to
-    # the script as argv.  Getting this backwards is a trap this project has
-    # already paid for once (see fpga/scripts/elab_core.sh).
+    # -log/-journal must precede -tclargs: everything after -tclargs is argv.
     cmd = ("cd /d %s && %s -mode batch -log program.log -journal program.jou "
            "-source program_soc.tcl -tclargs %s"
            % (STAGE_WIN, VIVADO_WIN, win_bit.replace("\\", "/")))
@@ -128,9 +96,6 @@ def main() -> int:
     ap.add_argument("--seconds", type=int, default=8)
     ap.add_argument("--send-byte", type=lambda s: int(s, 0), default=0x5A,
                     help="byte to inject into the UART; -1 to send nothing")
-    # A13 runs the same program-capture-parse loop over a different program, so
-    # the checker is an argument rather than a second copy of this file.  The
-    # default keeps A12's behaviour exactly.
     ap.add_argument("--parser", default=PARSER_DEFAULT)
     ap.add_argument("--parser-arg", action="append", default=None,
                     help="extra argument for the parser; repeatable")
@@ -143,11 +108,7 @@ def main() -> int:
                     help="skip unless RVNTT_HW=1 (used by the regression)")
     a = ap.parse_args()
 
-    # Opt-in from the regression.  Running this reconfigures the FPGA, which is a
-    # side effect `make regress` has no business having by default -- the board
-    # may be showing something else, and a test that silently reprograms hardware
-    # is a surprise, not a check.  It still SKIPs loudly, so it cannot rot into
-    # "we have no hardware test".
+    # Opt-in from the regression: this reconfigures the FPGA.
     if a.regress and os.environ.get("RVNTT_HW") != "1":
         print("SOC_HW_SKIP: opt-in -- this test PROGRAMS the Arty over JTAG.\n"
               "  Plug the board in, then:  RVNTT_HW=1 python3 tb/run_regress.py\n"
@@ -161,12 +122,8 @@ def main() -> int:
               "  and a USB-UART bridge) and re-run.")
         return 0
     print("=== Arty found on %s ===" % port)
-    # Age check.  The bitstream is a build artifact and hw_bringup is usually run
-    # straight after a build; one that is much older than the newest source is
-    # almost certainly a leftover from a build that failed.  Warn rather than
-    # refuse -- deliberately reprogramming an older bitstream is legitimate --
-    # but say so, because "I rebuilt and reprogrammed" silently becoming "I
-    # reprogrammed the previous design" is very hard to notice from the output.
+    # A bitstream older than the newest source is probably a leftover from a
+    # build that failed timing (which writes no .bit).  Warn, do not refuse.
     if not a.no_program and os.path.exists(a.bit):
         newest = 0.0
         for d in SOURCE_DIRS:

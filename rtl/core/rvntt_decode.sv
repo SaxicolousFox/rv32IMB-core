@@ -1,46 +1,21 @@
 // ============================================================================
-// rvntt_decode -- the RV32IM + B + Zbkb + Zicond + Zicsr + Xkntt instruction
-// decoder (plan A3).
+// rvntt_decode -- the RV32IM + B + Zbkb + Zicond + Zicsr instruction decoder.
 //
-// Combinational.  Produces the ctrl_t bundle plus the four register addresses.
+// Combinational.  Produces the ctrl_t bundle plus the three register
+// addresses.  Compared bit for bit against model/rv32i_ref.py over 10^6
+// random words, so legality is the point: anything outside
+// rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr is illegal.
 //
-// LEGALITY IS THE POINT OF THIS MODULE.  A3 compares it against a Python
-// decoder over 10^6 random 32-bit words, and at that scale nearly every word is
-// illegal, so the interesting question is not "does ADD decode" but "does this
-// module agree, bit for bit, on exactly which words are rejected".  Three rules
-// govern that, and they are not the same rule:
+//   * OP with funct7 = 0000001 (M) is legal for all eight funct3 values.  B,
+//     Zbkb and Zicond are legal only at their exact (funct7, funct3) pairs,
+//     and the OP-IMM unary forms only at their exact rs2.  Every other pair
+//     is illegal.  No Zifencei, so FENCE.I is illegal.
+//   * FENCE's fm/pred/succ/rs1/rd fields are ignored, as the base ISA
+//     mandates.  ECALL/EBREAK/MRET/WFI require rd = rs1 = 0.
+//   * An illegal instruction produces exactly the reset bundle: the whole
+//     ctrl_t is cleared at the bottom, not just the side-effect flags.
 //
-//   1. Xkntt reserved fields are STRICT.  docs/isa-spec.md "Decode rules" 3:
-//      a register field an instruction does not use is reserved, and a nonzero
-//      value is an illegal instruction, not a don't-care.  `kntt.wait rd` with
-//      a nonzero rs1 is illegal.  This is what model/isa/xkntt.py enforces, and
-//      the four-way agreement (RTL, Python, Spike, LLVM) is defined on it.
-//
-//   2. Base RV32I FENCE fields are NOT strict.  The base ISA says the fm, pred,
-//      succ, rs1 and rd fields of FENCE are reserved for future finer-grain
-//      fences and that base implementations SHALL IGNORE them.  Ignoring is
-//      spec-mandated, so a nonzero value there is legal.  Copying rule 1 onto
-//      FENCE would diverge from Spike, which is A5's reference.
-//
-//   3. Anything outside the ISA string is illegal.  The core is
-//      rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr_xkntt0p1
-//      (tb/cosim/spike_asm.py ISA_XKNTT).  M IS in it as of A14, so OP with
-//      funct7 = 0000001 is legal for all eight funct3 values.  B, Zbkb and
-//      Zicond (A21, A22) are legal only at the exact (funct7, funct3) pairs in
-//      the bm_op_r table below, and the OP-IMM unary forms only at their exact
-//      rs2; every other pair in OP remains illegal.  No Zifencei, so FENCE.I
-//      is still illegal.
-//
-// An illegal instruction produces EXACTLY the reset bundle.  The whole ctrl_t
-// is cleared at the bottom of the always_comb, not just the side-effect flags:
-// several arms set result_sel or imm_fmt before legality is known, and leaving
-// those at whatever the arm assigned makes "illegal" mean something slightly
-// different in every opcode.  Stating it once, totally, is both easier to prove
-// and impossible for the Python model to disagree with on a don't-care field --
-// which it did, before this was total.
-//
-// Package references are fully qualified with no `import`: see the note in
-// rvntt_alu.sv.  Yosys rejects every import form.
+// Package references are fully qualified with no `import` (Yosys).
 // ============================================================================
 `default_nettype none
 
@@ -50,39 +25,27 @@ module rvntt_decode
     output       rv32i_pkg::ctrl_t ctrl,
     output logic [4:0]        rd_addr,
     output logic [4:0]        rs1_addr,
-    output logic [4:0]        rs2_addr,
-    output logic [4:0]        rs3_addr
+    output logic [4:0]        rs2_addr
 );
 
   wire [6:0]  opcode  = insn[6:0];
   wire [2:0]  funct3  = insn[14:12];
   wire [6:0]  funct7  = insn[31:25];
-  wire [1:0]  funct2  = insn[26:25];
   wire [11:0] funct12 = insn[31:20];
 
   assign rd_addr  = insn[11:7];
   assign rs1_addr = insn[19:15];
   assign rs2_addr = insn[24:20];
-  assign rs3_addr = insn[31:27];
 
   // A funct7 of 0000000 or 0100000 -- the only two the base ISA uses.
   wire f7_base = (funct7 == rv32i_pkg::F7_BASE);
   wire f7_alt  = (funct7 == rv32i_pkg::F7_ALT);
 
-  // ---- A21: B (Zba + Zbb + Zbs) and Zbkb ----------------------------------
-  // Two decoders, one per opcode space, each yielding BM_NONE when the word is
-  // not a bit-manipulation instruction.  They run unconditionally and their
-  // results are consulted inside the OP and OP-IMM arms, which keeps the
-  // encoding tables in one place instead of scattered through the case tree.
-  //
-  // WHY THIS IS A TABLE AND NOT A NEST OF CONDITIONS.  Every row below was read
-  // off docs/RISC-V_NTT_MODS_A2.txt Appendix A, which was generated by the
-  // assembler.  Written as a flat list it can be diffed against that table by
-  // eye; written as nested ifs it cannot.
-  //
-  // `insn[24:20]` is the rs2 FIELD, and in OP-IMM it is not a register -- it is
-  // part of the opcode for the unary instructions, which is the one place a
-  // don't-care would silently accept illegal encodings (MODS_A2 section 3.1).
+  // ---- B (Zba + Zbb + Zbs), Zbkb and Zicond --------------------------------
+  // Two flat tables, one per opcode space, yielding BM_NONE when the word is
+  // not a bit-manipulation instruction; consulted inside the OP and OP-IMM
+  // arms.  In OP-IMM `insn[24:20]` is part of the opcode for the unary forms,
+  // not a register.
   wire [4:0] imm_rs2 = insn[24:20];
 
   rv32i_pkg::bm_op_e bm_op_r;      // the OP (register-register) forms
@@ -92,9 +55,8 @@ module rvntt_decode
       {rv32i_pkg::F7_ZBA_SHADD,  3'b010}: bm_op_r = rv32i_pkg::BM_SH1ADD;
       {rv32i_pkg::F7_ZBA_SHADD,  3'b100}: bm_op_r = rv32i_pkg::BM_SH2ADD;
       {rv32i_pkg::F7_ZBA_SHADD,  3'b110}: bm_op_r = rv32i_pkg::BM_SH3ADD;
-      // funct7 0100000 is SHARED with SUB and SRA.  Those are funct3 000 and
-      // 101; these three are 100, 110 and 111, so the spaces are disjoint and
-      // the base arms below keep their own funct7 checks unchanged.
+      // funct7 0100000 is shared with SUB (000) and SRA (101); these three use
+      // 100, 110 and 111, so the spaces are disjoint.
       {rv32i_pkg::F7_ALT,        3'b100}: bm_op_r = rv32i_pkg::BM_XNOR;
       {rv32i_pkg::F7_ALT,        3'b110}: bm_op_r = rv32i_pkg::BM_ORN;
       {rv32i_pkg::F7_ALT,        3'b111}: bm_op_r = rv32i_pkg::BM_ANDN;
@@ -108,16 +70,10 @@ module rvntt_decode
       {rv32i_pkg::F7_ZBS_BCLR,   3'b001}: bm_op_r = rv32i_pkg::BM_BCLR;
       {rv32i_pkg::F7_ZBS_BCLR,   3'b101}: bm_op_r = rv32i_pkg::BM_BEXT;
       {rv32i_pkg::F7_ZBS_BINV,   3'b001}: bm_op_r = rv32i_pkg::BM_BINV;
-      // zext.h IS pack with rs2 = x0 -- not a separate encoding, and not a
-      // special case here either: pack rd, rs1, x0 computes {16'b0, rs1[15:0]},
-      // which is what zext.h means.  Decoding it as BM_PACK is therefore
-      // correct rather than a shortcut, and it is why no BM_ZEXTH row appears
-      // in this table even though the operation exists in the unit.
+      // zext.h is pack with rs2 = x0 -- the same encoding, so no BM_ZEXTH row.
       {rv32i_pkg::F7_ZBKB_PACK,  3'b100}: bm_op_r = rv32i_pkg::BM_PACK;
       {rv32i_pkg::F7_ZBKB_PACK,  3'b111}: bm_op_r = rv32i_pkg::BM_PACKH;
-      // Zicond (A22).  One funct7, two funct3 values; 000-100 and 110 under
-      // this funct7 stay illegal, which is what keeps the reserved-field rule
-      // intact for the newest extension as well as the older ones.
+      // Zicond: funct3 000-100 and 110 under this funct7 stay illegal.
       {rv32i_pkg::F7_ZICOND,     3'b101}: bm_op_r = rv32i_pkg::BM_CZEQZ;
       {rv32i_pkg::F7_ZICOND,     3'b111}: bm_op_r = rv32i_pkg::BM_CZNEZ;
       default: bm_op_r = rv32i_pkg::BM_NONE;
@@ -128,10 +84,8 @@ module rvntt_decode
   always_comb begin
     bm_op_i = rv32i_pkg::BM_NONE;
     unique case ({funct7, funct3})
-      // The unary group.  These five share opcode, funct3 AND imm[11:5]
-      // entirely and differ ONLY in the rs2 field, so it is decoded exactly --
-      // values 3, 6 and 7 fall through to BM_NONE and therefore to illegal,
-      // which is the whole point.
+      // The unary group shares opcode, funct3 and imm[11:5] and differs only
+      // in the rs2 field; values 3, 6 and 7 fall through to illegal.
       {rv32i_pkg::F7_ZBB_ROT, 3'b001}:
         unique case (imm_rs2)
           rv32i_pkg::RS2_CLZ:   bm_op_i = rv32i_pkg::BM_CLZ;
@@ -171,10 +125,8 @@ module rvntt_decode
 
   always_comb begin
     // Default: illegal, everything else zero.  Every enum in ctrl_t has a
-    // member at encoding 0 (ALU_ADD, IMM_NONE, SRCA_RS1, SRCB_RS2, RES_ALU,
-    // XK_NONE), so '0 is a well-defined, meaningful reset rather than an
-    // arbitrary bit pattern.  Written as '0 and not '{default: '0}: Yosys
-    // rejects the latter (see rtl/core/CLAUDE.md).
+    // member at encoding 0, so '0 is a well-defined reset.  ('0 rather than
+    // '{default: '0}, which Yosys rejects.)
     ctrl = '0;
     ctrl.is_illegal = 1'b1;
 
@@ -202,8 +154,8 @@ module rvntt_decode
       end
 
       // ------------------------------------------------------------- JAL
-      // The ALU computes the TARGET (pc + imm); the link value pc+4 comes from
-      // result_sel, not from the ALU.  A8 consumes both.
+      // The ALU computes the target (pc + imm); the link value comes from
+      // result_sel.
       rv32i_pkg::OPC_JAL: begin
         ctrl.reg_write  = 1'b1;
         ctrl.jump       = 1'b1;
@@ -220,7 +172,7 @@ module rvntt_decode
         if (funct3 == 3'b000) begin
           ctrl.reg_write  = 1'b1;
           ctrl.jump       = 1'b1;
-          ctrl.jalr       = 1'b1;    // A8 must clear bit 0 of the target
+          ctrl.jalr       = 1'b1;    // EX must clear bit 0 of the target
           ctrl.uses_rs1   = 1'b1;
           ctrl.imm_fmt    = rv32i_pkg::IMM_I;
           ctrl.alu_op     = rv32i_pkg::ALU_ADD;
@@ -232,9 +184,8 @@ module rvntt_decode
       end
 
       // ---------------------------------------------------------- BRANCH
-      // The ALU computes pc + imm; the comparison is a separate comparator in
-      // EX (plan §1.6, built in A8), which is why alu_op is ADD here and not a
-      // compare.  funct3 010 and 011 are reserved.
+      // The ALU computes pc + imm; the comparison is rvntt_branch in EX.
+      // funct3 010 and 011 are reserved.
       rv32i_pkg::OPC_BRANCH: begin
         if (funct3 != 3'b010 && funct3 != 3'b011) begin
           ctrl.branch     = 1'b1;
@@ -287,12 +238,9 @@ module rvntt_decode
         ctrl.imm_fmt    = rv32i_pkg::IMM_I;
         ctrl.alu_src_b  = rv32i_pkg::SRCB_IMM;
         ctrl.result_sel = rv32i_pkg::RES_ALU;
-        // A21.  The B immediate forms share funct3 001 and 101 with SLLI,
-        // SRLI and SRAI and are separated only by imm[11:5], so they are
-        // decoded FIRST and the base arms below keep their own funct7 checks
-        // untouched.  A word that is neither falls through to those checks and
-        // therefore to illegal, which is what the strict reserved-field rule
-        // requires.
+        // The B immediate forms share funct3 001/101 with SLLI/SRLI/SRAI and
+        // are separated by imm[11:5], so they are decoded first; anything else
+        // falls through to the base funct7 checks.
         if (bm_op_i != rv32i_pkg::BM_NONE) begin
           ctrl.is_bitmanip = 1'b1;
           ctrl.bm_op       = bm_op_i;
@@ -306,10 +254,8 @@ module rvntt_decode
           rv32i_pkg::F3_XOR:     begin ctrl.alu_op = rv32i_pkg::ALU_XOR;  ctrl.is_illegal = 1'b0; end
           rv32i_pkg::F3_OR:      begin ctrl.alu_op = rv32i_pkg::ALU_OR;   ctrl.is_illegal = 1'b0; end
           rv32i_pkg::F3_AND:     begin ctrl.alu_op = rv32i_pkg::ALU_AND;  ctrl.is_illegal = 1'b0; end
-          // SLLI/SRLI/SRAI: the shift amount is insn[24:20], so insn[31:25]
-          // must be a valid funct7.  On RV32 insn[25] being set is exactly the
-          // RV64 shamt[5] case, and it is illegal here -- the f7 check covers
-          // it without a separate test.
+          // SLLI/SRLI/SRAI: insn[31:25] must be a valid funct7 (insn[25] set
+          // is the RV64 shamt[5] case, illegal here).
           rv32i_pkg::F3_SLL: begin
             ctrl.alu_op     = rv32i_pkg::ALU_SLL;
             ctrl.is_illegal = ~f7_base;
@@ -324,40 +270,21 @@ module rvntt_decode
 
       // -------------------------------------------------------------- OP
       // funct7 must be 0000000, except ADD/SUB and SRL/SRA which also take
-      // 0100000, and the M extension (A14) which is 0000001.  Every OTHER
-      // funct7 still lands on the illegal path.
+      // 0100000, M (0000001), and the B/Zbkb/Zicond pairs in bm_op_r.
       rv32i_pkg::OPC_OP: begin
         ctrl.reg_write  = 1'b1;
         ctrl.uses_rs1   = 1'b1;
         ctrl.uses_rs2   = 1'b1;
         ctrl.alu_src_b  = rv32i_pkg::SRCB_RS2;
         ctrl.result_sel = rv32i_pkg::RES_ALU;
-        // M (A14) is a THIRD legal funct7 in OP, and it is total: all eight
-        // funct3 values exist, so this arm has no illegal case of its own.
-        // Rule 3 in the header changes here and nowhere else -- OP with
-        // funct7 = 0000001 used to be "outside the ISA string"; it is now
-        // inside it.  Every other funct7 stays illegal, which is what keeps
-        // the strict-reserved-field claim intact.
-        //
-        // result_sel stays RES_ALU: the product or quotient is delivered
-        // through rvntt_core's `ex_result`, the same field a Zicsr read uses,
-        // rather than through a new result_sel_e member.  rvntt_core.sv says
-        // why at length -- in short, a new member has to be added to TWO case
-        // statements that must agree, and the one time that was done the two
-        // disagreed and riscv-formal found it.
+        // M is total: all eight funct3 values exist.  result_sel stays RES_ALU
+        // because the product or quotient is delivered through ex_result.
         if (funct7 == rv32i_pkg::F7_MULDIV) begin
           ctrl.is_muldiv  = 1'b1;
           ctrl.muldiv_op  = funct3;
           ctrl.alu_op     = rv32i_pkg::ALU_ADD;   // the ALU is not consulted
           ctrl.is_illegal = 1'b0;
         end else
-        // A21.  B and Zbkb add seven more legal funct7 values here, one of
-        // which -- 0100000 -- was already legal for SUB and SRA at funct3 000
-        // and 101.  The three B instructions that share it use 100, 110 and
-        // 111, so the two sets are disjoint and this arm cannot steal an
-        // instruction from the base case below.  Everything still unmatched
-        // reaches that case and its funct7 checks, so every other funct7 in OP
-        // remains illegal.
         if (bm_op_r != rv32i_pkg::BM_NONE) begin
           ctrl.is_bitmanip = 1'b1;
           ctrl.bm_op       = bm_op_r;
@@ -384,9 +311,8 @@ module rvntt_decode
       end
 
       // -------------------------------------------------------- MISC-MEM
-      // FENCE only.  Its fm/pred/succ/rs1/rd fields are ignored, per the base
-      // ISA -- see rule 2 in the header.  FENCE.I is Zifencei, not in this
-      // core's ISA string, so it stays illegal.
+      // FENCE only; its fields are ignored per the base ISA.  FENCE.I is
+      // Zifencei and stays illegal.
       rv32i_pkg::OPC_MISC_MEM: begin
         if (funct3 == 3'b000) ctrl.is_illegal = 1'b0;   // decodes as a NOP
       end
@@ -394,9 +320,7 @@ module rvntt_decode
       // ---------------------------------------------------------- SYSTEM
       rv32i_pkg::OPC_SYSTEM: begin
         unique case (funct3)
-          // ECALL / EBREAK / MRET / WFI.  rd and rs1 are reserved here and must
-          // be zero -- unlike FENCE, the privileged spec gives these fixed
-          // encodings rather than ignorable fields.
+          // ECALL / EBREAK / MRET / WFI: rd and rs1 must be zero.
           rv32i_pkg::F3_PRIV: begin
             if (rd_addr == 5'd0 && rs1_addr == 5'd0) begin
               unique case (funct12)
@@ -408,8 +332,7 @@ module rvntt_decode
               endcase
             end
           end
-          // Zicsr, register form.  Which CSR numbers actually exist is A9's
-          // problem; the decoder only says "this is a CSR access".
+          // Zicsr, register form.  Which CSRs exist is rvntt_csr's concern.
           rv32i_pkg::F3_CSRRW, rv32i_pkg::F3_CSRRS, rv32i_pkg::F3_CSRRC: begin
             ctrl.is_csr     = 1'b1;
             ctrl.reg_write  = 1'b1;
@@ -418,10 +341,8 @@ module rvntt_decode
             ctrl.result_sel = rv32i_pkg::RES_CSR;
             ctrl.is_illegal = 1'b0;
           end
-          // Zicsr, immediate form.  rs1 is a 5-bit uimm, NOT a register, so
-          // uses_rs1 stays low -- otherwise the forwarding unit would stall on
-          // a phantom dependency that no test would ever show as wrong, only
-          // as a slightly worse IPC.
+          // Zicsr, immediate form.  rs1 is a uimm, not a register, so
+          // uses_rs1 stays low (a phantom dependency would only show as IPC).
           rv32i_pkg::F3_CSRRWI, rv32i_pkg::F3_CSRRSI, rv32i_pkg::F3_CSRRCI: begin
             ctrl.is_csr     = 1'b1;
             ctrl.reg_write  = 1'b1;
@@ -433,81 +354,12 @@ module rvntt_decode
         endcase
       end
 
-      // -------------------------------------------- Xkntt tier 1: custom-0
-      // funct3 selects the FORMAT as well as the operation: 3 and 4 are
-      // R4-type with funct2 at 26:25 and rs3 at 31:27, everything else is
-      // R-type with funct7 at 31:25.  That rule must be applied BEFORE bits
-      // 31:25 are interpreted (docs/isa-spec.md decode rule 1).
-      rv32i_pkg::OPC_CUSTOM_0: begin
-        ctrl.is_xkntt   = 1'b1;
-        ctrl.reg_write  = 1'b1;
-        ctrl.uses_rs1   = 1'b1;
-        ctrl.uses_rs2   = 1'b1;
-        ctrl.result_sel = rv32i_pkg::RES_XKNTT;
-        unique case (funct3)
-          rv32i_pkg::F3_KMM:    if (f7_base) begin ctrl.xkntt_op = rv32i_pkg::XK_KMM;    ctrl.is_illegal = 1'b0; end
-          rv32i_pkg::F3_KBFCT:  if (f7_base) begin ctrl.xkntt_op = rv32i_pkg::XK_KBFCT;  ctrl.is_illegal = 1'b0; end
-          rv32i_pkg::F3_KBFGS:  if (f7_base) begin ctrl.xkntt_op = rv32i_pkg::XK_KBFGS;  ctrl.is_illegal = 1'b0; end
-          rv32i_pkg::F3_KBMUL1: if (f7_base) begin ctrl.xkntt_op = rv32i_pkg::XK_KBMUL1; ctrl.is_illegal = 1'b0; end
-          rv32i_pkg::F3_KBMUL0: if (funct2 == 2'b00) begin
-            ctrl.xkntt_op = rv32i_pkg::XK_KBMUL0; ctrl.uses_rs3 = 1'b1; ctrl.is_illegal = 1'b0; end
-          rv32i_pkg::F3_KMAC:   if (funct2 == 2'b00) begin
-            ctrl.xkntt_op = rv32i_pkg::XK_KMAC;   ctrl.uses_rs3 = 1'b1; ctrl.is_illegal = 1'b0; end
-          default: ;   // funct3 6 and 7 are unassigned in custom-0
-        endcase
-      end
-
-      // -------------------------------------------- Xkntt tier 2: custom-1
-      // All R-type.  The register fields an instruction does not use are
-      // RESERVED and must be zero -- rule 1 in the header.  This is the block
-      // that makes a strict and a lax decoder disagree on random words.
-      rv32i_pkg::OPC_CUSTOM_1: begin
-        ctrl.is_xkntt = 1'b1;
-        unique case (funct3)
-          // kntt.cfg rs1, rs2 -- writes no register, so rd is reserved.
-          rv32i_pkg::F3_KNTT_CFG: if (f7_base && rd_addr == 5'd0) begin
-            ctrl.xkntt_op = rv32i_pkg::XK_NTT_CFG;
-            ctrl.uses_rs1 = 1'b1;
-            ctrl.uses_rs2 = 1'b1;
-            ctrl.is_illegal = 1'b0;
-          end
-          // kntt.start rd, rs1 -- rs2 is reserved.
-          rv32i_pkg::F3_KNTT_START: if (f7_base && rs2_addr == 5'd0) begin
-            ctrl.xkntt_op = rv32i_pkg::XK_NTT_START;
-            ctrl.uses_rs1 = 1'b1;
-            ctrl.reg_write = 1'b1;
-            ctrl.result_sel = rv32i_pkg::RES_XKNTT;
-            ctrl.is_illegal = 1'b0;
-          end
-          // kntt.wait rd / kntt.stat rd -- both rs1 and rs2 are reserved.
-          rv32i_pkg::F3_KNTT_WAIT: if (f7_base && rs1_addr == 5'd0 && rs2_addr == 5'd0) begin
-            ctrl.xkntt_op = rv32i_pkg::XK_NTT_WAIT;
-            ctrl.reg_write = 1'b1;
-            ctrl.result_sel = rv32i_pkg::RES_XKNTT;
-            ctrl.is_illegal = 1'b0;
-          end
-          rv32i_pkg::F3_KNTT_STAT: if (f7_base && rs1_addr == 5'd0 && rs2_addr == 5'd0) begin
-            ctrl.xkntt_op = rv32i_pkg::XK_NTT_STAT;
-            ctrl.reg_write = 1'b1;
-            ctrl.result_sel = rv32i_pkg::RES_XKNTT;
-            ctrl.is_illegal = 1'b0;
-          end
-          default: ;   // funct3 4..7 are unassigned in custom-1
-        endcase
-      end
-
       default: ;   // unlisted opcode, including every word with insn[1:0] != 11
     endcase
 
-    // An illegal instruction must have NO architectural effect.  The whole
-    // bundle is reset, not just the side-effect flags: several arms above set
-    // result_sel, imm_fmt or alu_op before legality is known, and leaving those
-    // at whatever the arm happened to assign makes "illegal" mean something
-    // slightly different in every opcode.  A total reset makes the rule total,
-    // which is both easier to state and easier to prove -- and it is what the
-    // Python model does, so the two cannot disagree on a don't-care field.
-    // (They did: an illegal custom-0 word left result_sel = RES_XKNTT in the
-    // RTL and RES_ALU in the model, which the 10^6-word comparison found.)
+    // An illegal instruction has no architectural effect: the whole bundle is
+    // reset, so "illegal" means the same thing in every opcode and the Python
+    // model cannot disagree on a don't-care field.
     if (ctrl.is_illegal) begin
       ctrl = '0;
       ctrl.is_illegal = 1'b1;
@@ -515,14 +367,9 @@ module rvntt_decode
   end
 
 `ifdef FORMAL
-  // Structural invariants.  These hold for EVERY 32-bit word, which is a
-  // stronger statement than the 10^6-word random comparison can make, and they
-  // are the properties whose violation would be hardest to spot in a diff.
+  // Structural invariants over every 32-bit word.
 
-  // 1. An illegal instruction produces EXACTLY the reset bundle -- every field,
-  //    not just the side-effect flags.  Comparing against a constructed value
-  //    makes this total, so adding a ctrl_t field cannot quietly fall outside
-  //    the property the way a hand-listed set of fields would.
+  // 1. An illegal instruction produces exactly the reset bundle.
   rv32i_pkg::ctrl_t f_reset_ctrl;
   always_comb begin
     f_reset_ctrl = '0;
@@ -530,31 +377,10 @@ module rvntt_decode
   end
   always_comb if (ctrl.is_illegal) assert (ctrl == f_reset_ctrl);
 
-  // 2. Anything that is not a 32-bit instruction encoding is illegal.  The
-  //    core implements no compressed extension, so insn[1:0] != 11 must never
-  //    decode to anything.
+  // 2. No compressed extension: insn[1:0] != 11 never decodes.
   always_comb if (insn[1:0] != 2'b11) assert (ctrl.is_illegal);
 
-  // 3. A legal instruction always names its operand sources consistently: rs3
-  //    is only ever read by the two R4-type custom-0 operations, and only those
-  //    two ever set uses_rs3.
-  always_comb if (ctrl.uses_rs3) begin
-    assert (ctrl.xkntt_op == rv32i_pkg::XK_KBMUL0 ||
-            ctrl.xkntt_op == rv32i_pkg::XK_KMAC);
-    assert (opcode == rv32i_pkg::OPC_CUSTOM_0);
-  end
-
-  // 4. Only an Xkntt instruction may carry an Xkntt operation, and every legal
-  //    Xkntt instruction must name one.  A custom opcode that decoded legal
-  //    with XK_NONE would silently execute as a no-op.
-  always_comb begin
-    if (ctrl.xkntt_op != rv32i_pkg::XK_NONE) assert (ctrl.is_xkntt);
-    if (ctrl.is_xkntt && !ctrl.is_illegal)   assert (ctrl.xkntt_op != rv32i_pkg::XK_NONE);
-    if (ctrl.is_xkntt) assert (opcode == rv32i_pkg::OPC_CUSTOM_0 ||
-                               opcode == rv32i_pkg::OPC_CUSTOM_1);
-  end
-
-  // 5. result_sel and the side-effect flags cannot contradict each other.
+  // 3. result_sel and the side-effect flags cannot contradict each other.
   always_comb if (!ctrl.is_illegal) begin
     if (ctrl.mem_read)  assert (ctrl.result_sel == rv32i_pkg::RES_MEM);
     if (ctrl.result_sel == rv32i_pkg::RES_MEM) assert (ctrl.mem_read);
@@ -569,32 +395,24 @@ module rvntt_decode
     if (ctrl.jalr) assert (ctrl.jump);
   end
 
-  // 6. The immediate-form CSR instructions must not claim to read rs1: that
-  //    field is a uimm.  A phantom dependency here would never show up as a
-  //    wrong answer, only as unexplained stalls and a worse IPC number.
+  // 4. The immediate-form CSR instructions do not claim to read rs1.
   always_comb if (ctrl.is_csr && ctrl.imm_fmt == rv32i_pkg::IMM_Z)
     assert (!ctrl.uses_rs1);
 
-  // 7. A MULTI-CYCLE INSTRUCTION IS NEVER A MEMORY OPERATION (A14), and this
-  //    is the property rvntt_core relies on to leave its store path ungated by
-  //    ex_stall.  That gate would sit on the design's critical path, so the
-  //    invariant is proved here instead of paid for there -- and if it ever
-  //    stops holding, a store would be replayed once per stall cycle.
-  //    Also stated: a multi-cycle instruction writes a register through
-  //    RES_ALU, which is what lets the two result muxes in rvntt_core stay
-  //    untouched by A14.
+  // 5. A multi-cycle instruction is never a memory operation.  rvntt_core
+  //    relies on this to leave its store path ungated by ex_stall (that gate
+  //    would sit on the critical path); it also writes through RES_ALU.
   always_comb if (ctrl.is_muldiv) begin
     assert (!ctrl.is_illegal);
     assert (!ctrl.mem_read && !ctrl.mem_write);
-    assert (!ctrl.branch && !ctrl.jump && !ctrl.is_csr && !ctrl.is_xkntt);
+    assert (!ctrl.branch && !ctrl.jump && !ctrl.is_csr);
     assert (!ctrl.is_ecall && !ctrl.is_ebreak && !ctrl.is_mret);
     assert (ctrl.reg_write && ctrl.result_sel == rv32i_pkg::RES_ALU);
-    assert (ctrl.uses_rs1 && ctrl.uses_rs2 && !ctrl.uses_rs3);
+    assert (ctrl.uses_rs1 && ctrl.uses_rs2);
     assert (opcode == rv32i_pkg::OPC_OP && funct7 == rv32i_pkg::F7_MULDIV);
     assert (ctrl.muldiv_op == funct3);
   end
-  //    ... and the converse: the M funct7 in OP is ALWAYS the multi-cycle unit,
-  //    so no M encoding can slip through as something else.
+  //    ... and the converse: the M funct7 in OP is always the multi-cycle unit.
   always_comb if (opcode == rv32i_pkg::OPC_OP && funct7 == rv32i_pkg::F7_MULDIV)
     assert (ctrl.is_muldiv);
 `endif

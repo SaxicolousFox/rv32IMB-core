@@ -15,7 +15,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "tb"))
 from rtl_deps import with_deps   # noqa: E402
 INC  = ["-I" + os.path.join(ROOT, d)
-        for d in ("rtl/common", "rtl/core", "rtl/ntt", "rtl/soc", "fpga/generated")]
+        for d in ("rtl/common", "rtl/core", "rtl/soc", "fpga/generated")]
 
 # Files that cannot be linted standalone because they need an include that only
 # makes sense once elaborated (e.g. the generated bram_expected.svh).

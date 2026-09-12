@@ -1,40 +1,29 @@
 // ============================================================================
-// rvntt_seed -- Zkr's `seed` CSR (0x015) and its state machine (MODS_A2 A29,
-// piece 3), with the noise source and the health tests underneath it.
+// rvntt_seed -- Zkr's `seed` CSR (0x015) and its state machine, with the noise
+// source and the health tests underneath it.
 //
-// `seed` IS NOT A NORMAL CSR, and every one of these is a way to get it wrong:
+//   * `seed` is read-write-only: an access that does not write is illegal
+//     (rvntt_csr enforces it), and the written value is ignored.
+//   * A successful ES16 read consumes the entropy and empties the buffer.
+//   * Status in [31:30], entropy in [15:0], [29:16] read zero.
+//   * DEAD latches until reset.
 //
-//   * It is READ-WRITE-ONLY.  An access that does not WRITE is an illegal
-//     instruction -- so `csrrs rd, seed, x0`, the ordinary way to read a CSR,
-//     traps.  Software must use `csrrw`/`csrrwi`, or `csrrs`/`csrrc` with a
-//     non-zero source.  The write's VALUE is ignored; requiring the write is
-//     how the architecture makes "reading is destructive" impossible to do by
-//     accident.  rvntt_csr.sv enforces this, because only it sees `wen`.
-//   * A successful read CONSUMES the entropy.  Two consecutive ES16 reads must
-//     not return the same bits from the same buffer.
-//   * The status lives in [31:30] and the entropy in [15:0]; [29:16] are
-//     reserved and read zero.
-//   * DEAD LATCHES.  Once a health test fails the source is out of service
-//     until reset -- which is both Zkr's requirement and SP 800-90B's.
+//   BIST -- from reset, while BIST_SAMPLES pass the continuous tests
+//   WAIT -- live, fewer than 16 bits buffered
+//   ES16 -- 16 bits ready; a read returns them and empties the buffer
+//   DEAD -- a health test failed; terminal
 //
-// STATE MACHINE
+// There is no cryptographic conditioning and no measured entropy rate: sixteen
+// raw samples are shifted into a register and returned.  The source is
+// UNCERTIFIED (see the README).
 //
-//   BIST -- from reset, while the start-up test runs.  SP 800-90B requires a
-//           run of samples to pass the continuous tests before the source is
-//           used; BIST_SAMPLES is that run.  Reads return BIST and no entropy.
-//   WAIT -- the source is live but fewer than 16 bits are buffered.
-//   ES16 -- 16 bits are ready.  A read returns them and empties the buffer.
-//   DEAD -- a health test failed.  Terminal.
+// The source is sampled only while refilling.  A correctly functioning source
+// trips the repetition cutoff about once per 2^20 samples by construction, and
+// DEAD latches; free-running at ~96 MHz that is eleven milliseconds.  Gating
+// the sampler moves the expected trip to 2^20/16 = 65 536 reads.  During BIST
+// the sampler free-runs.
 //
-// WHAT THIS DOES NOT DO, and it is in docs/a29-zkr.md as well because it is the
-// kind of gap that gets forgotten: there is NO CRYPTOGRAPHIC CONDITIONING.
-// Sixteen raw samples are shifted into a register and returned.  A certified
-// design would run a vetted conditioning component and claim an entropy rate
-// established by the SP 800-90B estimation track.  This claims nothing of the
-// sort -- see the uncertified statement.
-//
-// Package references are fully qualified with no `import`; Yosys rejects every
-// import form (rtl/core/CLAUDE.md).
+// Package references are fully qualified with no `import` (Yosys).
 // ============================================================================
 `default_nettype none
 
@@ -51,9 +40,8 @@ module rvntt_seed #(
     // The testbench's raw sample; ignored unless STUB.
     input  wire         stub_bit,
 
-    // A LEGAL seed access that reads -- i.e. a csrrw-class access to 0x015 that
-    // did not trap.  rvntt_csr.sv is what decides that; this module only
-    // consumes.  Asserted for exactly one cycle per access.
+    // A legal seed access that reads (a csrrw-class access to 0x015 that did
+    // not trap), asserted for exactly one cycle per access.
     input  wire         rd_en,
     output wire  [31:0] rdata
 );
@@ -65,31 +53,6 @@ module rvntt_seed #(
 
   localparam int BIST_W = $clog2(BIST_SAMPLES + 1);
 
-  // ==========================================================================
-  // THE SOURCE IS SAMPLED ONLY WHEN IT IS NEEDED, and that is not an
-  // optimisation -- it is what makes the design usable at all.
-  // ==========================================================================
-  // SP 800-90B's repetition-count cutoff is C = 1 + ceil(-log2(alpha)/H) with a
-  // recommended alpha of 2^-20, so a CORRECTLY FUNCTIONING source trips it
-  // about once every 2^20 samples BY CONSTRUCTION.  That is the standard's
-  // design point, not a defect in the source.
-  //
-  // Zkr's DEAD, however, LATCHES until reset.  Put those two facts together
-  // with a free-running sampler at 96.246 MHz and the entropy source takes
-  // itself permanently out of service after about ELEVEN MILLISECONDS of
-  // ordinary operation.  That was measured, not predicted: the ideal-source
-  // scenario in tb/unit/test_entropy_health.py went DEAD at 42 000 samples on
-  // a run of 23 identical bits, which for a fair coin is a perfectly ordinary
-  // 6% event over that length.
-  //
-  // Sampling only to refill the buffer costs 16 samples per seed read instead
-  // of one per clock, which moves the expected trip from 2^20 CYCLES to 2^20/16
-  // = 65 536 READS.  The limitation does not go away -- it cannot, without
-  // choosing a different alpha or giving up DEAD's latching -- and it is stated
-  // as a number in docs/a29-zkr.md rather than left to be discovered.
-  //
-  // During BIST the sampler free-runs, because the start-up test is a run of
-  // BIST_SAMPLES consecutive samples and gating it would make it take forever.
   wire want_sample;
   wire sample, sample_valid_raw;
   rvntt_entropy #(.STUB(STUB)) u_noise (
@@ -122,13 +85,12 @@ module rvntt_seed #(
   wire bist_done = (bist_q >= BIST_W'(BIST_SAMPLES));
   wire full      = (fill_q == 5'd16);
 
-  // Free-running through the start-up test, then only to refill.  DEAD stops it
-  // entirely: a source that is out of service must not keep consuming.
+  // Free-running through the start-up test, then only to refill; DEAD stops
+  // it entirely.
   assign want_sample = !dead_q && (!bist_done || !full);
 
-  // The read that consumes.  Only an ES16 read takes the bits: a read in BIST,
-  // WAIT or DEAD returns its status and leaves the buffer alone, which is what
-  // makes polling free.
+  // Only an ES16 read takes the bits; a read in BIST, WAIT or DEAD returns
+  // its status and leaves the buffer alone.
   wire consume = rd_en && bist_done && !dead_q && full;
 
   always_ff @(posedge clk or negedge rst_n) begin
@@ -138,18 +100,13 @@ module rvntt_seed #(
       fill_q <= 5'd0;
       dead_q <= 1'b0;
     end else begin
-      // DEAD is checked first and set unconditionally: a failure during BIST is
-      // still a failure, and the start-up test is exactly the window in which
-      // it is most likely.
+      // A failure during BIST is still a failure.
       if (health_fail) dead_q <= 1'b1;
 
       if (!bist_done && sample_valid) bist_q <= bist_q + BIST_W'(1);
 
-      // The buffer empties on the consuming read and fills from the source.
-      // Both can happen in the same cycle -- the source free-runs and does not
-      // know about reads -- so the fill is computed from the POST-consume
-      // count rather than being an else-if, which would drop a sample every
-      // time software polled at the wrong moment.
+      // The consuming read and a fill can coincide, so the fill is computed
+      // from the post-consume count rather than as an else-if.
       if (consume) begin
         fill_q <= sample_valid ? 5'd1 : 5'd0;
         buf_q  <= {15'h0, sample};
@@ -168,8 +125,8 @@ module rvntt_seed #(
     else                 status = ST_WAIT;
   end
 
-  // [29:16] are reserved and read zero; entropy appears ONLY with ES16, so a
-  // status misread cannot hand software stale bits and have them look fresh.
+  // Entropy appears only with ES16, so a status misread cannot hand software
+  // stale bits.
   assign rdata = {status, 14'h0, (status == ST_ES16) ? buf_q : 16'h0};
 
 `ifdef FORMAL
@@ -178,26 +135,22 @@ module rvntt_seed #(
 
   always_ff @(posedge clk) begin
     if (f_past_valid && $past(rst_n) && rst_n) begin
-      // 1. DEAD IS TERMINAL.  The whole security value of a health test is that
-      //    a failed source cannot come back.
+      // 1. DEAD is terminal.
       if ($past(dead_q)) a_dead_latches: assert (dead_q);
 
-      // 2. A HEALTH FAILURE REACHES DEAD IMMEDIATELY, not eventually.
+      // 2. A health failure reaches DEAD immediately.
       if ($past(health_fail)) a_fail_means_dead: assert (dead_q);
 
-      // 3. A CONSUMING READ EMPTIES THE BUFFER.  Without this, two reads in a
-      //    row return the same 16 bits and software cannot tell -- the exact
-      //    failure that makes an RNG look like it works.
+      // 3. A consuming read empties the buffer.
       if ($past(consume)) a_read_consumes: assert (fill_q <= 5'd1);
     end
   end
 
   always_comb begin
-    // 4. ENTROPY ONLY WITH ES16.  Reserved bits zero, and no bits at all in
-    //    BIST, WAIT or DEAD.
+    // 4. Entropy only with ES16; reserved bits zero.
     a_reserved_zero: assert (rdata[29:16] == 14'h0);
     if (rdata[31:30] != ST_ES16) a_no_bits_unless_es16: assert (rdata[15:0] == 16'h0);
-    // 5. DEAD OUTRANKS EVERYTHING, including a full buffer.
+    // 5. DEAD outranks everything, including a full buffer.
     if (dead_q) a_dead_status: assert (rdata[31:30] == ST_DEAD);
     a_fill_bounded: assert (fill_q <= 5'd16);
   end

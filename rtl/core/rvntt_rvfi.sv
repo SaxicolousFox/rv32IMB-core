@@ -1,44 +1,18 @@
 // ============================================================================
-// rvntt_rvfi -- the RISC-V Formal Interface port (A11).
+// rvntt_rvfi -- the RISC-V Formal Interface port.
 //
-// riscv-formal attaches a monitor to a standardised retirement port and checks
-// each retired instruction against a formal model of the ISA.  Plan A11 says to
-// "wire it out of your existing commit tracer -- the information is the same, in
-// a standardized form".  IT IS NOT THE SAME, and the difference is the whole
-// reason this is a module rather than a handful of assigns:
+// riscv-formal requires a trapping instruction to be reported with rvfi_trap
+// set, but rvntt_core squashes a faulting instruction in EX (which keeps the
+// commit log comparable with Spike and minstret correct).  So this module
+// carries a second, parallel report path: two shadow registers loaded on the
+// same edges as ex_mem_q and mem_wb_q, so the trap report emerges in the
+// bubble the squashed instruction leaves behind.  rvfi_order counts trapped
+// instructions (minstret does not) and is its own register.
 //
-//   * riscv-formal requires a TRAPPING instruction to be reported, with
-//     rvfi_trap set.  rvntt_core squashes a faulting instruction in EX (its
-//     "trap invariant"), so it never reaches WB and never appears in the commit
-//     stream at all.  That squash is load-bearing -- it is what keeps the commit
-//     log comparable with Spike, which prints no line for a trapping
-//     instruction, and what makes minstret correct without an in-flight
-//     correction -- so it is NOT unpicked here.  Instead this module carries a
-//     SECOND, parallel report path for the trapped instruction.
-//
-//   * rvfi_order must count trapped instructions.  minstret deliberately does
-//     not.  Deriving one from the other would be wrong in exactly the case that
-//     matters, so the order counter is its own register.
-//
-// THE TRAPPED INSTRUCTION FITS IN THE HOLE IT LEAVES BEHIND.  An instruction
-// that traps in EX at cycle T clears ex_mem_q at the end of T, so mem_wb_q is a
-// bubble at T+2 -- precisely the cycle that instruction would have retired.
-// This module's two shadow registers are loaded on the same edges as ex_mem_q
-// and mem_wb_q, so the trap report emerges in that empty slot.  NRET is 1 and
-// the two paths can never collide; the assertions at the bottom say so rather
-// than leaving it as a comment.
-//
-// WHAT COMES FROM THE REAL PIPELINE AND WHAT COMES FROM THE SHADOW.  Everything
-// that still exists at WB is taken from the pipeline registers the core
-// actually uses -- pc, insn, and the register file's own write port -- so that
-// RVFI reports what the machine did rather than what a parallel copy predicted.
-// Only what has no later copy is shadowed: the forwarded EX operands, the data
-// bus request, and the trap's own pc_wdata.
-//
-// This module is instantiated only under `RISCV_FORMAL, so it costs nothing in
-// a bitstream.  It is package-free on purpose: nothing in it needs rv32i_pkg,
-// and staying self-contained keeps it readable next to the standard interface
-// it implements.
+// Everything that survives to WB comes from the pipeline's own registers;
+// only what has no later copy (the forwarded EX operands, the data-bus
+// request, the trap's pc_wdata) is shadowed.  Instantiated only under
+// RISCV_FORMAL.  Package-free.
 // ============================================================================
 `default_nettype none
 
@@ -47,26 +21,13 @@ module rvntt_rvfi (
     input  wire         rst_n,
 
     // ---- EX: the cycle the instruction executes ----------------------------
-    // Operands are the FORWARDED ones, because RVFI wants the architectural
-    // pre-state value and the register file's own read port may be stale by up
-    // to two instructions.  They are gated by uses_rs1/uses_rs2 for the same
-    // reason forwarding is: for an instruction that reads no rs1, those bits of
-    // the word are part of an immediate, and reporting them as a register read
-    // would be a claim about a register the instruction never touched.
+    // Operands are the forwarded ones (RVFI wants the architectural pre-state
+    // value), gated by uses_rs1/uses_rs2.
     input  wire         ex_valid,
     input  wire         ex_trap,
-    // A14: EX is holding a multi-cycle instruction that has not finished.  Two
-    // separate things follow from it, and only the first is obvious.
-    //
-    //   1. The shadow must take the same bubble ex_mem_q takes -- otherwise a
-    //      34-cycle divide is REPORTED 34 TIMES, each report claiming a
-    //      retirement that did not happen, and every check downstream of
-    //      rvfi_order is wrong from there on.  The load-use stall needs no
-    //      equivalent: it bubbles ID/EX, so ex_valid is already low.
-    //
-    //   2. The packet must be sampled on the instruction's FIRST EX cycle, not
-    //      its last.  See ex_hold_q below -- riscv-formal's `reg` check found
-    //      this one, from a MULH, on the first honest run.
+    // EX is holding a multi-cycle instruction that has not finished: the
+    // shadow must take the same bubble ex_mem_q takes, and the packet must be
+    // sampled on the instruction's first EX cycle (see ex_hold_q).
     input  wire         ex_stall,
     input  wire [31:0]  ex_pc,
     input  wire [31:0]  ex_insn,
@@ -78,11 +39,8 @@ module rvntt_rvfi (
     input  wire [31:0]  ex_rs1_fwd,
     input  wire [31:0]  ex_rs2_fwd,
     input  wire         ex_mem_read,
-    // The effective address, from A17's dedicated adder rather than from the
-    // ALU result mux -- this port reports what actually went to the memory,
-    // and those are the same number by a_addr_adder_matches_alu.  Its low two
-    // bits are dropped on purpose -- see mem_addr below -- so UNUSEDSIGNAL is
-    // scoped to this one port rather than waived for the module.
+    // The effective address from the dedicated adder; its low two bits are
+    // dropped (see mem_addr below).
     /* verilator lint_off UNUSEDSIGNAL */
     input  wire [31:0]  ex_mem_addr,
     /* verilator lint_on UNUSEDSIGNAL */
@@ -124,7 +82,7 @@ module rvntt_rvfi (
     output wire [31:0]  rvfi_mem_wdata
 );
 
-  // The shadow payload.  Only fields with no surviving copy at WB are here.
+  // The shadow payload: only fields with no surviving copy at WB.
   typedef struct packed {
     logic        valid;
     logic        trap;
@@ -150,18 +108,9 @@ module rvntt_rvfi (
     ex_pkt.trap     = ex_valid && ex_trap;
     ex_pkt.pc_rdata = ex_pc;
 
-    // The next pc, for every shape at once.  A trap goes to mtvec, an MRET to
-    // mepc, a taken branch or jump to its target and everything else to pc + 4
-    // -- and rvntt_core has already resolved all four into ex_redirect_target,
-    // so restating the priority here would be a second place to get it wrong.
-    // RVFI wants the architectural next pc even for a trapping instruction,
-    // which is exactly the trap vector.
-    //
-    // NOT gated on ex_redirect, and A19 is why.  With a predictor, a correctly
-    // predicted taken branch does not redirect -- so `ex_redirect ? target :
-    // pc + 4` would report the branch as having fallen through, on exactly the
-    // branches the predictor got RIGHT.  ex_redirect_target is unconditional
-    // for this reason; see rvntt_core.sv.
+    // The architectural next pc for every shape (trap vector, mepc, target,
+    // pc + 4), already resolved by rvntt_core.  Not gated on ex_redirect: a
+    // correctly predicted taken branch does not redirect.
     ex_pkt.pc_wdata = ex_redirect_target;
 
     ex_pkt.insn      = ex_insn;
@@ -170,53 +119,25 @@ module rvntt_rvfi (
     ex_pkt.rs1_rdata = ex_uses_rs1 ? ex_rs1_fwd  : 32'd0;
     ex_pkt.rs2_rdata = ex_uses_rs2 ? ex_rs2_fwd  : 32'd0;
 
-    // THE FULL COMPUTED ADDRESS, word-aligned -- not the address the RAM
-    // actually used.  rvntt_ram deliberately drops everything above its array
-    // and aliases rather than faulting; that is the memory's behaviour, not the
-    // instruction's, and RVFI describes the instruction.  The low two bits go
-    // because RISCV_FORMAL_ALIGNED_MEM is set: this core traps on a misaligned
-    // access, so every access it performs is word-aligned by construction and
-    // the spec models expect the aligned base with a byte mask.
+    // The full computed address, word-aligned (RISCV_FORMAL_ALIGNED_MEM), not
+    // the address rvntt_ram aliased it to.
     ex_pkt.mem_addr  = {ex_mem_addr[31:2], 2'b00};
 
-    // rvntt_ram reads the whole word on every access, so all four read-strobe
-    // bits are honest for any load width; the spec model shifts the byte it
-    // wants out of mem_rdata.  A trapping load performed no architectural
-    // access at all, so it reports none.
+    // rvntt_ram reads the whole word on every access; a trapping load
+    // performed no access.
     ex_pkt.mem_rmask = (ex_valid && ex_mem_read && !ex_trap) ? 4'b1111 : 4'b0000;
 
-    // The store strobes come straight off the data bus, which rvntt_core has
-    // already gated on validity and on !ex_trap -- one source, so a suppressed
-    // store cannot be reported as having happened.
+    // The store strobes come straight off the data bus, already gated on
+    // validity and !ex_trap.
     ex_pkt.mem_wmask = ex_dmem_be;
     ex_pkt.mem_wdata = ex_dmem_wdata;
   end
 
-  // THE PACKET IS A SNAPSHOT OF THE FIRST EX CYCLE, AND IT HAS TO BE.
-  //
-  // Everything in ex_pkt above is combinational off signals that are only
-  // correct while the instruction is STARTING.  The forwarded operands are the
-  // ones that matter: during a multi-cycle stall the producers behind this
-  // instruction drain out of MEM and then out of WB -- EX/MEM is bubbled on
-  // every stalled cycle, so FWD_MEM stops matching after the first and FWD_WB
-  // after the second -- and the mux falls back to id_ex_q.rs1_data, the value
-  // the register file held at ID time.  By the last cycle of a divide that is
-  // stale by two instructions.
-  //
-  // The unit itself is unaffected: it latches its operands when it starts (see
-  // rvntt_muldiv.sv).  So the ARITHMETIC is right and only the REPORT is wrong,
-  // which is why no commit-log diff, no rv32um test and no Spike comparison can
-  // see it -- rvfi_rs1_rdata is not an architectural value, it is a claim about
-  // one.  riscv-formal's `reg` check found it in nine seconds, from a MULH:
-  // rvfi_rs1_rdata said 0xfffffff5 where the register held something else.
-  // That is the second time `reg` has caught a bug nothing else in the tree
-  // could reach.
-  //
-  // `!ex_stall_q` is "this is the instruction's first EX cycle": ex_stall high
-  // last cycle means the same instruction is still in EX, and anything else
-  // means a new one has just arrived.  It is derived here rather than passed in
-  // so that a verification-only correction stays inside the verification-only
-  // module.
+  // The packet is a snapshot of the FIRST EX cycle.  During a multi-cycle
+  // stall the producers behind the instruction drain out of MEM and WB and the
+  // forwarding mux falls back to the ID-time register value; the unit itself
+  // latched its operands, so only the report would be wrong (riscv-formal's
+  // `reg` check found it).  `!ex_stall_q` is "this is the first EX cycle".
   logic ex_stall_q;
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) ex_stall_q <= 1'b0;
@@ -229,8 +150,6 @@ module rvntt_rvfi (
     else if (ex_first) ex_hold_q <= ex_pkt;
   end
 
-  // A single-cycle instruction is always on its first EX cycle, so this is the
-  // identity for everything that is not multi-cycle.
   assign ex_pkt_eff = ex_first ? ex_pkt : ex_hold_q;
 
   always_ff @(posedge clk or negedge rst_n) begin
@@ -241,15 +160,13 @@ module rvntt_rvfi (
     end else begin
       em_q           <= ex_stall ? '0 : ex_pkt_eff;
       mw_q           <= em_q;
-      // Sampled on the edge out of MEM, which is the cycle rvntt_ram's output
-      // register holds the word for the access em_q issued.
+      // Sampled on the edge out of MEM, when the RAM's output register holds
+      // the word for the access em_q issued.
       mw_mem_rdata_q <= mem_dmem_rdata;
     end
   end
 
-  // rvfi_order is the retirement index of the instruction being reported, so it
-  // is the count of everything reported BEFORE this one -- incremented after.
-  // It counts traps, which is what makes it not minstret.
+  // rvfi_order is the count of everything reported before this instruction.
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n)         order_q <= 64'd0;
     else if (mw_q.valid) order_q <= order_q + 64'd1;
@@ -260,18 +177,14 @@ module rvntt_rvfi (
   assign rvfi_trap      = mw_q.trap;
   assign rvfi_halt      = 1'b0;
 
-  // rvfi_intr marks an instruction whose pc_rdata does not follow the previous
-  // instruction's pc_wdata.  This core reports the trap vector as the trapping
-  // instruction's pc_wdata, and the handler's first instruction is fetched from
-  // exactly there, so the chain is unbroken and intr is always low.  That is the
-  // stronger claim: pc_fwd and pc_bwd both stop checking an instruction that
-  // sets it.
+  // The trap vector is reported as the trapping instruction's pc_wdata and
+  // the handler is fetched from exactly there, so the chain is unbroken.
   assign rvfi_intr      = 1'b0;
   assign rvfi_mode      = 2'b11;                 // machine mode only
   assign rvfi_ixl       = 2'b01;                 // MXL = 1, XLEN = 32
 
-  // pc and insn survive to WB in the core's own registers, so report those and
-  // fall back to the shadow only for the trapped instruction, which has none.
+  // pc and insn survive to WB in the core's own registers; the shadow is used
+  // only for the trapped instruction.
   assign rvfi_pc_rdata  = wb_valid ? wb_pc   : mw_q.pc_rdata;
   assign rvfi_insn      = wb_valid ? wb_insn : mw_q.insn;
   assign rvfi_pc_wdata  = mw_q.pc_wdata;
@@ -281,11 +194,9 @@ module rvntt_rvfi (
   assign rvfi_rs1_rdata = mw_q.rs1_rdata;
   assign rvfi_rs2_rdata = mw_q.rs2_rdata;
 
-  // Straight off the register file's write port.  RVFI requires rd_addr to be
-  // zero for an instruction that writes no register -- and a store's rd field
-  // is part of its immediate, so reporting the decoded field would name a
-  // register the instruction never wrote.  A trapped instruction has wb_we low
-  // by construction (it was squashed), so the trap case needs no mux of its own.
+  // Straight off the register file's write port: rd_addr must be zero for an
+  // instruction that writes no register (a store's rd field is immediate
+  // bits).  A trapped instruction has wb_we low by construction.
   assign rvfi_rd_addr   = wb_we ? wb_rd_addr : 5'd0;
   assign rvfi_rd_wdata  = wb_we ? wb_rd_data : 32'd0;
 
@@ -296,15 +207,9 @@ module rvntt_rvfi (
   assign rvfi_mem_wdata = mw_q.mem_wdata;
 
 `ifdef RISCV_FORMAL
-  // The three claims this module is built on, asserted inside every riscv-formal
-  // check rather than argued in a comment.  If the trap squash and the shadow
-  // ever drift apart, these fail directly instead of surfacing as an
-  // unexplained insn-check counterexample four stages away.
-  //
-  // f_started_q needs the declaration initialiser as well as the reset: with an
-  // asynchronous reset the flop's value during the reset cycle itself is the
-  // init value, not the reset value, and without it the solver is free to
-  // invent a first step in which the guard is already true.
+  // The claims this module is built on, asserted inside every riscv-formal
+  // check.  f_started_q needs the declaration initialiser as well as the
+  // reset (asynchronous reset semantics at step 0).
   /* verilator lint_off PROCASSINIT */
   logic f_started_q = 1'b0;
   /* verilator lint_on PROCASSINIT */
@@ -315,10 +220,9 @@ module rvntt_rvfi (
 
   always_ff @(posedge clk) begin
     if (f_started_q) begin
-      // 1. A trapped instruction never also retires: the two report paths are
-      //    mutually exclusive, which is what makes NRET = 1 sound.
+      // 1. The two report paths are mutually exclusive (NRET = 1 is sound).
       a_trap_not_retired: assert (!(mw_q.valid && mw_q.trap && wb_valid));
-      // 2. ... and every non-trapping instruction does retire in its own slot.
+      // 2. Every non-trapping instruction retires in its own slot.
       a_nontrap_retired:  assert (!(mw_q.valid && !mw_q.trap) || wb_valid);
       // 3. The shadow and the pipeline agree about which instruction this is.
       if (mw_q.valid && wb_valid) begin

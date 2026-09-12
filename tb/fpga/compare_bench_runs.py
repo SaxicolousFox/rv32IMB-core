@@ -1,28 +1,13 @@
 #!/usr/bin/env python3
 """
-Compare two benchmark captures and say which fields were allowed to move.
+Compare two benchmark captures (parse_bench_uart.py --json output).
 
-A17's done-when is that **not one cycle count may change**: every lever in it is
-combinational or physical restructuring, so the only thing the benchmark output
-is allowed to differ in is the clock frequency and the wall-clock rates derived
-from it.  That is a mechanical claim and it is checked mechanically here rather
-than by reading two tables side by side -- which is how A16's twelve identical
-report blocks were checked, and how a single transposed digit would have got
-through.
-
-Three classes of field:
-
-  INVARIANT   cycle counts, instruction counts, CRCs, iteration counts, and every
-              ratio computed from a pair of counters (DMIPS/MHz, CoreMark/MHz,
-              IPC).  These are integer counts or exact ratios of them and do not
-              depend on the clock at all.  ANY difference is a failure.
-  SCALES      Dhrystones/sec, DMIPS, the raw CoreMark score, and the run times.
-              These are counts divided by a frequency, so they must move by
-              EXACTLY the frequency ratio -- checked to a relative tolerance,
-              not merely allowed to differ.
-  IGNORED     the clock itself, and free text.
-
-Run with --selftest to see it reject perturbed inputs.
+INVARIANT fields -- cycle and instruction counts, CRCs, and the ratios derived
+from pairs of counters -- must be identical.  SCALED fields -- Dhrystones/sec,
+DMIPS, CoreMark, run times -- must move by exactly the clock ratio.  Two runs of
+one design at different clocks therefore compare clean; any cycle-count change
+is reported.  --selftest perturbs a synthetic pair and requires each to be
+rejected; without --ref it runs against a built-in block.
 """
 import argparse, json, math, sys
 
@@ -30,17 +15,27 @@ INVARIANT = [
     "dhry_runs", "dhry_cycles", "dhry_stat_cycles", "dhry_stat_instret",
     "dhry_check", "cm_iterations", "cm_cycles", "cm_instret",
     "seedcrc", "crclist", "crcmatrix", "crcstate", "crcfinal",
-    "ntt_cycles_rv32i", "ntt_instret_rv32i",
-    "ntt_cycles_rv32im", "ntt_instret_rv32im", "ntt_check", "ntt_sum",
     "dhry_window_skew_cycles",
     "dhry_cycles_per_run", "dmips_per_mhz", "dhry_ipc",
     "coremark_per_mhz", "cm_ipc",
-    "ntt_cycle_ratio", "ntt_instret_ratio", "ntt_ipc_rv32i", "ntt_ipc_rv32im",
 ]
 
 SCALES = ["dhrystones_per_sec", "dmips", "coremark", "dhry_secs", "cm_secs"]
 
 REL_TOL = 1e-9
+
+# A plausible block, for --selftest without a reference capture.
+SYNTHETIC = {
+    "clk_hz": 96250000, "dhry_runs": 2000000, "dhry_cycles": 1218000000,
+    "dhry_stat_cycles": 1218000040, "dhry_stat_instret": 1063000000,
+    "dhry_check": 0, "cm_iterations": 3300, "cm_cycles": 975000000,
+    "cm_instret": 847000000, "seedcrc": 0xe9f5, "crclist": 0xe714,
+    "crcmatrix": 0x1fd7, "crcstate": 0x8e3a, "crcfinal": 0x33ff,
+    "dhry_window_skew_cycles": 40, "dhry_cycles_per_run": 609.0,
+    "dmips_per_mhz": 0.9346, "dhry_ipc": 0.8728, "coremark_per_mhz": 3.3846,
+    "cm_ipc": 0.8687, "dhrystones_per_sec": 158046.0, "dmips": 89.95,
+    "coremark": 325.77, "dhry_secs": 12.65, "cm_secs": 10.13,
+}
 
 
 def compare(a, b, fault=0):
@@ -88,12 +83,15 @@ def block(path):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ref", required=True)
-    ap.add_argument("--new", required=True)
+    ap.add_argument("--ref", default=None)
+    ap.add_argument("--new", default=None)
     ap.add_argument("--selftest", action="store_true")
     a = ap.parse_args()
 
-    ref, new = block(a.ref), block(a.new)
+    if not a.selftest and (a.ref is None or a.new is None):
+        ap.error("--ref and --new are required (or --selftest)")
+    ref = block(a.ref) if a.ref else dict(SYNTHETIC)
+    new = block(a.new) if a.new else ref
     probs = compare(ref, new)
 
     print("reference %.6f MHz   new %.6f MHz   ratio %.9f"
@@ -104,12 +102,7 @@ def main() -> int:
              sum(1 for k in SCALES if k in ref and k in new)))
 
     if a.selftest:
-        # The selftest runs against a SYNTHETIC pair, not against whichever two
-        # files were passed.  Fault 4 -- "a scaled field was not scaled" -- is
-        # vacuous when the two captures share a clock, and comparing two runs of
-        # the same bitstream is the normal case.  A check that silently cannot
-        # fail on the inputs it was given is exactly what this tool exists to
-        # stop, so it does not get to do it to itself.
+        # Against a synthetic 1.2x-clock copy, so fault 4 cannot be vacuous.
         print("\n--- selftest: each perturbation must be rejected ---")
         print("  (against a synthetic 1.2x-clock copy, so every fault is live)")
         fast = dict(ref)

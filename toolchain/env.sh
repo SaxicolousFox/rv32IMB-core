@@ -18,7 +18,7 @@ export OSS_CAD="$_here/opt/oss-cad-suite"
 #   `--print-multi-lib` reports only `.;`, i.e. rv32imafdc/ilp32d.  This project
 #   targets bare RV32I + Zicsr, so that toolchain has NO usable libgcc or newlib
 #   (no __mulsi3, no libc) for our ABI.  xPack ships a full multilib set
-#   including rv32i/ilp32, which is what Dhrystone/CoreMark/ML-KEM need.
+#   including rv32i/ilp32, which is what Dhrystone/CoreMark need.
 #   The riscv-collab one is kept on PATH as a secondary (gdb, qemu, objdump).
 export XPACK_RV="$(ls -d "$_here"/opt/xpack-riscv-none-elf-gcc-*/ 2>/dev/null | head -1)"
 export RISCV="$_here/opt/riscv"

@@ -1,45 +1,20 @@
 #!/usr/bin/env python3
 """
-H1 (MODS_A2): the ISA string, in every place it is written, must agree.
+The ISA string, in every place it is written, must agree.
 
-WHY THIS EXISTS.  `CLAUDE.md` says "THE ISA STRING AND THE misa RESET VALUE
-MUST MOVE TOGETHER", and until now exactly one pair was checked: run_riscof.py
-compares its YAML against rvntt_csr.sv before every compliance run.  The string
-is written in SIX places across four files, with misa in a fifth, and the five
-strings run_riscof.py does not read were on the honour system:
-
+The executable copies:
     rtl/core/rvntt_csr.sv                MISA_VALUE
     tb/riscof/rvntt/rvntt_isa.yaml       ISA:, misa reset-val, misa bitmask
-    tb/cosim/spike_asm.py                MARCH, ISA_BASE, ISA_XKNTT
+    tb/cosim/spike_asm.py                MARCH, ISA_BASE
     tb/cosim/test_riscv_tests.py         ISA
     fpga/scripts/build_bench_image.py    ARCH_ALIASES["rv32imb"]
 
-A21 moved all six at once and every one of them had to be found by hand.  What
-happens when one is missed is not a failure -- it is a SILENT NARROWING: Spike
-is told a smaller ISA than the DUT, takes an illegal-instruction trap on the
-first instruction the DUT can execute and it cannot, and SPINS.  That has
-happened twice in this project (A14 with `mul`, A21 with `clz`), both times in
-riscof_spike_ref.py, both times costing a run that reported nothing at all.
-
-This check costs about a tenth of a second and is registered in the regression
-next to `mutation_anchors`, which exists for the same reason: a cheap pre-flight
-that fails in seconds beats an expensive run that hangs.
-
-THE DOCUMENTED COPIES.  Five more places state the current ISA string in prose
-for a human to build against -- DOC_COPIES below, the frozen docs/isa-spec.md
-first among them.  None of them can hang a run, so they drifted instead: all
-five still said rv32im_zicsr_zicntr_xkntt0p1 after A21-A30 had widened the ISA
-seven extensions past it, and nothing noticed.  Every `rv32...xkntt0p1` string
-in each of those files must now name exactly the extensions ISA_XKNTT does, and
-each file must contain at least one, so deleting the line fails rather than
-passing vacuously.  Files that quote an OLDER string on purpose -- the plan,
-MODS_A2's pre-A21 Spike probe, patch-discipline.md's history of patch 0001 --
-are historical records and deliberately not listed.
-
-WHAT IT DOES NOT CHECK.  That the ISA string is CORRECT -- that is RISCOF's job,
-and riscv-config's, and the decoder equivalence sweep's.  This checks only that
-the copies say the same thing, which is the failure mode that has actually
-occurred.
+A source naming a SMALLER ISA than the DUT does not fail: Spike traps on the
+first instruction it does not know and spins.  The documented copies (DOC_COPIES)
+are checked against the same set, ignoring only zicsr/zicntr, so a README that
+quotes a stale string fails here rather than misleading whoever builds against
+it.  Also checks misa.B is not set (riscv-config cannot express the letter) and
+that rvntt_muldiv's MUL_CYCLES parameter is never overridden in rtl/.
 """
 import io
 import os
@@ -48,40 +23,31 @@ import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Extensions a given source is ALLOWED to carry beyond the common core, with
-# the reason.  Anything else present in one source and absent from another is
-# a disagreement.
+# Extensions a source may carry beyond the common core.
 ALLOWED_EXTRA = {
     "spike_asm.ISA_BASE":   {"zicntr"},
-    "spike_asm.ISA_XKNTT":  {"zicntr", "xkntt0p1"},
     "test_riscv_tests.ISA": {"zicntr"},
     # The image's -march never names zicntr: nothing in the benchmark reads the
-    # user-mode shadows, and adding it would change no code generation.
+    # user-mode shadows.
     "build_bench_image.rv32imb": set(),
     "spike_asm.MARCH":      set(),
     "rvntt_isa.yaml":       set(),
 }
 
-# Files that state the CURRENT ISA string in prose or comments.  Each must
-# match spike_asm.ISA_XKNTT exactly; see "THE DOCUMENTED COPIES" above.
+# Files that state the current ISA string in prose or comments.
 DOC_COPIES = [
-    "docs/isa-spec.md",
-    "docs/spike-xkntt.md",
-    "rtl/core/CLAUDE.md",
+    "README.md",
     "rtl/core/rvntt_decode.sv",
     "model/rv32i_ref.py",
 ]
-DOC_ISA_RE = re.compile(r"\brv32[a-z0-9_]*xkntt0p1\b")
+DOC_ISA_RE = re.compile(r"\brv32im_zba[a-z0-9_]*\b")
+DOC_IGNORE = {"zicsr", "zicntr"}
 
 
 def exts(s):
-    """An ISA string -> the set of extensions it names, lower-cased.
-
-    Handles both spellings this project uses: gcc/Spike's
-    `rv32im_zba_zbb...` and riscv-config's `RV32IMZicsr_Zicond_Zba...`, where
-    the single letters run together and the Z groups may or may not be
-    underscore-separated.
-    """
+    """An ISA string -> the set of extensions it names, lower-cased.  Accepts
+    both gcc/Spike's `rv32im_zba_zbb...` and riscv-config's
+    `RV32IMZicsr_Zicond_Zba...` spellings."""
     s = s.strip().lower()
     m = re.match(r"^rv(?:32|64)([a-wy]*)(.*)$", s)
     if not m:
@@ -111,8 +77,6 @@ def main():
         "tb/cosim/spike_asm.py", r'^MARCH\s*=\s*"([^"]+)"', "MARCH")
     found["spike_asm.ISA_BASE"] = grab(
         "tb/cosim/spike_asm.py", r'^ISA_BASE\s*=\s*"([^"]+)"', "ISA_BASE")
-    found["spike_asm.ISA_XKNTT"] = grab(
-        "tb/cosim/spike_asm.py", r'^ISA_XKNTT\s*=\s*"([^"]+)"', "ISA_XKNTT")
     found["test_riscv_tests.ISA"] = grab(
         "tb/cosim/test_riscv_tests.py", r'^ISA\s*=\s*"([^"]+)"', "ISA")
     found["rvntt_isa.yaml"] = grab(
@@ -121,8 +85,7 @@ def main():
         "fpga/scripts/build_bench_image.py",
         r'"rv32imb":\s*"([^"]+)"', 'ARCH_ALIASES["rv32imb"]')
 
-    # The image's rv32imb alias has _zicsr appended by arch_flags(), so add it
-    # here rather than pretending the alias carries it.
+    # arch_flags() appends _zicsr to the alias.
     found["build_bench_image.rv32imb"] += "_zicsr"
 
     sets = {k: exts(v) for k, v in found.items()}
@@ -138,7 +101,6 @@ def main():
     for k, v in sorted(core.items()):
         if v != ref:
             bad.append((k, sorted(v - ref), sorted(ref - v)))
-    # An extension present but NOT declared allowed is also a disagreement.
     for k, v in sorted(sets.items()):
         stray = v - core[k] - ALLOWED_EXTRA[k]
         if stray:
@@ -150,31 +112,30 @@ def main():
         for k, extra, missing in bad:
             print("  %-28s extra=%s missing=%s" % (k, extra or "-", missing or "-"))
         print("\nA source naming a SMALLER ISA than the DUT does not fail -- it "
-              "hangs, on the first instruction it does not know.  Move all six "
-              "together; see this file's header.")
+              "hangs, on the first instruction it does not know.  Move all "
+              "copies together; see this file's header.")
         return 1
 
-    # The documented copies, against ISA_XKNTT -- which the block above has
-    # just tied to every executable source, so agreement here is transitive.
-    want = sets["spike_asm.ISA_XKNTT"]
+    # The documented copies, against ISA_BASE.
+    want = sets["spike_asm.ISA_BASE"] - DOC_IGNORE
     doc_bad = []
     n_doc = 0
     for path in DOC_COPIES:
         hits = DOC_ISA_RE.findall(read(path))
         if not hits:
-            doc_bad.append((path, "no rv32...xkntt0p1 string found -- the "
+            doc_bad.append((path, "no rv32im_zba... string found -- the "
                             "check cannot be vacuous"))
         for s in hits:
             n_doc += 1
-            if exts(s) != want:
+            got = exts(s) - DOC_IGNORE
+            if got != want:
                 doc_bad.append((path, "%s  extra=%s missing=%s" % (
-                    s, sorted(exts(s) - want) or "-",
-                    sorted(want - exts(s)) or "-")))
+                    s, sorted(got - want) or "-", sorted(want - got) or "-")))
     print("documented copies: %d string(s) in %d file(s)"
           % (n_doc, len(DOC_COPIES)))
     if doc_bad:
         print("\nISA_FAIL: %d documented copy/copies disagree with "
-              "spike_asm.ISA_XKNTT (%s)" % (len(doc_bad), found["spike_asm.ISA_XKNTT"]))
+              "spike_asm.ISA_BASE (%s)" % (len(doc_bad), found["spike_asm.ISA_BASE"]))
         for path, why in doc_bad:
             print("  %-26s %s" % (path, why))
         print("\nThese do not hang anything; they mislead whoever builds "
@@ -201,10 +162,9 @@ def main():
               % (mask_yaml, misa_yaml & 0x03FFFFFF))
         return 1
 
-    # misa bit 1 is B, and this core deliberately does NOT set it while
-    # implementing B -- riscv-config 3.18.3 cannot express the letter.  The
-    # boundary is recorded in rvntt_csr.sv; assert the state it describes so
-    # that setting the bit without revisiting that note fails here.
+    # misa.B is deliberately NOT set while B is implemented: riscv-config
+    # 3.18.3 cannot express the letter, and setting it invalidates the RISCOF
+    # config.
     b_impl = "zba" in ref and "zbb" in ref and "zbs" in ref
     b_bit = bool(misa_rtl & 0x2)
     print("B implemented=%s   misa.B set=%s" % (b_impl, b_bit))
@@ -216,22 +176,10 @@ def main():
               "riscv-config has since gained the letter, update BOTH.")
         return 1
 
-    # ------------------------------------------------------------------
-    # MODS_A2 A25: the multiply latency, which is now a MODULE PARAMETER.
-    # ------------------------------------------------------------------
-    # rvntt_muldiv gained `parameter int MUL_CYCLES` so that A25 could sweep the
-    # product pipeline's depth against real post-route timing out of context.
-    # A parameter with a default is a second place the number can live, and the
-    # number is a CONTRACT: rv32i_pkg holds it, model/rv32i_ref.py duplicates it
-    # (check_pkg_agreement compares those two), tb/cosim/cycle_model.py predicts
-    # spans from it, and the core stalls for exactly that many cycles.
-    #
-    # An override at the instantiation would desynchronise all of that silently
-    # -- the RTL would retire MUL a cycle early or late and the cycle model
-    # would keep predicting the package's number, so cosimulation would fail
-    # somewhere that looks nothing like a parameter.  Two things are checked,
-    # both by string search: the default IS the package constant, and nothing
-    # in rtl/ passes the parameter by name.
+    # The multiply latency is a contract shared by rv32i_pkg, model/rv32i_ref.py
+    # and tb/cosim/cycle_model.py.  rvntt_muldiv's MUL_CYCLES parameter exists
+    # only for out-of-context sweeps: its default must be the package constant
+    # and nothing in rtl/ may override it.
     muldiv = read("rtl/core/rvntt_muldiv.sv")
     if not re.search(r"parameter\s+int\s+MUL_CYCLES\s*=\s*"
                      r"rv32i_pkg::MULDIV_MUL_CYCLES", muldiv):

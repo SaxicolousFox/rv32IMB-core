@@ -1,12 +1,4 @@
-# Large third-party toolchain payloads — never commit.
-#
-# EACH IS LISTED TWICE, AND THE SLASHLESS FORM IS THE ONE THAT MATTERS HERE.
-# A pattern ending in `/` matches only a directory, and in a git WORKTREE these
-# are symlinks into the main checkout -- so the slash-terminated form does not
-# match them and `git add -A` happily stages nine symlinks pointing at absolute
-# paths on one machine.  That is not hypothetical: it happened once, and was
-# caught by reading `git status` after the commit rather than by anything
-# automatic.  Keep both forms.
+# Third-party toolchains
 toolchain/dist/
 toolchain/dist
 toolchain/opt/
@@ -15,10 +7,6 @@ toolchain/spike-src/
 toolchain/spike-src
 toolchain/spike-build/
 toolchain/spike-build
-toolchain/kyber/
-toolchain/kyber
-toolchain/llvm-project/
-toolchain/llvm-project
 toolchain/riscv-tests/
 toolchain/riscv-arch-test/
 toolchain/riscv-formal/
@@ -56,10 +44,11 @@ fpga/build/
 vivado*.str
 usage_statistics_webtalk.*
 
-# Formal
+# Formal work areas
 tb/formal/*/
+tb/formal/*.sby
 
-# Editor / shell dotfiles that live in this dir but are not project files
+# Editor / shell dotfiles
 .bashrc
 .bash_profile
 .profile
@@ -71,7 +60,3 @@ tb/formal/*/
 .mcp.json
 .idea
 .vscode
-tb/formal/*.sby
-model/dumps/
-model/cref/ntt_dump
-sw/kyber/build/
