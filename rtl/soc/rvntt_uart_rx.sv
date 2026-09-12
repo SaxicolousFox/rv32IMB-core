@@ -1,28 +1,9 @@
-// Minimal UART receiver, 8 data bits, no parity, 1 stop bit.
-//
-// Mirror image of rvntt_uart_tx and deliberately the same shape: one integer
-// baud divisor, no oversampling clock, no FIFO.  The receiver resynchronises on
-// every start bit and then samples each bit at its MIDPOINT, which is what buys
-// the tolerance -- with a 0.006% divisor error at 75 MHz the sample point has
-// drifted by well under a percent of a bit time by the stop bit.
-//
-// Sampling at the midpoint rather than the edge is the whole design.  Sampling
-// on the nominal bit boundary would put the sample exactly where the line is
-// transitioning, and the receiver would work on a testbench with ideal edges and
-// fail on a real FTDI with any skew at all.
-//
-// No FIFO, one byte of holding register: `valid` stays high until `ack`.  A byte
-// that arrives while the previous one is unread sets `overrun` and is dropped,
-// rather than silently replacing it -- software polling at CPU speed will never
-// see this, but a wrong baud rate makes it fire constantly, which is a much
-// better symptom than garbage characters.
-//
-// `overrun` is sticky and is cleared only by `overrun_clr`.  The clear lives
-// here rather than in the bus block because a sticky flag whose clear is
-// somewhere else is how you get a flag that latches once and never re-arms --
-// which is exactly what the first version of this design did, with a comment
-// claiming otherwise.  Set beats clear within a cycle, so an overrun coincident
-// with its own acknowledgement is reported rather than lost.
+// Minimal UART receiver, 8 data bits, no parity, 1 stop bit.  One integer baud
+// divisor, no oversampling clock, no FIFO.  Resynchronises on every start bit
+// and samples each bit at its midpoint.  One byte of holding register: `valid`
+// stays high until `ack`; a byte arriving while the previous one is unread
+// sets the sticky `overrun` (cleared by `overrun_clr`; set beats clear) and is
+// dropped.  A framing error drops the byte.
 `default_nettype none
 
 module rvntt_uart_rx #(
@@ -41,9 +22,7 @@ module rvntt_uart_rx #(
   localparam int DIVISOR = CLK_HZ / BAUD;
   localparam int DIV_W   = $clog2(DIVISOR + 1);
 
-  // Two-flop synchroniser: rx is asynchronous to clk by construction (it comes
-  // from the host's clock, not ours).  Without this a metastable sample can
-  // propagate into the state machine and corrupt a whole frame.
+  // Two-flop synchroniser: rx is asynchronous to clk.
   logic [1:0] sync_q;
   wire        rx_s = sync_q[1];
   always_ff @(posedge clk or negedge rst_n) begin
@@ -72,8 +51,7 @@ module rvntt_uart_rx #(
 
       unique case (state_q)
         R_IDLE: begin
-          // Falling edge = putative start bit.  Wait half a bit and re-check,
-          // so a glitch on the line does not start a frame.
+          // Falling edge = putative start bit; re-check after half a bit.
           if (!rx_s) begin
             div_q   <= DIV_W'(DIVISOR / 2);
             state_q <= R_START;
@@ -82,8 +60,7 @@ module rvntt_uart_rx #(
         R_START: begin
           if (div_q == '0) begin
             if (!rx_s) begin
-              // Genuine start bit; from here sample one full bit time apart,
-              // which lands us in the middle of each data bit.
+              // Genuine start bit; sample one bit time apart from here.
               div_q   <= DIV_W'(DIVISOR - 1);
               bit_q   <= '0;
               state_q <= R_DATA;
@@ -107,8 +84,7 @@ module rvntt_uart_rx #(
         R_STOP: begin
           if (div_q == '0) begin
             state_q <= R_IDLE;
-            // A framing error (stop bit low) drops the byte.  Accepting it
-            // anyway would turn a baud mismatch into plausible-looking data.
+            // A framing error (stop bit low) drops the byte.
             if (rx_s) begin
               if (valid && !ack) begin
                 overrun <= 1'b1;

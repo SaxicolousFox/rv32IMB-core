@@ -1,28 +1,15 @@
 # ============================================================================
-# a20_hpm.S -- directed Zihpm hardware-performance-counter tests (MODS_A2 A20).
+# a20_hpm.S -- directed Zihpm hardware-performance-counter tests.
 #
-# SELF-CHECKING, using riscv-tests' protocol exactly as a9_csr.S does, and for
-# the same reason: what this file checks is COUNTER VALUES, and a commit-log
-# diff against Spike cannot check those.  Spike advances mcycle once per
-# instruction and has no model of this core's stalls at all, so every property
-# here is stated as an absolute inside the program.  A store of 1 to `tohost`
-# is pass; anything else is `(case << 1) | 1` naming the case that failed.
+# Self-checking through riscv-tests' protocol (a store of 1 to `tohost` is
+# pass; anything else is `(case << 1) | 1`), because Spike has no model of
+# this core's stalls.  This checks the CSR-level contract: the registers
+# exist, are WARL in the right places, read zero where they must, do not trap
+# where they must not, and mcountinhibit inhibits.  Event attribution is
+# checked by tb/perf/run_stall_profile.py against the simulation instrument.
 #
-# WHAT THIS FILE DOES *NOT* CHECK, and where that is checked instead.  It does
-# not check that the six events are attributed CORRECTLY -- that a load-use
-# interlock is counted as a load-use interlock and not as something else.  That
-# is A20's real done-when and it is checked by cross-validating against A18's
-# simulation instrument over the benchmarks, to the count, because agreement
-# with an independently-written observer is a much stronger statement than any
-# assertion this file could make about itself.  What this file checks is the
-# CSR-level contract: that the registers exist, are WARL in the right places,
-# read zero where the spec says they must, do not trap where the spec says they
-# must not, and that mcountinhibit actually inhibits.  Those are the properties
-# whose failure would make the cross-validation meaningless rather than wrong.
-#
-# The event numbering is rv32i_pkg::HPM_EV_*.  It is repeated here as literals
-# because an assembly file cannot import a SystemVerilog package; if the two
-# ever disagree, case 6 stops counting and says so.
+# The event numbering is rv32i_pkg::HPM_EV_*, repeated as literals; if the
+# two disagree, case 6 stops counting.
 # ============================================================================
         .section .text.init
         .globl _start
@@ -41,9 +28,8 @@ _start:
 #define EV_XFER_TAKEN  6
 
 # ---- case 2: the six implemented counters are readable and writable --------
-# Written with a distinct value each so that a decoder collapsing two indices
-# onto one register -- the obvious off-by-one in a range decode -- shows up as
-# a read-back mismatch rather than as nothing at all.
+# Distinct values, so a decoder collapsing two indices onto one register
+# shows up as a read-back mismatch.
         li      t0, 0x11110003
         csrw    0xB03, t0               # mhpmcounter3
         li      t0, 0x11110004
@@ -66,11 +52,7 @@ _start:
 1:
 
 # ---- case 3: counters 9..31 are DECODED, read zero, and do not trap --------
-# The distinction that matters: an unimplemented counter must read zero, not
-# fault.  A decoder that simply omits them makes `csrr t0, 0xB09` an illegal
-# instruction, which is a different and wrong behaviour -- and one that only
-# shows up when software probes for how many counters exist, which is exactly
-# what software does with this extension.
+# An unimplemented counter must read zero, not fault.
         csrr    t1, 0xB09               # mhpmcounter9  -- must read 0
         bnez    t1, 30f
         csrr    t1, 0xB1F               # mhpmcounter31 -- must read 0
@@ -99,8 +81,6 @@ _start:
 1:
 
 # ---- case 5: mcountinhibit ACTUALLY INHIBITS ------------------------------
-# The whole point of the register.  A counter that keeps counting while
-# inhibited would be invisible to every test that does not do exactly this.
 # CY is still set from case 4.
         csrr    t1, mcycle
         addi    x0, x0, 0
@@ -117,11 +97,8 @@ _start:
 1:
 
 # ---- case 6: an event actually counts ------------------------------------
-# EV_EXSTALL against a divide.  rvntt_muldiv's divider is 34 cycles of EX
-# occupancy and data-independent by construction, so one `div` contributes 33
-# stall cycles -- a large, deterministic number that cannot be confused with
-# noise.  The check is deliberately an inequality: the exact value is the
-# cross-validation's job, not this file's.
+# EV_EXSTALL against a divide: 33 stall cycles, deterministic.  An
+# inequality; the exact value is the cross-validation's job.
         csrw    0x320, x0               # nothing inhibited
         li      t0, EV_EXSTALL
         csrw    0x323, t0               # mhpmevent3 = multi-cycle EX stalls
@@ -138,9 +115,7 @@ _start:
 1:
 
 # ---- case 7: event 0 counts NOTHING --------------------------------------
-# The reset value.  A counter whose selector is 0 must not accumulate, or a
-# counter software never programmed reports something arbitrary that looks
-# like data.
+# A counter whose selector is 0 must not accumulate.
         li      t0, 0
         csrw    0x324, t0               # mhpmevent4 = HPM_EV_NONE
         csrw    0xB04, x0
@@ -169,9 +144,7 @@ _start:
 
 # ---- case 9: the 32-bit halves are independent, and carry -----------------
 # Writing the low half must not disturb the high one, and an increment at
-# 0xFFFFFFFF must carry rather than wrap in place.  minstret has had this bug
-# in this project's history; the HPM counters share the idiom and so share the
-# risk.
+# 0xFFFFFFFF must carry.
         li      t0, EV_EXSTALL
         csrw    0x326, t0               # mhpmevent6 = EX stalls
         li      t0, 0x99999999

@@ -1,10 +1,6 @@
 // ============================================================================
-// rvntt_trace_top -- rvntt_core_sim_top plus the A5 commit-log monitor.
-//
-// A separate top rather than instantiating rvntt_trace inside
-// rvntt_core_sim_top, so that nothing under rtl/ ever references a module
-// containing $fopen.  rtl/ stays synthesisable and Vivado-elaboratable; the
-// non-synthesisable monitor stays under tb/.
+// rvntt_trace_top -- rvntt_core_sim_top plus the commit-log monitor.  A
+// separate top so nothing under rtl/ references a module containing $fopen.
 // ============================================================================
 `default_nettype none
 

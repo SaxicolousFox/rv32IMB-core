@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
 """
-Spike smoke test (P0.1 acceptance).
+Spike smoke test.
 
-Checks three things that everything in Track A/C later depends on:
-  1. the xPack toolchain builds a bare-metal RV32I ELF,
+  1. the toolchain builds a bare-metal RV32I ELF,
   2. Spike executes it and exits 0 via HTIF,
-  3. Spike reports FAILURE for a deliberately wrong program -- so a broken
-     cosimulation reference can never silently look like a pass,
-  4. --log-commits emits the commit-log format the A5 differ will consume.
+  3. Spike reports FAILURE for a deliberately wrong program,
+  4. --log-commits emits the commit-log format the differ consumes.
 """
 import os, re, subprocess, sys, tempfile
 

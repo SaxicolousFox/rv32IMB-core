@@ -1,27 +1,13 @@
 # ============================================================================
-# a9_minstret.S -- plan A9's done-when, made into a program.
+# a9_minstret.S -- minstret after a known program equals the instruction count
+# Spike reports for the same program.
 #
-# "minstret after a known program equals the instruction count Spike reports for
-# the same program."  The body below is deliberately a LOOP rather than
-# straight-line code, so the number is a count of DYNAMIC instructions and not
-# just the size of the .text -- a counter wired to the fetch stream, or one that
-# counted flushed instructions, would agree with the static count and disagree
-# here.
-#
-# `probe` is global so the driver can find the exact commit in Spike's trace
-# whose index is the expected value.  Comparing against Spike's own minstret
-# would not do: Spike counts the five bootrom instructions at 0x1000 that this
-# core never executes, so the two differ by a constant that would have to be
-# hardcoded somewhere.  Counting Spike's commits at or above the load address
-# has no such constant in it.
-#
-# A14 (MODS_A) added the multi-cycle instructions in the loop.  They are the
-# sharpest thing this program checks: a DIV occupies EX for 34 cycles, and
-# `minstret` must count it EXACTLY ONCE.  A counter that bumped on every cycle
-# the instruction was in EX would over-count by 36 per iteration and 288 over
-# the loop, and a counter that skipped a stalled instruction entirely would
-# under-count by 16.  Neither changes any architectural value, so the
-# cosimulation differ cannot see either one -- this is the only check that can.
+# The body is a loop, so the number counts dynamic instructions.  `probe` is
+# global so the driver can find the exact commit in Spike's trace; Spike's
+# commits at or above the load address are counted, not its own minstret,
+# which includes the bootrom.  The multi-cycle instructions in the loop are
+# the sharpest check: a DIV occupies EX for 34 cycles and minstret must count
+# it exactly once, which no architectural comparison can see.
 # ============================================================================
         .section .text.init
         .globl _start
@@ -51,18 +37,14 @@ _start:
         addi    s5, s5, 1               # squashed
 .Ljoin:
 
-        # THESE TWO ARE LOAD-BEARING.  A taken branch leaves MEM and WB holding
-        # bubbles for two cycles, so a probe placed immediately after one reads
-        # the same value whether the counter is incremented in EX or in WB --
-        # and a mutation that moves it to WB passes.  Two ordinary instructions
-        # refill the pipeline, and the difference becomes visible.
+        # A taken branch leaves MEM and WB holding bubbles for two cycles, so
+        # a probe placed immediately after one reads the same value whether
+        # the counter is incremented in EX or in WB; two ordinary instructions
+        # refill the pipeline.
         addi    s6, s6, 1
         addi    s7, s7, 1
 
-        # ... and one long instruction with NOTHING between it and the probe, so
-        # a miscount on the last multi-cycle operation cannot be absorbed by the
-        # instructions after it.  The two above still stand: they are what makes
-        # an EX-counted and a WB-counted minstret give different answers here.
+        # ... and one long instruction with nothing between it and the probe.
         div     s8, s2, s4
 
         .globl  probe

@@ -2,21 +2,11 @@
 """
 Resolve SystemVerilog package dependencies for a source file.
 
-Both Verilator and Yosys read files in the order given and require a package to
-be DECLARED before it is referenced.  Verilator will auto-find `rv32i_pkg.sv`
-from an include directory, but it appends it after the file that imports it, so
-a module whose PORT LIST uses a package type fails with
-
-    Reference to 'alu_op_e' before declaration (IEEE 1800-2023 6.18)
-
-even though the package is right there.  The fix is ordering, not includes:
-putting ``include "rv32i_pkg.sv"` in each module would work under Verilator's
-single compilation unit but risks duplicate definitions under tools that
-compile each file separately.
-
-So: scan for `import <pkg>::`, find `<pkg>.sv` in the RTL tree, and put it
-first.  Kept here rather than in one caller because tb/lint_all.py and
-tb/formal/run_formal.py both need exactly this, and a second copy would drift.
+Verilator and Yosys read files in the order given and require a package to be
+declared before it is referenced; Verilator's auto-find appends the package
+after the importer, which fails for a module whose port list uses a package
+type.  So: find every package in the RTL tree and put it first.  Shared by
+tb/lint_all.py and tb/formal/run_formal.py.
 """
 import os
 import re
@@ -68,28 +58,17 @@ def package_deps(path):
     """
     Return the package files `path` needs, in declaration-safe order.
 
-    A file's own text is not enough to decide this.  A top level that merely
-    INSTANTIATES rvntt_core references no package itself, but Verilator pulls
-    rvntt_core in from an include directory and then fails on it with
-    "Package/class for ':: reference' not found".  Following instantiations by
-    regex would be fragile, so every package in the tree is simply put first.
-
-    That is safe because a package is a library: reading one costs nothing but
-    parse time, and an unused one produces no warnings (the constants carry a
-    scoped lint_off, see rv32i_pkg.sv).  It stops being adequate only if two
-    packages ever depend on each other, at which point the ordering here needs
-    a real topological sort -- and the symptom will again be a
-    'before declaration' error, which is unmistakable.
+    Every package in the tree is put first: a top level that merely
+    instantiates rvntt_core references no package itself, yet Verilator pulls
+    rvntt_core in and fails on it.  Adequate until two packages depend on each
+    other, at which point this needs a topological sort.
     """
     try:
         text = open(path).read()
     except OSError:
         return []
 
-    # Strip line comments first: the header comments in these files DISCUSS
-    # `rv32i_pkg::X` and `import rv32i_pkg::*`, and matching prose would be
-    # harmless here but is exactly the kind of thing that silently starts
-    # mattering later.
+    # Strip line comments first: header comments discuss `rv32i_pkg::X`.
     code = re.sub(r"//[^\n]*", "", text)
 
     deps = []

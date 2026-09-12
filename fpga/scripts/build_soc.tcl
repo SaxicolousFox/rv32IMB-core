@@ -1,19 +1,14 @@
 # ============================================================================
-# A12 -- non-project batch build of the RV32I SoC bitstream for the Arty A7-100T.
-#
-# Same shape as P0.5's build_blinky.tcl, which is the point: that script's flow
-# is hardware-confirmed, so this one changes as little as possible.  What is new
-# is the Fmax support -- the timing gate can be made non-fatal so a search
-# iteration still produces reports for a failing period -- and two extra
-# assertions about what synthesis actually did.
+# Non-project batch build of the SoC bitstream for the Arty A7-100T.
 #
 # Run from the staging directory (soc_init.mem must be in the cwd, because
 # $readmemh resolves relative to it):
-#   vivado -mode batch -source build_soc.tcl -tclargs <fail_on_neg> <want_bit>
+#   vivado -mode batch -source build_soc.tcl -tclargs <fail_on_neg> <want_bit> [strategy]
 #
 #   fail_on_neg  1 (default) exit non-zero if WNS or WHS is negative
 #                0 report and continue -- for the Fmax binary search
 #   want_bit     1 (default) write a bitstream when timing is met
+#   strategy     default | explore_postroute
 # ============================================================================
 
 set PART   xc7a100tcsg324-1
@@ -22,10 +17,8 @@ set OUTDIR [pwd]/out
 
 set FAIL_ON_NEG 1
 set WANT_BIT    1
-# A17 lever 3.  "default" is A12's flow, unchanged to the command; anything else
-# is an opt-in.  The strategy is echoed into SOC_RESULT below, because an Fmax
-# number measured under a different implementation strategy is a different
-# measurement and the two must never be compared without saying so.
+# Echoed into SOC_RESULT: a number measured under a different strategy is a
+# different measurement.
 set STRATEGY    "default"
 if {[llength $argv] > 0} { set FAIL_ON_NEG [lindex $argv 0] }
 if {[llength $argv] > 1} { set WANT_BIT    [lindex $argv 1] }
@@ -33,7 +26,7 @@ if {[llength $argv] > 2} { set STRATEGY    [lindex $argv 2] }
 
 file mkdir $OUTDIR
 
-puts "=== rvntt A12: building $TOP for $PART ==="
+puts "=== rvntt: building $TOP for $PART ==="
 puts "=== Vivado [version -short] ==="
 
 # ------------------------------------------------------------------ sources
@@ -46,23 +39,12 @@ read_verilog -sv [concat $pkgs $rest]
 set_property include_dirs [list [pwd] [pwd]/rtl] [current_fileset]
 read_xdc constraints/arty_a7_100t_soc.xdc
 
-# A27: the optional floorplan.  Reported either way -- "none" is a result and a
-# constraint that quietly failed to arrive is not.
-if {[file exists constraints/pblock.xdc]} {
-  read_xdc constraints/pblock.xdc
-  puts "SOC_PBLOCK: present"
-} else {
-  puts "SOC_PBLOCK: none"
-}
-
 # ------------------------------------------------------------------ synthesis
 synth_design -top $TOP -part $PART -include_dirs [list [pwd] [pwd]/rtl]
 
-# A29.  The ring oscillator's exclusion is read AFTER synthesis, because it
-# selects CELLS and there are none before elaboration.  The count is printed
-# and checked: set_disable_timing over an empty collection is a warning, and
-# the build would then fail much later with a combinational-loop error naming a
-# cell nobody recognises.
+# The ring oscillator's exclusion is read after synthesis, because it selects
+# cells.  The count is printed: set_disable_timing over an empty collection is
+# only a warning, and the build would fail much later at the DRC.
 if {[file exists constraints/entropy_ring.xdc]} {
   source constraints/entropy_ring.xdc
   set nring [llength [get_cells -quiet -hierarchical \
@@ -73,20 +55,11 @@ if {[file exists constraints/entropy_ring.xdc]} {
   }
 }
 
-# ...and after synthesis, say what the floorplan actually CONTAINS.  A pblock
-# whose add_cells_to_pblock matched nothing -- a renamed instance, a -quiet that
-# swallowed the error -- creates an empty region and constrains nothing, and the
-# run looks identical to one with no pblock at all.
-foreach pb [get_pblocks -quiet] {
-  puts "SOC_PBLOCK_CELLS: $pb [llength [get_cells -quiet -of_objects $pb]] cell(s) at [get_property GRID_RANGES $pb]"
-}
 write_checkpoint -force $OUTDIR/post_synth.dcp
 report_utilization -file $OUTDIR/post_synth_util.rpt
 
-# Vivado reports a missing $readmemh file, an unconnected top-level port and
-# several other things that produce a WORKING BUT WRONG bitstream as CRITICAL
-# WARNING, then carries on.  P0.5's elaboration gate exists for the same reason;
-# this is the synthesis-stage version of it.
+# A missing $readmemh file or an unconnected top-level port is a CRITICAL
+# WARNING, not an error, and produces a working but wrong bitstream.
 set crit [get_msg_config -severity "CRITICAL WARNING" -count]
 set errs [get_msg_config -severity "ERROR" -count]
 puts "=== synthesis messages: $errs error(s), $crit critical warning(s) ==="
@@ -95,9 +68,7 @@ if {$errs > 0 || $crit > 0} {
   exit 1
 }
 
-# The memory must be BLOCK RAM.  128 KB in fabric would not fit the device, and
-# the failure mode without this check is a place-and-route that runs for an hour
-# and then reports the design does not fit -- with no indication of why.
+# The memory must be block RAM; 128 KB in fabric would not fit the device.
 set nbram [llength [get_cells -hierarchical -filter {PRIMITIVE_TYPE =~ BMEM.*.*}]]
 puts "=== inferred BRAM primitives: $nbram ==="
 if {$nbram < 8} {
@@ -106,10 +77,8 @@ if {$nbram < 8} {
 }
 
 # ------------------------------------------------------- place and route
-# A17 lever 3.  MODS_A A17 names Performance_ExplorePostRoutePhysOpt, which in a
-# non-project flow is these directives plus a second phys_opt_design AFTER the
-# router -- the "PostRoutePhysOpt" half of the name, and the half that does
-# something a place-and-route rerun cannot.
+# explore_postroute is Performance_ExplorePostRoutePhysOpt in a non-project
+# flow: Explore directives plus a second phys_opt_design after the router.
 puts "=== implementation strategy: $STRATEGY ==="
 if {$STRATEGY eq "explore_postroute"} {
   opt_design      -directive Explore
@@ -129,8 +98,7 @@ report_timing_summary -file $OUTDIR/post_route_timing.rpt
 report_utilization    -file $OUTDIR/post_route_util.rpt
 report_clock_utilization -file $OUTDIR/post_route_clock_util.rpt
 report_drc            -file $OUTDIR/post_route_drc.rpt
-# The worst setup path, with enough detail to NAME the critical path rather than
-# just quote a number at it.  A12 asks for the path, not only the slack.
+# The worst setup paths, with enough detail to name the critical path.
 report_timing -max_paths 10 -nworst 10 -setup -path_type full_clock_expanded \
               -file $OUTDIR/post_route_critical.rpt
 
@@ -138,11 +106,8 @@ report_timing -max_paths 10 -nworst 10 -setup -path_type full_clock_expanded \
 set wns [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -setup]]
 set whs [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -hold]]
 
-# The core clock's period as VIVADO DERIVED IT from the MMCM, not as anyone
-# believes it to be.  gen_soc_clk.py sets the frequency through the MMCM
-# divider, so this is the only place the intent and the implementation can be
-# compared -- and if they ever disagree, every Fmax number is wrong by the same
-# unknown factor.
+# The core clock's period as Vivado derived it from the MMCM, so intent
+# (gen_soc_clk.py) and implementation can be compared.
 set core_clk [get_clocks -of_objects [get_pins u_clkgen/u_mmcm/CLKOUT0]]
 set period   [get_property PERIOD $core_clk]
 set fmhz     [expr {1000.0 / $period}]
@@ -150,17 +115,9 @@ set fmhz     [expr {1000.0 / $period}]
 set luts [llength [get_cells -hierarchical -filter {PRIMITIVE_GROUP == LUT}]]
 set ffs  [llength [get_cells -hierarchical -filter {PRIMITIVE_GROUP == FLOP_LATCH}]]
 
-# A14's multiplier MUST be on DSP48E1s, and this is where that gets checked in
-# the design that ships rather than in an out-of-context experiment.  Counted by
-# REF_NAME over every primitive, with nothing filtered: fpga/scripts/synth_ooc.tcl
-# first tried to count DSPs by PRIMITIVE_TYPE and reported ZERO over a netlist
-# containing four, because the group name was guessed rather than looked up.  A
-# histogram-style count names no group and therefore cannot name one wrongly.
-#
-# A multiplier that fell back to fabric would still be CORRECT -- which is why
-# this is a hard failure rather than a warning.  It would cost roughly a
-# thousand LUTs and several nanoseconds, and every symptom would show up as a
-# timing number with no obvious cause.
+# The multiplier must be on DSP48E1s.  Counted by REF_NAME over every primitive
+# with nothing filtered.  A multiplier that fell back to fabric would still be
+# correct, which is why this is a hard failure rather than a warning.
 set ndsp 0
 foreach c [get_cells -hierarchical -filter {IS_PRIMITIVE}] {
   if {[string match "DSP*" [get_property REF_NAME $c]]} { incr ndsp }

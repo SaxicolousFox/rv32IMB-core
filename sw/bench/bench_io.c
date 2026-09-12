@@ -1,15 +1,10 @@
 /*
- * The A13 console and its printf.
+ * The benchmark console and its printf.
  *
- * Scope is deliberately exactly what Dhrystone and CoreMark ask for and nothing
- * more -- %c %s %d %i %u %x %X %p and the `l` length modifier, with `-`, `0` and
- * a numeric width.  CoreMark's "0x%04x" CRC lines and its "%lu" tick counts are
- * the two that matter for the RESULT; the rest is prose.  An unsupported
- * conversion prints itself back rather than being skipped, so a format this does
- * not handle shows up in the capture as `%q` instead of vanishing.
- *
- * BENCH_HOST swaps the UART for stdout so the identical code can be diffed
- * against glibc; see bench_io.h.
+ * Exactly what Dhrystone and CoreMark ask for: %c %s %d %i %u %x %X %p and
+ * the `l` length modifier, with `-`, `0` and a numeric width.  An unsupported
+ * conversion prints itself back rather than being skipped.  BENCH_HOST swaps
+ * the UART for stdout so the identical code can be diffed against glibc.
  */
 #include <stdarg.h>
 #include <stddef.h>
@@ -271,10 +266,8 @@ int printf(const char *fmt, ...)
 }
 #endif
 
-/* A20 (MODS_A2).  The snapshot buffers and the reader, outside the host/target
- * split because both sides need the storage -- the host build fills it with
- * zeros through bench_mhpmcounter()'s stub and bench_main.c prints host=1, so
- * a host capture cannot be mistaken for a measurement. */
+/* The HPM snapshot buffers and the reader, outside the host/target split
+ * because both sides need the storage. */
 unsigned int bench_hpm_dhry0[BENCH_HPM_N], bench_hpm_dhry1[BENCH_HPM_N];
 unsigned int bench_hpm_cm0[BENCH_HPM_N],   bench_hpm_cm1[BENCH_HPM_N];
 

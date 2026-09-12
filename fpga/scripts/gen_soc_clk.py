@@ -2,26 +2,16 @@
 """
 Choose MMCM parameters for a target core frequency and emit them as macros.
 
-Why this is generated rather than typed in three places: the A12 Fmax search
-sweeps the core clock, and THREE things have to move together -- the MMCM
-divider, the UART baud divisor (which is CLK_HZ/BAUD inside rvntt_uart_tx), and
-whatever the timing report is compared against.  Typing them separately is how
-you end up measuring 95 MHz and decoding the UART at the wrong baud, then
-blaming the serial cable.  One script writes all of them from one number.
+Three things move together -- the MMCM divider, the UART baud divisor
+(CLK_HZ/BAUD inside rvntt_uart_tx) and what the timing report is compared
+against -- so one script writes all of them from one number.  With an
+MMCM-generated clock there is no create_clock for the core domain: the MMCM
+divider IS the constraint, and build_soc.tcl asserts afterwards that the
+period Vivado derived matches the one requested.
 
-Note on the plan's "constrain the target period T in the XDC": with an
-MMCM-generated clock you do not, and must not, write a create_clock for the core
-domain -- Vivado derives the generated clock from the MMCM's own parameters, and
-a competing create_clock would either be ignored or silently override the real
-relationship.  The MMCM divider IS the constraint.  So T is set here, Vivado
-derives it, and fpga/scripts/build_soc.tcl asserts afterwards that the period
-Vivado actually derived matches the one requested -- which is the check that
-keeps this honest.
-
-Artix-7 -1 speed grade: VCO must land in 600-1200 MHz.  CLKFBOUT_MULT_F and
+Artix-7 -1: VCO must land in 600-1200 MHz.  CLKFBOUT_MULT_F and
 CLKOUT0_DIVIDE_F move in steps of 0.125, so the reachable frequencies near
-100 MHz are about 1.4 MHz apart; the search reports the achieved value, never
-the requested one.
+100 MHz are about 1.4 MHz apart; the achieved value is reported.
 """
 import argparse, os, sys
 

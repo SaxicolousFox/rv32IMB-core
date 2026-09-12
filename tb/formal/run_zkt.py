@@ -1,58 +1,34 @@
 #!/usr/bin/env python3
 """
-MODS_A2 A30 -- the `Zkt` data-independent-latency proof.
+The `Zkt` data-independent-latency proof.
 
-THE CLAIM, scoped from the ratified specification (MODS_A2 3.5, which read it
-rather than recalling it): every instruction on `Zkt`'s list that THIS CORE
-IMPLEMENTS has an EX occupancy that depends only on its opcode.
-
-It is proved in two halves, and they are different KINDS of proof:
+The claim: every instruction on Zkt's list that this core implements has an
+EX occupancy that depends only on its opcode.  Two halves:
 
   CLAIM A -- everything except mul/mulh/mulhsu/mulhu.
       `a_zkt_only_muldiv_stalls` in rvntt_core.sv: ex_stall is the only thing
       that can extend an instruction's stay in EX, and it is asserted only for
-      the multi-cycle unit.  riscv-formal proves it at depth 14 on all 77
-      checks, because an assert in the design is an obligation on all of them.
-      Nothing to do here.
+      the multi-cycle unit.  riscv-formal proves it on all 77 checks.
 
   CLAIM B -- the multiplier.
-      THE SEQUENCER'S STATE IS NOT A FUNCTION OF THE OPERANDS.  This script
-      proves that STRUCTURALLY, by computing the transitive fan-in cone of the
-      cells that drive `done` and checking that the operand ports are not in it.
+      The sequencer's state is not a function of the operands, proved
+      structurally: the transitive fan-in cone of the cells driving `done`
+      must not contain the operand ports.  Exact rather than depth-bounded,
+      total over operands, and it fails by naming the operand.
 
-WHY STRUCTURALLY AND NOT BY BMC, which is the interesting part.  The obvious
-formulation -- "two executions of the same opcode with different operands take
-the same number of cycles" -- asks a solver to relate two copies of a circuit,
-and MODS_A A15 already paid fifteen minutes to learn that lesson on the divider.
-MODS_A2 A30 says it outright: state the invariant one circuit maintains rather
-than the conclusion two of them reach.
-
-A cone-of-influence check is better than a bounded proof here in three ways.
-It is EXACT rather than bounded to a depth -- there is no unrolling and no
-horizon past which a data-dependent path could hide.  It is total over
-operands rather than over the reachable states a BMC happens to explore.  And
-it fails LOUDLY and specifically: the failure names the operand bit and the
-path, rather than producing a counterexample trace to be read.
-
-THE VACUITY CHECK IS THE POINT, and A30 makes it the done-when: this script is
-run against a multiplier with an injected data-dependent early-out and MUST
-report a violation.  A Zkt proof that has never been observed to fail is a
-security claim resting on nothing, and this project has twice shipped a checker
-that reported success over a broken design.
+The vacuity check is the point: run against a multiplier with an injected
+data-dependent early-out, this script must report a violation.
 """
 import argparse, os, re, subprocess, sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# The operand ports.  `op` is the opcode and IS allowed in the cone -- that is
-# the whole point: occupancy may depend on which instruction it is, and on
-# nothing else.
+# The operand ports.  `op` is the opcode and IS allowed in the cone: occupancy
+# may depend on which instruction it is, and on nothing else.
 OPERANDS = ["a", "b"]
 
-# What this core implements from Zkt's list, and what it does not.  MODS_A2 3.5
-# read the list from riscv-crypto's zkt document; these are transcribed from it
-# and reported by the write-up so the NOT-implemented half is stated rather than
-# passed over.
+# What this core implements from Zkt's list, and what it does not; the
+# not-implemented half is reported rather than passed over.
 IMPLEMENTED = {
     "RV32I arithmetic/logical/shift":
         ["add", "addi", "sub", "and", "andi", "or", "ori", "xor", "xori",
@@ -60,7 +36,7 @@ IMPLEMENTED = {
          "slt", "slti", "sltu", "sltiu", "lui", "auipc"],
     "M (multiply only -- Zkt excludes div/rem)":
         ["mul", "mulh", "mulhsu", "mulhu"],
-    "Zbkb, as implemented by A21":
+    "Zbkb":
         ["ror", "rol", "rori", "andn", "orn", "xnor",
          "pack", "packh", "brev8", "rev8", "zip", "unzip"],
 }
@@ -86,9 +62,7 @@ def cone(src, tmp):
     ysfile = os.path.join(tmp, "zkt.ys")
     outfile = os.path.join(tmp, "cone.txt")
     with open(ysfile, "w") as f:
-        # The package first.  MUL_CYCLES defaults to rv32i_pkg's constant, and
-        # without the package Yosys reports "Condition for generate if is not
-        # constant" -- a parameter it cannot evaluate, not a design problem.
+        # The package first: MUL_CYCLES defaults to rv32i_pkg's constant.
         f.write("read_verilog -sv -formal %s\n"
                 % os.path.join(ROOT, "rtl/core/rv32i_pkg.sv"))
         f.write("read_verilog -sv -formal %s\n" % src)
@@ -96,17 +70,11 @@ def cone(src, tmp):
         f.write("proc\n")
         f.write("flatten\n")
         f.write("opt_clean\n")
-        # %ci* is the transitive fan-in ("cone in") of the selection.
-        # `%ci*` is Yosys's transitive fan-in operator.  It is written with a
-        # single percent here: the doubled form was a Python %-format escape
-        # that survived into the Tcl-ish script and Yosys rejected it as an
-        # unknown operator -- a reminder that this file is generated text and
-        # its escaping is not checked by anything but Yosys.
+        # `%ci*` is Yosys's transitive fan-in operator, written with a single
+        # percent (this is generated text; a doubled form reached Yosys once).
         f.write("select -list w:done %ci*\n")
-    # NOT -q.  `select -list` writes to the log, and -q suppresses it -- the
-    # first run of this script came back with an empty cone for that reason
-    # alone.  The vacuity guard below is what caught it, which is the argument
-    # for having one.
+    # Not -q: `select -list` writes to the log, and -q suppresses it, which
+    # gives an empty cone.
     r = subprocess.run(["yosys", "-s", ysfile],
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = r.stdout.decode("utf-8", "replace")
@@ -137,11 +105,8 @@ def main() -> int:
     tmp = tempfile.mkdtemp(prefix="zkt_")
     txt = cone(a.rtl, tmp)
 
-    # The selection prints one object per line.  An operand PORT in the cone is
-    # a data-dependent path into the sequencer.
-    # `select -list` prints one object per line as `module/name`, NOT as the
-    # `\name` form the RTLIL identifiers use.  Parsed from the artefact rather
-    # than assumed: assuming the other form is what produced an empty set.
+    # `select -list` prints one object per line as `module/name`.  An operand
+    # port in the cone is a data-dependent path into the sequencer.
     objs = set()
     for l in txt.splitlines():
         l = l.strip()
@@ -165,8 +130,7 @@ def main() -> int:
               "instruction and the reason; do not claim the extension.")
         return 1
 
-    # ...and the check must not be vacuous.  If `op` is ALSO absent, the
-    # selection found nothing at all and the absence above means nothing.
+    # ...and the check must not be vacuous: `op` must be present.
     op_present = any(re.fullmatch(r"op(\[\d+\])?", o) for o in objs)
     print("  opcode bits found in that cone             : %s"
           % ("yes" if op_present else "NO"))

@@ -1,31 +1,23 @@
 # ============================================================================
-# a6_forward.S -- directed forwarding tests (plan A6).
+# a6_forward.S -- directed forwarding tests.
 #
-# Every case below is checked by DIFFING THE WHOLE COMMIT LOG against Spike, so
-# there is no "expected value" written down anywhere in this file: every
-# instruction's writeback is compared, not just a final answer.  What this file
-# has to get right is therefore only the HAZARD DISTANCES, and each case names
-# the one it is exercising.
-#
-# Distances, counted from the consumer:
+# Checked by diffing the whole commit log against Spike, so no expected value
+# is written down here; what this file has to get right is the hazard
+# distances, counted from the consumer:
 #   1  producer is in MEM  -> FWD_MEM
 #   2  producer is in WB   -> FWD_WB
 #   3  producer wrote the register file on the edge the consumer read it
-#      -> the register file's write-through, not the forwarding network
+#      -> the register file's write-through
 #
-# `nop` is `addi x0, x0, 0`.  Its rd is x0, so padding with it can never itself
-# create or satisfy a dependency -- which is what makes it usable as a spacer
-# in a test about dependencies.
-#
-# x8 is the scratch pointer throughout and is never written after the prologue.
+# `nop` is `addi x0, x0, 0`, so padding with it never creates a dependency.
+# x8 is the scratch pointer and is never written after the prologue.
 # ============================================================================
         .section .text.init
         .globl _start
 _start:
         # ---- prologue, and case 0 in its own right -----------------------
-        # `la x8, scratch` expands to auipc+addi with the addi reading the
-        # auipc's rd at distance 1.  A4 had to hand-pad this; that it now
-        # assembles as written is the first thing forwarding buys.
+        # `la x8, scratch` is auipc+addi with the addi reading the auipc's rd
+        # at distance 1.
 1:      auipc   x8, %pcrel_hi(scratch)
         addi    x8, x8, %pcrel_lo(1b)
 
@@ -39,11 +31,9 @@ _start:
         lui     x5, 0x44444
         addi    x5, x5, 0x444
 
-        # ---- case 1: THE PRIORITY CASE (plan A6, verbatim) ---------------
-        # Two producers of x1 are in flight at once.  The consumer must take
-        # the YOUNGER one, in MEM, not the older one in WB.  The two write
-        # different values, so a swapped priority is a different answer rather
-        # than the same answer by luck.
+        # ---- case 1: the priority case -----------------------------------
+        # Two producers of x1 are in flight at once; the consumer must take
+        # the younger one, in MEM.  The two write different values.
         add     x1, x2, x3
         add     x1, x4, x5
         add     x6, x1, x0
@@ -77,9 +67,8 @@ _start:
         add     x6, x1, x17
 
         # ---- case 6: the STORE DATA operand ------------------------------
-        # rs2 of a store does not pass through the ALU, so an arithmetic-only
-        # test never touches this path.  Plan A7 calls it "the case people
-        # forget"; it is forwarded in A6 and observed here by loading it back.
+        # rs2 of a store does not pass through the ALU; observed by loading it
+        # back.
         add     x1, x2, x4
         sw      x1, 0(x8)
         nop
@@ -124,10 +113,7 @@ _start:
         addi    x16, x16, 1
 
         # ---- case 12: a LOAD's result at distance 2 ----------------------
-        # Legal even without the A7 interlock: the load is in WB by then, and
-        # FWD_WB carries load data.  This is the exact path A7's one-cycle
-        # stall will route a distance-1 load-use through, so it is worth having
-        # working and tested before the interlock is built on top of it.
+        # The load is in WB by then, and FWD_WB carries load data.
         lw      x18, 4(x8)
         nop
         add     x19, x18, x0
@@ -143,8 +129,6 @@ _start:
         lw      x9, 0(x10)
 
         # ---- epilogue: arm Spike's trap handler, then stop ---------------
-        # `csrw mtvec, t0` writes no register, so the core and Spike agree on
-        # architectural state even though no CSR file exists yet.
 2:      auipc   t0, %pcrel_hi(trap_handler)
         addi    t0, t0, %pcrel_lo(2b)
         csrw    mtvec, t0

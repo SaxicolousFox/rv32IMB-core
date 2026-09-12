@@ -1,22 +1,10 @@
 """
-RISCOF DUT plugin for the rvntt core (plan A10).
+RISCOF DUT plugin for the rvntt core.
 
-WHAT RISCOF ASKS OF A DUT, and what this does about each of it:
-
-  * `build` -- be told the ISA and platform YAMLs and get ready.  Here that
-    means compiling the Verilator simulator ONCE.  RISCOF calls runTests with
-    every selected test at once, so building per test would dominate the run.
-
-  * `runTests` -- for each test, produce `DUT-rvntt.signature`.  RISCOF then
-    diffs it against the reference model's file for the same test.
-
-THE SIMULATOR'S MEMORY IMAGE IS A BUILD-TIME PARAMETER, which is the one place
-this plugin has to be careful.  `rvntt_ram`'s INIT_FILE is a module parameter,
-not a plusarg -- deliberately, because a plusarg is not synthesisable and that
-file is meant to elaborate under Vivado.  So every test rewrites one image file
-at a fixed path, and the run is therefore SEQUENTIAL: `jobs` is forced to 1 in
-the generated make command.  38 tests take a few seconds each; the alternative
-is 38 Verilator builds.
+`build` compiles the Verilator simulator once; `runTests` produces
+`DUT-rvntt.signature` for each test.  The memory image is a build-time
+parameter (rvntt_ram's INIT_FILE), so every test rewrites one image file at a
+fixed path and the run is sequential (`-j1`).
 """
 import os
 import shlex
@@ -33,7 +21,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
 
 class rvntt(pluginTemplate):
     __model__ = "rvntt"
-    __version__ = "A10"
+    __version__ = "1.0"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -45,9 +33,8 @@ class rvntt(pluginTemplate):
         self.isa_spec = os.path.abspath(config['ispec'])
         self.platform_spec = os.path.abspath(config['pspec'])
 
-        # Where run_riscof.py put the Verilator build and the image file it was
-        # built against.  Passed through config.ini rather than guessed, so the
-        # plugin has no opinion about the project's directory layout.
+        # Where run_riscof.py put the Verilator build and its image file,
+        # passed through config.ini.
         self.sim_exe = os.path.abspath(config['simexe'])
         self.image = os.path.abspath(config['image'])
         self.runner = os.path.join(ROOT, "tb/riscof/rvntt_run.py")
@@ -58,18 +45,10 @@ class rvntt(pluginTemplate):
         self.work_dir = work_dir
         self.suite_dir = suite
         self.compile_cmd = (
-            # -mno-relax IS REQUIRED, and the reason is worth writing down.
-            # arch_test.h's LA macro wraps its `.align` in `.option rvc` so the
-            # padding can be two bytes when it needs to be, then switches back
-            # with `.option norvc`.  With linker relaxation on, the alignment
-            # becomes an R_RISCV_ALIGN relocation that the LINKER fills -- and
-            # the linker fills it with COMPRESSED nops, because the relocation
-            # was recorded while rvc was still enabled.  The result is c.nop
-            # instructions in the instruction stream of a test for a core with
-            # no C extension: Spike faults on the first one, vectors to the
-            # unset mtvec at address 0, and spins there forever.  With
-            # -mno-relax the assembler resolves the alignment itself, under the
-            # norvc that was intended.
+            # -mno-relax is required: arch_test.h's LA macro wraps its `.align`
+            # in `.option rvc`, and with linker relaxation the linker fills the
+            # alignment with compressed nops, which a core with no C extension
+            # traps on.
             'riscv-none-elf-gcc -march={0} -mno-relax'
             ' -static -mcmodel=medany -fvisibility=hidden -nostdlib'
             ' -nostartfiles -g'

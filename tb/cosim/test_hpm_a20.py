@@ -1,22 +1,13 @@
 #!/usr/bin/env python3
 """
-A20 -- directed Zihpm hardware performance counter tests (MODS_A2).
+Directed Zihpm hardware performance counter tests.
 
-Runs sw/tests/a20_hpm.S on the RTL under Verilator.  The program is
-self-checking against riscv-tests' tohost protocol, for the same reason
-a9_csr.S is: what it checks is COUNTER VALUES, and Spike has no model of this
-core's stalls at all -- it advances mcycle once per instruction -- so a
-commit-log diff cannot check any of it.  Every property is stated as an
-absolute inside the program instead.
-
-This file checks the CSR-LEVEL CONTRACT: the registers exist, are WARL where
-the spec says, read zero for the unimplemented indices without trapping, and
-mcountinhibit actually inhibits.  It does NOT check that the six events are
-attributed correctly -- that is A20's real done-when and it is done by
-cross-validating against A18's independently-written simulation instrument over
-the benchmarks, to the count.  The two are complementary: this file makes sure
-the registers are real, and the cross-validation makes sure they mean what they
-claim.  Neither alone is worth much.
+Runs sw/tests/a20_hpm.S on the RTL under Verilator.  Self-checking through
+riscv-tests' tohost protocol: it checks counter values, which Spike has no
+model of.  This covers the CSR-level contract -- the registers exist, are
+WARL where the spec says, read zero for the unimplemented indices without
+trapping, and mcountinhibit inhibits.  Event attribution is checked by
+tb/perf/run_stall_profile.py against the simulation instrument.
 """
 import argparse
 import os

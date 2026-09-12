@@ -1,24 +1,16 @@
 #!/usr/bin/env python3
 """
-Directed CSR, trap and minstret tests (plan A9).
+Directed CSR, trap and minstret tests.
 
-Two programs, and they are checked in different ways on purpose.
+`a9_csr.S` is self-checking through riscv-tests' tohost protocol: half of
+what it checks cannot agree with Spike, whose mcycle advances once per
+instruction and whose minstret counts the five bootrom instructions this core
+never executes.
 
-`a9_csr.S` is SELF-CHECKING, using riscv-tests' tohost protocol: it reports
-which numbered case failed.  It is not run through the lockstep differ because
-half of what it checks cannot agree with Spike -- Spike advances mcycle once per
-instruction, and its minstret counts the five bootrom instructions this core
-never executes.  Those are properties of the reference model's timing, not
-disagreements about architecture, and a commit-log diff cannot tell the
-difference.
-
-`a9_minstret.S` is plan A9's actual done-when: "minstret after a known program
-equals the instruction count Spike reports for the same program".  The
-comparison is against Spike's COMMIT COUNT at or above the load address, not
-against Spike's own minstret, because the latter differs by the bootrom's five
-instructions and matching it would mean hardcoding that constant.  The program's
-body is a loop, so the number counts dynamic instructions: a counter wired to
-the fetch stream would agree with the static size of .text and fail here.
+`a9_minstret.S` compares minstret after a known program against Spike's
+commit count at or above the load address (not Spike's own minstret, for the
+bootrom reason).  The body is a loop, so a counter wired to the fetch stream
+would fail here.
 """
 import argparse
 import os
@@ -40,8 +32,8 @@ BASE = 0x80000000
 def compile_s(path, tmp, name):
     elf = os.path.join(tmp, name + ".elf")
     r = subprocess.run(
-        # rv32im as of A14: a9_minstret.S puts a multiply and a divide in its
-        # loop so that minstret has to count a multi-cycle instruction once.
+        # a9_minstret.S puts a multiply and a divide in its loop so that
+        # minstret has to count a multi-cycle instruction once.
         ["riscv-none-elf-gcc", "-march=" + spike_asm.MARCH, "-mabi=ilp32",
          "-nostdlib", "-nostartfiles", "-T", t4.LD, "-o", elf, path],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -109,7 +101,7 @@ def main():
         if not ok:
             print("    " + out.replace("\n", "\n    "))
             print("    minstret disagrees with Spike's instruction count. "
-                  "Plan A9: every IPC number downstream depends on this.")
+                  "Every IPC number downstream depends on this.")
             failures.append("a9_minstret")
 
     if failures:

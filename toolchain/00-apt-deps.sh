@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
-# P0.1 — system package prerequisites (Ubuntu 26.04 / WSL2)
-# Run once with: sudo bash toolchain/00-apt-deps.sh
+# System package prerequisites (Ubuntu / WSL2).  Run once with:
+#   sudo bash toolchain/00-apt-deps.sh
 #
-# Rationale for each group:
-#   python3-venv/pip/dev  -> cocotb + cocotb-test live in a project venv (.venv)
-#   device-tree-compiler  -> hard requirement of Spike's configure (AC_PATH_PROG DTC)
-#   libboost-*            -> Spike needs boost asio + regex (m4/ax_boost_{asio,regex}.m4)
-#   build-essential/cmake -> general native builds
+#   python3-venv/pip/dev  -> the project venv (.venv)
+#   device-tree-compiler  -> Spike's configure requires dtc
+#   libboost-*            -> Spike needs boost asio + regex
+#   build-essential/cmake -> native builds
 #   gtkwave/graphviz      -> waveform viewing, `yosys show`
 set -euo pipefail
 

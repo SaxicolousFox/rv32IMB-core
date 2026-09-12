@@ -1,24 +1,12 @@
 #!/usr/bin/env python3
 """
-The branch predictor of docs/a19-bpred-spec.md, implemented from that document.
+The branch predictor, modelled from its specification rather than its RTL.
 
-MODS_A section 3.3 asks for a cycle model that can predict a program's span WITH
-mispredicts, and asks for it to be built from the predictor's specification
-rather than from the predictor's RTL -- otherwise the check is a mirror.  So
-this file is written against docs/a19-bpred-spec.md and against nothing else.
-If it disagrees with rtl/core/rvntt_bpred.sv, the specification decides which of
-them is wrong; that is the whole reason the specification was written first.
-
-It is a pure function of the RETIRED control-transfer stream.  Two decisions in
-the specification are what make that true, and both were made for this reason:
-
-  * state changes only when a transfer RESOLVES in EX, so the wrong path -- which
-    a retired trace does not contain -- never touches it (spec section 4);
-  * the reset state is "every entry invalid" and nothing else, so the model needs
-    to know NOTHING about cycles to start in the same state the hardware does
-    (spec section 6).  An earlier draft cleared its arrays with a 256-cycle sweep
-    after reset and would have needed the model to count cycles from reset to
-    reproduce it.
+A direct-mapped BTB with a two-bit counter per entry and a return-address
+stack, as a pure function of the retired control-transfer stream: state
+changes only when a transfer resolves in EX (so the wrong path never touches
+it), and the reset state is every entry invalid.  If this disagrees with
+rtl/core/rvntt_bpred.sv, the specification decides which is wrong.
 """
 
 BRANCH, JUMP, CALL, RET = 0, 1, 2, 3
@@ -26,38 +14,17 @@ BRANCH, JUMP, CALL, RET = 0, 1, 2, 3
 BTB_ENTRIES = 256
 RAS_ENTRIES = 8
 
-# HOW LONG AN UPDATE TAKES TO BECOME VISIBLE, in FETCH cycles.  Specification
-# section 8, and it is arithmetic rather than a guess:
-#
-#   instruction i is fetched at F(i) and looked up one address ahead, at F(i)-1;
-#   transfer j resolves in EX at F(j)+2 and its write is readable from F(j)+3.
-#
-# So j's update reaches i's lookup exactly when F(i) - F(j) >= 4.  A
-# three-instruction loop fetches its branch every 3 cycles when it is predicted,
-# which is inside that window -- so the second iteration of a tight loop cannot
-# see what the first one learned, and mispredicts.
-#
-# IT MUST BE FETCH CYCLES, NOT RETIRE CYCLES, and that cost a wrong answer to
-# learn.  `retire - fetch` is not a constant: a load-use interlock holds an
-# instruction in ID after its prediction has already been made, so a rule
-# expressed on retirements is short by exactly the number of cycles it was held.
-# On Dhrystone that is 39 of 396 mispredicts -- every one of them a return into
-# a callee reached through a stall -- while CoreMark, whose calls are not, agreed
-# exactly and hid the bug.  tb/perf/tb_profile.cpp dates every transfer by its
-# fetch for this reason.
+# How long an update takes to become visible, in FETCH cycles: instruction i
+# is looked up at F(i)-1; transfer j resolves in EX at F(j)+2 and its write is
+# readable from F(j)+3, so j's update reaches i's lookup when F(i)-F(j) >= 4.
+# A three-instruction loop cannot see what its previous iteration learned.
+# Fetch cycles, not retire cycles: a load-use interlock holds an instruction
+# in ID after its prediction was made.
 VISIBILITY_GAP = 4
 
-# A REDIRECT TARGET IS NOT PREDICTED, and this is a timing constraint that
-# became an architectural rule.  The lookup reads only registered sources, so
-# during the cycle a redirect fires the predictor is looking at the address the
-# front end WOULD have fetched, not at the redirect target.  Its answer is
-# therefore about the wrong address and is suppressed.
-#
-# It is here because the alternative was unaffordable: indexing the BTB with
-# `pc_next` -- which contains ex_redirect_target, the ALU's own output -- put the
-# forwarding mux, the full ALU carry chain and a 256-entry array read in one
-# cycle.  Measured at 16.058 ns against A17's 11.562; the design failed 80 MHz
-# by 3.886 ns.  See docs/a19-bpred-spec.md section 2.
+# A redirect target is not predicted: the lookup reads only registered sources,
+# so during the cycle a redirect fires the predictor is looking at the address
+# the front end would have fetched, and its answer is suppressed.
 SUPPRESS_AFTER_REDIRECT = True
 
 # What a freshly allocated entry's counter holds.  Weakly taken, which is what
@@ -81,7 +48,7 @@ def is_link(r):
 
 
 def classify(insn):
-    """kind, from the encoding alone -- specification section 4."""
+    """kind, from the encoding alone."""
     op = insn & 0x7F
     rd = (insn >> 7) & 0x1F
     rs1 = (insn >> 15) & 0x1F
@@ -103,7 +70,7 @@ class BPred:
         self.ras_sp = 0
         self.ras_count = 0
 
-    # ---------------------------------------------------------- specification 3
+    # ---- lookup -------------------------------------------------------------
     def predict(self, addr):
         """Return (taken, target) for a fetch of `addr`."""
         e = self.btb[btb_index(addr)]
@@ -119,7 +86,7 @@ class BPred:
             taken = True
         return (True, target) if taken else (False, 0)
 
-    # ---------------------------------------------------------- specification 4
+    # ---- update -------------------------------------------------------------
     def update(self, pc, insn, taken, target):
         kind = classify(insn)
         i = btb_index(pc)
@@ -156,7 +123,7 @@ def step(bp, pc, insn, taken, target, n, fault=0):
     kind = classify(insn)
     p_taken, p_target = bp.predict(pc)
 
-    # ---- fault injection, specification section 9 --------------------------
+    # ---- fault injection ----------------------------------------------------
     if fault == 1:                          # tag ignored: any index match hits
         e = bp.btb[btb_index(pc)]
         if e is not None:
@@ -216,19 +183,10 @@ def run(trace, fault=0, bp=None):
 
 
 class DelayedBPred:
-    """A BPred whose updates land `VISIBILITY_GAP` retire cycles late.
-
-    This is the predictor as the pipeline actually presents it, and it is the
-    only form the cycle model may use.  An earlier version of model/bpred.py
-    applied every update immediately; it predicted a span 76 cycles short of the
-    RTL's on sw/tests/a19_bpred.S, and the difference was entirely the window
-    described above -- 38 tight-loop iterations that the hardware cannot yet
-    know about and the model thought it could.
-
-    The caller supplies each transfer's retire cycle.  Updates are queued and
-    applied in program order once far enough in the past, which is exactly what
-    a distributed-RAM write followed by an asynchronous read does.
-    """
+    """A BPred whose updates land `VISIBILITY_GAP` retire cycles late -- the
+    predictor as the pipeline presents it, and the only form the cycle model
+    may use.  Updates are queued and applied in program order once far enough
+    in the past."""
 
     def __init__(self, gap=VISIBILITY_GAP):
         self.bp = BPred()
@@ -251,12 +209,9 @@ class DelayedBPred:
 def score_trace(bp, seg, counts=None):
     """Score a warmed DelayedBPred over [(fetch_cycle, pc, insn, next_pc)].
 
-    THE ONE PLACE the suppression rule of SUPPRESS_AFTER_REDIRECT is
-    implemented, so the profiler's closure, the projection driver and any future
-    caller cannot disagree about it.  A transfer is unpredicted when it IS the
-    architectural successor of a transfer that just mispredicted -- that is the
-    instruction the front end fetched from the redirect target, and the
-    predictor was looking elsewhere when the redirect fired.
+    The one place SUPPRESS_AFTER_REDIRECT is implemented: a transfer is
+    unpredicted when it is the architectural successor of a transfer that just
+    mispredicted.
     """
     n = counts if counts is not None else {k: 0 for k in COUNTS}
     pending_target = None                # architectural next pc of a mispredict

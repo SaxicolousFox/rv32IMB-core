@@ -1,20 +1,9 @@
 /*
- * Differential driver for sw/bench/bench_io.c's printf.
- *
- * For each case it emits the bench formatter's output and glibc's for the same
- * format and arguments, on adjacent lines.  tb/unit/test_bench_printf.py diffs
- * the pairs.
- *
- * This exists because a formatting bug is invisible in a benchmark: a wrong
- * cycle count and a correctly-measured count printed wrong produce the same
- * capture, and the score would be wrong with nothing anywhere saying so.  The
- * conversions covered are exactly the ones Dhrystone and CoreMark use -- %lu for
- * CoreMark's tick counts and %04x for its CRCs are the two that decide whether a
- * run is reported as valid.
- *
- * %p and unknown conversions are deliberately NOT compared: bench_io.c defines
- * its own behaviour for both (see the comments there) and glibc's differs, so a
- * diff would be measuring a documented divergence rather than a bug.
+ * Differential driver for sw/bench/bench_io.c's printf: for each case it
+ * emits the bench formatter's output and glibc's on adjacent lines, and
+ * tb/unit/test_bench_printf.py diffs the pairs.  The conversions covered are
+ * the ones Dhrystone and CoreMark use.  %p and unknown conversions are not
+ * compared: bench_io.c defines its own behaviour for both.
  */
 #include <stdio.h>
 #include <string.h>

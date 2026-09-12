@@ -1,32 +1,15 @@
 // ============================================================================
-// A18 -- the stall attribution instrument.
+// The stall attribution instrument.
 //
-// MODS_A A18 asks for "a profiling harness over the RTL", and this is the RTL
-// half of it: it runs the A13/A16 benchmark image on rvntt_soc_sim_top exactly
-// as tb/unit/tb_bench.cpp does, and additionally counts, every cycle, where the
-// cycles went.
+// Runs the benchmark image on rvntt_soc_sim_top exactly as tb/unit/tb_bench.cpp
+// does, and additionally counts, every cycle, where the cycles went.  A
+// separate testbench because reading the core's internals needs Verilator's
+// --public-flat-rw, which slows the regression's bench_sim build.
 //
-// WHY A SEPARATE TESTBENCH RATHER THAN A FLAG ON tb_bench.cpp.  Reading the
-// core's internal signals from C++ requires Verilator's --public-flat-rw, which
-// suppresses the optimisations that make the regression's bench_sim fast.  A
-// flag would not help: the C++ cannot reference a symbol that the flag did not
-// create, so the flag would have to be on for every build.  This file is the
-// price of keeping bench_sim at its current runtime.
-//
-// WHY IT DOES NOT ADD COUNTERS TO THE CORE.  Hardware counters would perturb
-// the very thing A17 just spent four implementation runs improving, and they
-// are not needed: this SoC is deterministic to the cycle and the simulation
-// reproduces the board's mcycle and minstret exactly -- MODS_A section 1's own
-// baseline table was produced this way.  The instrument prints the mcycle value
-// it observed at each region boundary so that claim is checked, not assumed.
-//
-// THE REGION BOUNDARIES ARE THE SOFTWARE'S OWN.  sw/bench reads mcycle before
-// and after each timed region, so every `csrr rd, mcycle` that retires is a
-// point the software can name.  This records the mcycle VALUE the core returned
-// at each one, alongside the instrument's counters; tb/perf/run_stall_profile.py
-// then matches the values the benchmark printed over the UART.  Nothing has to
-// guess where a region starts, and no software or RTL change was needed to say
-// so.
+// The region boundaries are the software's own: every `csrr rd, mcycle` that
+// retires is recorded with the value the core returned, and
+// tb/perf/run_stall_profile.py matches those against the values the benchmark
+// printed over the UART.
 // ============================================================================
 #include "Vrvntt_soc_sim_top.h"
 #include "Vrvntt_soc_sim_top___024root.h"
@@ -42,36 +25,20 @@ static const int BIT_CYCLES = 34;     // CORE_HZ / BAUD = 4e6 / 115200 -> 34
 
 #define SIG(n) (dut->rootp->rvntt_soc_sim_top__DOT__u_soc__DOT__u_core__DOT__##n)
 
-// A20.  The core's OWN Zihpm counters, read straight out of the CSR block so
-// that the hardware counters and this instrument's software counters can be
-// compared over the same region of the same run.
-//
-// WHY THIS IS DONE HERE RATHER THAN BY PROGRAMMING THE BENCHMARK.  A18's whole
-// value is that the instrument does not perturb what it measures.  Adding CSR
-// writes to the benchmark to arm the counters would change the instruction
-// stream, and then the number being validated would come from a different
-// program than the number validating it.  Forcing the event selectors from the
-// testbench arms the counters without the software knowing they exist, so both
-// sides describe the identical run.
+// The core's own Zihpm counters, read straight out of the CSR block so the
+// hardware counters and this instrument's counters compare over the same
+// region of the same run.  The event selectors are forced from the testbench
+// so the instruction stream is not perturbed.
 #define CSRSIG(n) (dut->rootp->rvntt_soc_sim_top__DOT__u_soc__DOT__u_core__DOT__u_csr__DOT__##n)
 
 // rv32i_pkg::HPM_EV_* minus one -- the index into the counter array this
 // testbench programs each counter to.  Kept in the same order as the enum.
 static const int HPM_N = 6;
 
-// HOW MANY CYCLES AFTER A SNAPSHOT THE COUNTERS ARE READ, and it is derived
-// rather than tuned.  Reading during cycle T sees the value latched at the end
-// of T-1, and A23 registered the event bus, so that value counts pulses through
-// T-2.  This instrument's own counters, at the same instant, already include
-// cycle T.  Two cycles of skew -- so the hardware counters are read two cycles
-// after the snapshot that records everything else, and the two windows describe
-// exactly the same cycles.
-//
-// It was ONE before A23 registered the events, and the difference showed up as
-// `fetch redirects` disagreeing by exactly +1 in both regions while the other
-// six pairs stayed exact: a single redirect pulse in the boundary cycle.  Six
-// exact and one off-by-one is the signature of a window alignment problem rather
-// than a counting problem, which is why the fix is here and not a tolerance.
+// How many cycles after a snapshot the counters are read, derived: reading
+// during cycle T sees the value latched at the end of T-1, and the event bus
+// is registered, so that value counts pulses through T-2.  This instrument's
+// counters at the same instant already include T.  Two cycles of skew.
 static const int HPM_SAMPLE_DELAY = 2;
 
 // `csrr rd, mcycle` is CSRRS rd, 0xB00, x0.  Everything but rd is fixed.
@@ -82,7 +49,7 @@ struct Snap {
     unsigned long long mcycle;
     long long cycle, retired, id_stall, ex_stall, redirect, redirect_raw;
     long long br_taken, br_ntaken, jal, jalr;
-    unsigned long long hpm[HPM_N];      // A20: the core's own counters
+    unsigned long long hpm[HPM_N];      // the core's own counters
 };
 
 int main(int argc, char** argv) {
@@ -93,14 +60,11 @@ int main(int argc, char** argv) {
     const char* trace_path = 0;
     long max_cycles = 400L * 1000 * 1000;
     int  want_blocks = 1;
-    // WHERE A REDIRECT'S COST ACTUALLY LANDS.  ex_redirect at cycle t clears
-    // IF/ID and ID/EX, so the two cycles in which nothing retires are LATER
-    // than the pulse.  Charging them to the pulse's cycle makes the per-region
-    // identity wrong by exactly 2 whenever a redirect fires within a few
-    // cycles of a region boundary -- which never happened before A19 and does
-    // now, because a not-taken branch predicted taken is a redirect at a pc
-    // that never had one.  The delay is swept and MEASURED rather than
-    // reasoned about; see docs/a18-stalls.md.
+    // ex_redirect at cycle t clears IF/ID and ID/EX, so the two cycles in
+    // which nothing retires are later than the pulse; charging them to the
+    // pulse's cycle makes the per-region identity wrong by exactly 2 whenever
+    // a redirect fires near a region boundary.  The delay was swept and
+    // measured.
     int  redir_delay = 3;
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--out") && i + 1 < argc)         out_path = argv[++i];
@@ -121,30 +85,16 @@ int main(int argc, char** argv) {
     size_t last_len = 0;
 
     long long n_cycle = 0, n_retired = 0, n_id = 0, n_ex = 0, n_redir = 0;
-    // A20.  THE SAME EVENT, COUNTED AT A DIFFERENT INSTANT, AND BOTH ARE RIGHT.
-    //
-    // n_redir above is deliberately delayed by redir_delay cycles so that a
-    // redirect's two lost cycles are charged to the region that actually lost
-    // them -- without that, the cycle identity is wrong by exactly 2 whenever a
-    // redirect fires near a region boundary.  The hardware counter has no such
-    // delay: it increments on the ex_redirect pulse, which is the only thing a
-    // counter in silicon can do.
-    //
-    // So the two disagree, per region, by the number of pulses in flight across
-    // a boundary -- measured at 1 over Dhrystone and 0 over CoreMark the first
-    // time this comparison was run.  Neither is wrong; they are answers to
-    // slightly different questions.  This raw count is the one that asks the
-    // hardware counter's question, so the cross-validation can be an EXACT
-    // match rather than a tolerance, and the delayed count keeps the identity.
+    // The same event counted at a different instant: n_redir is delayed by
+    // redir_delay so the lost cycles land in the right region; the hardware
+    // counter increments on the pulse.  This raw count asks the hardware
+    // counter's question, so the cross-validation can be an exact match.
     long long n_redir_raw = 0;
     std::vector<int> redir_pipe(redir_delay > 0 ? redir_delay : 1, 0);
     long long n_bt = 0, n_bn = 0, n_jal = 0, n_jalr = 0;
-    // The previous retirement, kept so a branch can be classified taken or
-    // not-taken WITHOUT reaching into the EX stage: a branch is taken exactly
-    // when the next instruction to retire is not the one after it.  That works
-    // off two signals the core already exports and needs no knowledge of the
-    // predictor that A19 is about to put in front of it -- which matters,
-    // because this instrument has to keep meaning the same thing afterwards.
+    // The previous retirement, so a branch can be classified taken or
+    // not-taken without reaching into EX: a branch is taken exactly when the
+    // next instruction to retire is not the one after it.
     bool      prev_valid = false;
     unsigned  prev_pc = 0, prev_insn = 0;
     long long prev_cycle = 0, prev_fetch = -1;
@@ -152,33 +102,19 @@ int main(int argc, char** argv) {
     // (cycle at which to sample, index into snaps)
     std::vector<std::pair<long long,int> > hpm_pending;
 
-    // The retired control-transfer trace, for A19's predictor model.
-    //
-    // RETIRED, not fetched, and that is a design decision rather than a
-    // convenience: the predictor A19 specifies updates its state only when a
-    // control transfer RESOLVES in EX, and an instruction fetched down a
-    // mispredicted path never gets there.  So the retired stream is the
-    // complete input to the predictor's state machine, which is what lets the
-    // model be driven by a trace taken BEFORE the predictor exists -- the
-    // projection and the implementation then share no code at all.
+    // The retired control-transfer trace for the predictor model.  Retired,
+    // not fetched: the predictor updates only when a transfer resolves in EX,
+    // so the retired stream is the complete input to its state machine.
     FILE* tr = trace_path ? fopen(trace_path, "w") : 0;
     if (trace_path && !tr) { fprintf(stderr, "cannot write %s\n", trace_path); return 1; }
     if (tr) fprintf(tr, "cycle,fetch,pc,insn,next_pc\n");
 
-    // ---- dating each instruction by its FETCH, not by its retirement -------
-    // A predictor lookup happens one cycle before the instruction it describes
-    // is fetched, so a rule about when an update becomes visible is a rule
-    // about FETCH cycles.  `retire - fetch` is NOT a constant: a load-use
-    // interlock holds an instruction in ID, and its prediction was already
-    // made.  Expressing the rule on retire cycles is therefore wrong by exactly
-    // the number of cycles the instruction was held -- which is what made
-    // model/bpred.py disagree with the RTL on 39 of Dhrystone's returns while
-    // agreeing on every one of CoreMark's: Dhrystone's callees are reached
-    // through load-use stalls and CoreMark's are not.
-    //
-    // This mirrors ONLY the two front-end registers' load conditions, which are
-    // four lines of rvntt_core.sv, and it is checked rather than trusted: the
-    // FIFO must be non-empty at every retirement and empty-ish at the end.
+    // ---- dating each instruction by its fetch, not its retirement ---------
+    // A predictor lookup happens one cycle before the instruction is fetched,
+    // and `retire - fetch` is not constant (a load-use interlock holds an
+    // instruction in ID after its prediction was made).  This mirrors only
+    // the two front-end registers' load conditions, and it is checked: the
+    // FIFO must be non-empty at every retirement.
     long long if_id_fc = -1, id_ex_fc = -1;
     std::deque<long long> ex_fifo;
     long long fifo_underflows = 0;
@@ -190,29 +126,21 @@ int main(int argc, char** argv) {
     dut->btn         = 0x0;
     dut->eval();
 
-    static const char END[] = "=== end A13 ===\r\n";
+    static const char END[] = "=== end bench ===\r\n";
     const size_t ENDN = sizeof(END) - 1;
 
-    // A20.  Arm the six counters once, after reset has released, by writing the
-    // event selectors directly.  Counter N is programmed to event N+1, matching
-    // rv32i_pkg::HPM_EV_* in order, so the array index and the event number
-    // differ by exactly one everywhere in this file.
+    // Arm the six counters once, after reset, by writing the event selectors
+    // directly.  Counter N is programmed to event N+1, matching
+    // rv32i_pkg::HPM_EV_* in order.
     bool hpm_armed = false;
 
     long c;
     for (c = 0; c < max_cycles; c++) {
         if (c == 50) dut->ck_rst = 1;
         if (!hpm_armed && SIG(rst_n)) {
-            // BOTH the selector AND the one-hot watch mask.  A23 restructured
-            // the counter enable to read hpm_watch_q -- a registered one-hot
-            // mask maintained alongside mhpmevent_q -- so that only a single
-            // AND-OR sits between ex_redirect and the counter's clock enable.
-            // Forcing the selector alone stopped arming anything, and the
-            // hardware-against-instrument comparison read every counter as 0
-            // and said so.  That is the fixture going stale under a design
-            // change, which is the same shape as A19's bench_hardware and
-            // A20's mutation anchors; it was caught here because the check is
-            // an EXACT equality and a silent zero cannot pass it.
+            // Both the selector and the one-hot watch mask: the counter
+            // enable reads hpm_watch_q, a registered mask maintained alongside
+            // mhpmevent_q, so forcing the selector alone arms nothing.
             for (int k = 0; k < HPM_N; k++) {
                 CSRSIG(mhpmevent_q)[k] = k + 1;
                 CSRSIG(hpm_watch_q)[k] = 1u << k;

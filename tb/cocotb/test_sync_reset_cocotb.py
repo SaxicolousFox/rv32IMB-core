@@ -1,9 +1,6 @@
 """
-Trivial cocotb test against rvntt_sync_reset (P0.1 acceptance: 'a trivial cocotb test').
-
-This exists mostly to prove the cocotb <-> Verilator path works, because the NTT
-golden model is Python and cocotb is how it will sit in the same process as the
-DUT (plan P0.1).
+Trivial cocotb test against rvntt_sync_reset; also proves the cocotb <->
+Verilator path works.
 """
 import os
 import cocotb

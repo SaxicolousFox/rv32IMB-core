@@ -1,34 +1,15 @@
 /*
- * CoreMark port for the rvntt SoC.  Derived from toolchain/coremark/barebones/,
- * which is EEMBC's own template for a machine with no OS; the two #error stubs
- * it ships (barebones_clock and portable_init) are filled in in core_portme.c.
+ * CoreMark port for the rvntt SoC, derived from toolchain/coremark/barebones/.
  *
- * Choices that affect the reported number, and why:
- *
- *   HAS_FLOAT 0     There is no FPU and no soft-float library linked, so
- *                   CoreMark's own "Iterations/Sec" is printed as an integer.
- *                   The score reported by this project is NOT that integer --
- *                   it is computed from the raw mcycle count in Python, exactly,
- *                   and CoreMark/MHz turns out not to depend on the clock at all
- *                   (iterations * 1e6 / cycles).  Keeping HAS_FLOAT off avoids
- *                   dragging in software floating point that would appear in the
- *                   image and in nothing else.
- *
- *   MEM_METHOD      MEM_STACK, the barebones default: TOTAL_DATA_SIZE bytes come
- *                   off the stack, so no malloc and no _sbrk.  128 KB of BRAM
- *                   holds the program, its data and a 2000-byte block with room
- *                   to spare.
- *
- *   SEED_VOLATILE   The seeds are volatile globals the compiler cannot fold, and
- *                   PERFORMANCE_RUN fixes them at 0/0/0x66.  This is what stops
- *                   CoreMark being computed at compile time, which is the whole
- *                   reason it is harder to game than Dhrystone.
- *
- *   ITERATIONS      Compile-time, because barebones has no way to auto-scale.
- *                   CoreMark's run rules require at least 10 seconds of wall
- *                   time and core_main.c itself flags the run as an error below
- *                   that, so this is calibrated against a measured cycles/
- *                   iteration on the board rather than guessed.
+ *   HAS_FLOAT 0     No FPU and no soft-float; the score is computed from the
+ *                   raw mcycle count in Python (CoreMark/MHz =
+ *                   iterations * 1e6 / cycles).
+ *   MEM_METHOD      MEM_STACK: no malloc and no _sbrk.
+ *   SEED_VOLATILE   PERFORMANCE_RUN fixes the seeds at 0/0/0x66 and the
+ *                   compiler cannot fold them.
+ *   ITERATIONS      Compile-time; CoreMark's run rules require at least 10 s
+ *                   of wall time, so it is calibrated against measured
+ *                   cycles/iteration on the board.
  */
 #ifndef CORE_PORTME_H
 #define CORE_PORTME_H
@@ -62,11 +43,8 @@ typedef signed int     ee_s32;
 typedef double         ee_f32;
 typedef unsigned char  ee_u8;
 typedef unsigned int   ee_u32;
-/* ee_ptr_int MUST be wide enough to hold a pointer -- CoreMark's matrix
- * algorithm rounds addresses through it, and a truncating typedef shows up as a
- * wrong CRC, i.e. exactly like a broken core.  It is ee_u32 on the target and
- * pointer-width on the 64-bit build host, which is the only difference between
- * the two builds that CoreMark can see. */
+/* ee_ptr_int must be wide enough to hold a pointer: ee_u32 on the target and
+ * pointer-width on the 64-bit build host. */
 #ifdef BENCH_HOST
 typedef unsigned long  ee_ptr_int;
 #else

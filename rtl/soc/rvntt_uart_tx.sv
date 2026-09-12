@@ -1,8 +1,5 @@
-// Minimal UART transmitter, 8 data bits, no parity, 1 stop bit.
-//
-// Baud generation is a simple integer divisor.  At 75 MHz / 115200 the divisor
-// is 651.04 -> 651, giving 115207 baud, a 0.006% error.  UART tolerates roughly
-// 2% accumulated over 10 bit times, so this has enormous margin.
+// Minimal UART transmitter, 8 data bits, no parity, 1 stop bit.  Integer baud
+// divisor (75 MHz / 115200 -> 651, a 0.006% error).
 `default_nettype none
 
 module rvntt_uart_tx #(

@@ -1,56 +1,30 @@
 // ============================================================================
-// A4 testbench: run a program image on rvntt_core_sim_top and check the result.
+// Runs a program image on rvntt_core_sim_top and checks the result.
 //
-// The core exposes a retirement trace (the same port A5's commit-log differ
-// uses), so this testbench never reaches into the register file.  It maintains a
-// shadow copy of the architectural registers from the commit stream and compares
-// one register against a value supplied on the command line -- computed
-// independently by test_core_verilator.py from the program's own data literals,
-// and cross-checked against Spike.
+// The core exposes a retirement trace, so this never reaches into the
+// register file: it keeps a shadow copy of the architectural registers from
+// the commit stream and compares one register against a value supplied on the
+// command line (computed by test_core_verilator.py and cross-checked against
+// Spike).
 //
-// HOW IT STOPS, and why that changed at A9.  Until A9 the ECALL retired like
-// any other instruction and was the stop marker.  Now it TRAPS: it is squashed
-// in EX and never reaches WB, so the old condition can never fire.  There are
-// two replacements, and between them they cover everything:
+// Stop conditions (the ECALL traps, so it never retires):
+//   --stop-pc <addr>  stop at the first commit at <addr>, without counting it
+//                     (the trap handler's address, where Spike's trace is also
+//                     truncated, so both sides count the same instructions).
+//   --tohost <addr>   stop on a store to <addr> and report the value written
+//                     (the riscv-tests protocol; sound because a store issues
+//                     from EX and nothing past EX is squashed).
 //
-//   --stop-pc <addr>  stop at the first commit at <addr>, WITHOUT counting it.
-//                     Used with the trap handler's address, which is exactly
-//                     where Spike's own trace is truncated -- so the two sides
-//                     count the same instructions with no offset to remember.
-//   --tohost <addr>   stop on a STORE to <addr>, and report the value written.
-//                     This is the riscv-tests protocol, and it works because a
-//                     store is issued from EX and nothing past EX is squashed.
+// Checked: the answer, dbg_unsupported, that the program stops, the retired
+// instruction count against Spike's, and that commit_reg_write is never
+// asserted with commit_rd == 0.  The reported `span` (first to last
+// retirement, in cycles) is what tb/cosim/cycle_model.py compares against an
+// independent stall and flush prediction.
 //
-// Four ways this run can fail, and all four are checked:
-//   1. the answer is wrong;
-//   2. an instruction retires that this core cannot execute faithfully
-//      (dbg_unsupported -- see rvntt_core.sv);
-//   3. the program never stops, i.e. it ran off into nothing;
-//   4. the RETIRED INSTRUCTION COUNT differs from Spike's.
-// A testbench that only checked (1) would report "wrong answer" for all four.
-//
-// (4) is here because fault injection found (1) insufficient: an off-by-one
-// instruction fetch skipped the program's leading `auipc`, and the truncated
-// pointer still aliased to the right word because rvntt_ram ignores the high
-// address bits by design.  The answer was correct and the instruction count was
-// not.  Counting retirements is the cheapest possible shadow of what A5's
-// commit-log differ will do properly.
-//
-// The reported `span` -- the cycle distance from the first retirement to the
-// last -- is what tb/cosim/cycle_model.py compares against an independently
-// predicted stall and flush count.  Nothing here interprets it; this testbench
-// only has to report it honestly, because a phantom stall changes no
-// architectural state and a commit-log diff can never see one.
-//
-// A fifth check has no flag: commit_reg_write must never be asserted with
-// commit_rd == 0.  Spike never reports a write to x0, so a trace that did could
-// not be compared against it -- and the shadow register file below would hide
-// the discrepancy by filtering x0 a second time.
+// The top module is a compile-time choice (-CFLAGS -DVTOP=<name>):
+// rvntt_core_sim_top, or rvntt_trace_top for cosimulation.  Their port lists
+// are identical.
 // ============================================================================
-// The top module is a compile-time choice: rvntt_core_sim_top for the A4
-// checksum run, rvntt_trace_top (the same design plus rvntt_trace) for A5's
-// cosimulation.  Their port lists are identical, so one testbench serves both
-// and the two runs cannot drift apart.  Select with -CFLAGS -DVTOP=<name>.
 #ifndef VTOP
 #define VTOP Vrvntt_core_sim_top
 #endif
@@ -68,12 +42,9 @@ static VTOP* dut;
 static uint32_t xreg[32];       // shadow architectural registers
 static long     retired = 0;
 
-// The cycle of the first and last retirement.  Their DIFFERENCE is the useful
-// number: it is independent of how long reset is held and of how many cycles
-// the pipeline takes to fill, so a cycle model does not have to know either.
-// In a pipeline with no stalls the span is exactly retired-1; every stall and
-// every flush adds to it, which is what makes it a check on the hazard logic
-// rather than on the datapath.  See tb/cosim/cycle_model.py.
+// The cycle of the first and last retirement.  Their difference is
+// independent of reset length and pipeline fill; with no stalls it is exactly
+// retired-1, and every stall and flush adds to it.
 static long     first_commit = -1;
 static long     last_commit  = -1;
 
@@ -133,13 +104,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // --store-log records every architecturally committed store as
-    // "<addr> <be> <data>".  RISCOF needs the contents of the signature region
-    // after the run, and replaying the stores onto the program's own image
-    // reconstructs it without the testbench ever reaching inside the RAM --
-    // which would need a Verilator-only annotation on synthesisable RTL.  It is
-    // sound for the same reason the tohost watch is: a store is issued from EX
-    // and nothing past EX is squashed.
+    // --store-log records every committed store as "<addr> <be> <data>";
+    // RISCOF replays them onto the program's image to reconstruct the
+    // signature without reaching inside the RAM.
     FILE* slog = nullptr;
     if (store_log) {
         slog = fopen(store_log, "w");
@@ -163,9 +130,8 @@ int main(int argc, char** argv) {
     for (; cycle < max_cycles && !stopped; cycle++) {
         dut->clk = 0; dut->eval();      // settle combinational outputs
 
-        // The tohost write is checked BEFORE the commit stream, so the store
-        // that ends a riscv-tests program stops the run on the cycle it is
-        // issued rather than three cycles later when its instruction retires.
+        // The tohost write is checked before the commit stream, so the run
+        // stops on the cycle the store is issued.
         if (slog && dut->dbg_store_be != 0)
             fprintf(slog, "%08x %x %08x\n", dut->dbg_store_addr,
                     dut->dbg_store_be, dut->dbg_store_data);
@@ -178,8 +144,7 @@ int main(int argc, char** argv) {
 
         if (dut->commit_valid) {
             // --stop-pc is exclusive: the marker instruction is not counted,
-            // so `retired` and the span match a Spike trace truncated at the
-            // same address with no offset to remember on either side.
+            // matching a Spike trace truncated at the same address.
             if (have_stop_pc && dut->commit_pc == stop_pc) {
                 stopped = true;
                 dut->clk = 1; dut->eval();
@@ -188,8 +153,7 @@ int main(int argc, char** argv) {
             if (dut->dbg_unsupported) {
                 printf("CORE_TB_FAIL: unsupported instruction retired at "
                        "pc=0x%08x insn=0x%08x (cycle %ld)\n"
-                       "  The A4 core has no control flow, CSRs or coprocessor; "
-                       "see rvntt_core.sv.\n",
+                       "  see dbg_unsupported in rvntt_core.sv.\n",
                        dut->commit_pc, dut->commit_insn, cycle);
                 delete dut;
                 return 1;
@@ -217,12 +181,8 @@ int main(int argc, char** argv) {
         dut->clk = 1; dut->eval();      // take the edge
     }
 
-    // --no-check: A5 runs the simulator purely to produce a commit log, and
-    // tb/cosim/commit_diff.py is what decides whether it is right.  The
-    // structural checks below would need an expected value the differ has not
-    // computed, so they are skipped -- but dbg_unsupported and the x0 invariant
-    // above still apply, because those are properties of the core rather than
-    // of any particular program.
+    // --no-check: the run only produces a commit log for tb/cosim/commit_diff.py.
+    // dbg_unsupported and the x0 invariant above still apply.
     if (slog) fclose(slog);
 
     if (no_check) {

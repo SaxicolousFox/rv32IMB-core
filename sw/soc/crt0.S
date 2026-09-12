@@ -1,8 +1,5 @@
-# Bare-metal startup for the A12 SoC.
-#
-# No HTIF here -- unlike sw/kyber/crt0.S there is nothing to exit TO.  main()
-# is not expected to return; if it does, park in a tight loop rather than
-# falling off the end of .text into whatever the BRAM happens to contain.
+# Bare-metal startup for the SoC.  No HTIF: main() is not expected to return,
+# and a return parks in a tight loop.
         .section .text.init
         .globl _start
 _start:

@@ -1,28 +1,15 @@
 #!/usr/bin/env python3
 """
-Drive RISCOF over the riscv-arch-test RV32I suite (plan A10).
+Drive RISCOF over the riscv-arch-test suites.
 
-Reference model: SPIKE.  Sail is the framework's default, building it is a
-large detour, and the plan names Spike as the alternative -- which is also
-already this project's golden model, for A5's lockstep cosimulation and for the
-whole C track.  One reference across the project beats a second opinion nobody
-else uses.
+Reference model: Spike, which is already this project's golden model.
+tb/riscof/spike_ref is a thin plugin derived from riscv-arch-test's
+`spike_simple`, which reads `ispec['PMP']` unconditionally and riscv-config
+3.18 has no such key.
 
-riscv-arch-test ships a `spike_simple` plugin that would have done, but it reads
-`ispec['PMP']` unconditionally and riscv-config 3.18 has no such key, so using
-it would mean writing this core's ISA description in an older schema than the
-installed validator accepts.  tb/riscof/spike_ref is a thin replacement derived
-from it; see that file for the two deliberate differences.
-
-ON RISCOF ITSELF.  Upstream deprecated it: riscv-arch-test's default branch has
-moved to the "ACT4" framework, which replaces RISCOF and requires the Sail model
-plus a UDB configuration.  The RISCOF-era suite is still maintained on the
-`old-framework-3.x` branch, which is what toolchain/riscv-arch-test is pinned to
-and what this runs.  That is a deliberate choice, not an oversight: the plan's
-A10 asks for RISCOF specifically and for its HTML report, and ACT4 produces
-neither.  Moving to ACT4 is a real piece of work -- a Sail build and a UDB
-config -- and it belongs to whoever wants the current certification flow rather
-than to A10.
+Upstream has deprecated RISCOF in favour of ACT4 (Sail plus a UDB config);
+toolchain/riscv-arch-test is pinned to the maintained `old-framework-3.x`
+branch, which is what this runs.
 """
 import argparse
 import collections
@@ -40,19 +27,15 @@ import test_core_verilator as t4   # noqa: E402
 ARCHTEST = os.path.join(ROOT, "toolchain/riscv-arch-test")
 PLUGINS = os.path.join(ARCHTEST, "riscof-plugins/rv32")
 HERE = os.path.dirname(os.path.abspath(__file__))
-REPORT_DEST = os.path.join(ROOT, "docs/riscof-report.html")
+REPORT_DEST = os.path.join(ROOT, "build/riscof-report.html")
 
-# 2 MB of simulated memory, against 64 KB everywhere else in this repo.
-# THE BRANCH AND JUMP TESTS NEED IT: they walk the whole immediate range, so
-# beq-01 links to 0x8003aa28 and jal-01 -- exercising JAL's plus or minus 1 MB
-# -- to 0x801af18c.  With a 64 KB array the image is silently truncated and the
-# core runs off into unwritten memory, which looks like a branch bug and is not
-# one.
+# 2 MB of simulated memory: the branch and jump tests walk the whole immediate
+# range (jal-01 links to 0x801af18c), and a smaller array silently truncates
+# the image.
 WORDS = 524288
 
-# Suites RISCOF selects for an RV32I+Zicsr core but which this core cannot
-# support.  Excluded by name, with a reason, rather than left to fail: a
-# compliance report with 43 known failures in it is a report nobody reads.
+# Suites RISCOF selects for this ISA but which the core cannot support,
+# excluded by name with a reason.
 EXCLUDED_SUITES = {
     "pmp": "physical memory protection. Plan 1.5 excludes PMP and rvntt_csr.sv "
            "implements no pmpcfg*/pmpaddr*. These tests carry "
@@ -62,18 +45,10 @@ EXCLUDED_SUITES = {
            "excluded here instead.",
 }
 
-# A21 (MODS_A2).  Individual tests excluded from suites that are otherwise kept.
-#
-# THE arch-test `B` DIRECTORY IS THE OLD GROUPING.  Ratified B is Zba + Zbb +
-# Zbs and contains no carry-less multiply, but the suite predates that split and
-# ships clmul, clmulh and clmulr, which are Zbc.  Selecting the B suite
-# therefore selects three tests for an extension this core does not implement.
-#
-# They are excluded BY NAME, exactly as `pmp` is above and for the same reason.
-# The result is reported as 29/29 of the ratified-B tests with 3 Zbc tests
-# excluded -- NEVER as 32/32, and never as "B passes".  The dishonest third
-# option is claiming the suite passes without saying which tests ran, and that
-# is the shape this project has hit six times now.
+# Individual tests excluded from suites that are otherwise kept.  The
+# arch-test `B` directory is the old grouping and ships clmul, clmulh and
+# clmulr, which are Zbc; the result is reported as 29/29 of the ratified-B
+# tests with 3 Zbc tests excluded, never as "B passes".
 EXCLUDED_TESTS = {
     ("B", "clmul-01"):  "Zbc, not ratified B. The arch-test B directory is the "
                         "pre-split grouping; clmul/clmulh/clmulr are Zbc and "
@@ -82,12 +57,9 @@ EXCLUDED_TESTS = {
     ("B", "clmulr-01"): "Zbc, not ratified B -- see clmul-01.",
 }
 
-# Suites where only a NAMED SUBSET is kept.  The arch-test `K` directory is the
-# scalar-cryptography suite: 55 tests, of which exactly five -- pack, packh,
-# brev8, zip and unzip -- are the Zbkb instructions that Zbb does not already
-# cover. The other 50 are AES, SHA2, SHA3, SM3 and SM4, which this core does not
-# implement and does not claim to.  Keeping the five and naming the boundary is
-# the honest form; running all 55 and reporting 5/55 is not.
+# Suites where only a named subset is kept.  The arch-test `K` directory has
+# 55 tests, of which five (pack, packh, brev8, zip, unzip) are the Zbkb
+# instructions Zbb does not already cover; the rest are AES/SHA/SM3/SM4.
 SUITE_KEEP_ONLY = {
     "K": ({"pack-01", "packh-01", "brev8_32-01", "zip-01", "unzip-01"},
           "the Zbkb subset. The rest of K is AES/SHA/SM3/SM4, which this core "
@@ -116,12 +88,8 @@ jobs=4
 
 def build_sim(tmp, image_path, rtl_dir=None):
     """
-    Build the simulator.  `rtl_dir` points at a MIRRORED copy of the RTL tree,
-    which is how this harness is fault-injected: run it against a deliberately
-    broken core and it must report RISCOF_FAIL.  A compliance runner that cannot
-    fail is the most expensive kind of green tick there is -- the first version
-    of this script printed RISCOF_OK over 50 real failures because it trusted
-    riscof's exit code.
+    Build the simulator.  `rtl_dir` points at a mirrored copy of the RTL tree,
+    which is how the mutation harness fault-injects this runner.
     """
     build = os.path.join(tmp, "obj")
     srcs = t4.RTL if rtl_dir is None else [
@@ -141,9 +109,8 @@ def build_sim(tmp, image_path, rtl_dir=None):
 def filter_testlist(path):
     """Drop the excluded suites from riscof's generated test list, in place."""
     text = open(path).read()
-    # The list is YAML with one top-level key per test, each holding a
-    # `test_path`.  Splitting on the top-level keys is enough and avoids
-    # depending on a YAML library's round-tripping of riscof's own formatting.
+    # YAML with one top-level key per test, each holding a `test_path`.
+    # Split on the top-level keys rather than round-trip through a YAML library.
     blocks, cur = [], []
     for line in text.splitlines(True):
         if line and not line[0].isspace() and cur:
@@ -176,9 +143,7 @@ def filter_testlist(path):
         out.append(body)
     text_out = "".join(out)
     open(path, "w").write(text_out)
-    # Counted by `test_path:` rather than by block, because a block is whatever
-    # the splitter above decided and one test is exactly one test_path.  The
-    # numbers are printed, so a wrong one is a wrong claim.
+    # Counted by `test_path:` rather than by block.
     return text_out.count("test_path"), text.count("test_path") - text_out.count("test_path")
 
 
@@ -207,21 +172,9 @@ CSR_SV   = os.path.join(ROOT, "rtl/core/rvntt_csr.sv")
 def check_isa_consistency():
     """The ISA this core claims is written in two files.  Make them agree.
 
-    A15 found the third copy the hard way: the Spike reference plugin held its
-    own literal `rv32i`, so when A14 added M the arch-test M cases were compiled
-    -march=rv32im and handed to a Spike told rv32i.  That is not a failure -- the
-    illegal instruction traps to an unset handler and the model SPINS.  The run
-    stopped making progress for 25 minutes and reported nothing at all.
-
-    The plugin now derives its string from the yaml, which leaves two copies:
-    the yaml's own ISA/misa, and rvntt_csr.sv's MISA_VALUE.  Those cannot be
-    derived from each other -- one is a description for a compliance framework,
-    the other is a register the hardware reports -- so they are COMPARED, in the
-    same spirit as model/rv32i_ref.py's check_pkg_agreement().
-
-    Costs milliseconds and runs before anything else.  It catches the CAUSE; the
-    plugin's `timeout 600` catches the symptom, and a check that only catches
-    symptoms takes 600 seconds per test to say so.
+    The yaml's ISA/misa and rvntt_csr.sv's MISA_VALUE cannot be derived from
+    each other, so they are compared.  A narrower reference ISA does not fail:
+    Spike traps to an unset handler and spins until the plugin's timeout.
     """
     with open(ISA_YAML) as f:
         yaml_text = f.read()
@@ -267,7 +220,7 @@ def main():
     ap.add_argument("--keep", default=None,
                     help="keep the RISCOF work directory here")
     ap.add_argument("--no-save-report", action="store_true",
-                    help="do not copy the HTML report into docs/")
+                    help="do not copy the HTML report into build/")
     ap.add_argument("--rtl-dir", default=None,
                     help="build from this mirrored RTL tree instead of rtl/ "
                          "(used to fault-inject this harness)")
@@ -340,20 +293,15 @@ def main():
             print("  %-12s %3d passed, %3d failed" % (name, p, f))
         for name, why in sorted(EXCLUDED_SUITES.items()):
             print("  %-12s EXCLUDED  %s" % (name, why))
-        # A21.  The per-test exclusions are printed too, and that is the whole
-        # point of having them by name: a compliance line that says "B 29
-        # passed" without saying what was NOT run is the report this project has
-        # already been burned by six times.  The reader should not have to open
-        # the source to find out what 29 means.
+        # The per-test exclusions are printed too, so "B 29 passed" says what
+        # was not run.
         for (suite, test), why in sorted(EXCLUDED_TESTS.items()):
             print("  %-12s EXCLUDED  %s -- %s" % (suite, test, why))
         for suite, (keep, why) in sorted(SUITE_KEEP_ONLY.items()):
             print("  %-12s KEPT ONLY %s -- %s"
                   % (suite, ", ".join(sorted(keep)), why))
         print("riscof: %d passed, %d failed" % (passed, failed))
-        # And the count is stated in the form the claim will be made in, so the
-        # write-up cannot round "29 of the ratified-B tests" up to "the B suite
-        # passes".
+        # Stated in the form the claim will be made in.
         if "B" in per_suite:
             print("  NOTE: B is 29/29 of the RATIFIED-B tests (Zba+Zbb+Zbs). "
                   "The arch-test B directory also ships 3 Zbc tests "
@@ -363,9 +311,8 @@ def main():
         if not a.no_save_report and a.rtl_dir is None:
             print("report saved to " + os.path.relpath(REPORT_DEST, ROOT))
 
-        # riscof's own exit code is NOT the verdict: it returns 0 for a run in
-        # which tests failed, and the first version of this script reported
-        # RISCOF_OK over 50 failures because of it.  The report is the verdict.
+        # riscof's exit code is not the verdict: it returns 0 for a run in
+        # which tests failed.  The report is the verdict.
         if failed or passed == 0 or r.returncode != 0:
             print("\nRISCOF_FAIL")
             if passed == 0:

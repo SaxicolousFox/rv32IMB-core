@@ -1,12 +1,6 @@
 #!/usr/bin/env bash
-# Drive the Windows Vivado from WSL to ELABORATE the Track A core sources.
-#
-# Same staging trick as build_fpga.sh: Vivado runs natively on Windows and is
-# unreliable reading \\wsl.localhost UNC paths, so sources are copied onto the
-# Windows filesystem first.
-#
-# NOTE: the WSL<->Windows interop socket is blocked under the agent sandbox, so
-# this must run with the sandbox disabled (or from a normal shell).
+# Drive the Windows Vivado from WSL to elaborate the core sources.  Same
+# staging as build_fpga.sh.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,29 +18,20 @@ mkdir -p "$STAGE_WSL/rtl"
 
 cp "$ROOT"/rtl/core/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
 cp "$ROOT"/rtl/common/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
-# A12's tops live in rtl/soc and need the generated clock header.  The RVFI port
-# is excluded: it is only compiled under RISCV_FORMAL, and elaborating it here
-# would need the define plus riscv-formal's macros.
+# The SoC tops need the generated clock header.  The RVFI port is excluded:
+# it is only compiled under RISCV_FORMAL.
 cp "$ROOT"/rtl/soc/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
 cp "$ROOT"/fpga/generated/*.svh "$STAGE_WSL/" 2>/dev/null
 cp "$ROOT"/fpga/generated/*.svh "$STAGE_WSL/rtl/" 2>/dev/null
-# $readmemh resolves against Vivado's WORKING directory, not the source file's.
-# Without the image here elaboration emits "could not open $readmem data file
-# ... ignoring" as a CRITICAL WARNING and carries on with an empty memory --
-# which is precisely the class of thing the CRITICAL WARNING gate exists for.
+# $readmemh resolves against Vivado's working directory; without the image
+# elaboration emits a CRITICAL WARNING and carries on with an empty memory.
 cp "$ROOT"/fpga/generated/*.mem "$STAGE_WSL/" 2>/dev/null
 rm -f "$STAGE_WSL/rtl/rvntt_rvfi.sv"
 cp "$ROOT"/fpga/scripts/elab_core.tcl "$STAGE_WSL/"
 
 cd "$STAGE_WSL"
-# No inner quotes: cmd.exe mangles nested quoting in /c, and neither path
-# contains spaces.  Keep it that way (or switch to a .cmd shim if it ever does).
-#
-# -log/-journal MUST come before -tclargs.  Everything after -tclargs is handed
-# to the Tcl script as argv, so the original ordering silently turned the log
-# option into a script argument and Vivado wrote to the default vivado.log --
-# the run itself succeeded and the wrapper still reported failure because it had
-# no log to grep.
+# No inner quotes: cmd.exe mangles nested quoting in /c.  -log/-journal must
+# come before -tclargs, since everything after -tclargs is argv.
 cmd.exe /c "cd /d $STAGE_WIN && $VIVADO_WIN -mode batch -log elab_$TOP.log -journal elab_$TOP.jou -source elab_core.tcl -tclargs $TOP" 2>&1
 rc=$?
 

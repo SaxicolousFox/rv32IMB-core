@@ -27,10 +27,8 @@ DESIGNS = {
         module="test_sync_reset_cocotb",
         build_args=["--trace"],
     ),
-    # No --trace on these two: they push hundreds of thousands of vectors
-    # through a combinational block, and a VCD of that is gigabytes of writes
-    # for no diagnostic value.  A failure here is reproduced from the printed
-    # operands, not from a waveform.
+    # No --trace on these two: hundreds of thousands of vectors through a
+    # combinational block; a failure is reproduced from the printed operands.
     "alu": dict(
         sources=[PKG, ROOT / "rtl/core/rvntt_alu.sv"],
         toplevel="rvntt_alu",
@@ -60,23 +58,16 @@ DESIGNS = {
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--design", default="sync_reset", choices=sorted(DESIGNS))
-    # A21.  The mutation harness runs this against a MIRRORED, deliberately
-    # broken copy of the RTL tree, the same way run_riscof.py and the formal
-    # runner already do.  Without it the decoder equivalence sweep would always
-    # read the pristine sources and report a pass over a mutated core -- which
-    # is the failure this project keeps finding in other harnesses.
+    # The mutation harness runs this against a mirrored, deliberately broken
+    # copy of the RTL tree, like run_riscof.py and the formal runner.
     ap.add_argument("--rtl-dir", default=None,
                     help="read RTL from this mirrored tree instead of ROOT")
     a = ap.parse_args()
 
     d = dict(DESIGNS[a.design])
     if a.rtl_dir:
-        # ONLY the rtl/ sources are remapped.  The mutation harness mirrors
-        # rtl/ and nothing else, so tb/cocotb/rvntt_decode_flat.sv -- a
-        # testbench wrapper, never mutated -- keeps coming from the real tree.
-        # Remapping it too would look for a file that is not there and turn a
-        # working check into a build error, which reads as a caught mutation
-        # and is not one.
+        # Only the rtl/ sources are remapped; tb/cocotb/rvntt_decode_flat.sv is
+        # a testbench wrapper and keeps coming from the real tree.
         mirror = Path(a.rtl_dir)
         def remap(src):
             rel = Path(src).resolve().relative_to(ROOT)
@@ -107,25 +98,9 @@ def main() -> int:
         build_dir=build_dir,
     )
 
-    # ---- THE RESULT IS READ.  IT USED NOT TO BE. ---------------------------
-    #
-    # This function ended in a bare `return 0` from A1 until A21 (MODS_A2)
-    # found it: cocotb_tools' runner.test() runs the tests, writes results.xml
-    # and RETURNS NORMALLY whether they passed or failed, so every cocotb test
-    # in this project reported PASS unconditionally.  It was found because a
-    # deliberately-broken wrapper produced "TESTS=6 PASS=1 FAIL=5" on stdout
-    # and a green row in the regression table on the same run.
-    #
-    # SIXTH TIME THIS SHAPE HAS APPEARED HERE -- after A10's RISCOF exit code,
-    # A11's sby exit code, A14's synth_ooc.sh DSP=0, A19's stale bench_hardware
-    # fixture and A20's stale mutation anchors.  Every one of them was a report
-    # whose green was not about the thing it named.  The lesson is the same each
-    # time and is worth writing at the point of the fix: A TOOL'S EXIT CODE IS
-    # NOT ITS VERDICT UNLESS YOU HAVE CHECKED THAT IT IS.
-    #
-    # results.xml is parsed rather than trusted to a return value, and the
-    # absence of the file is itself a failure -- "no results" and "no failures"
-    # must never be the same outcome, which is precisely the bug being fixed.
+    # The result is read from results.xml rather than trusted to a return
+    # value: cocotb_tools' runner.test() returns normally whether the tests
+    # passed or failed, and a missing file is itself a failure.
     xml = Path(results) if results else (build_dir / "results.xml")
     if not xml.exists():
         print(f"COCOTB_FAIL: {xml} was not written -- the tests did not run, "

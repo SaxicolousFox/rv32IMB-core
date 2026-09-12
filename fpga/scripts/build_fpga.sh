@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Drive the Windows Vivado from WSL to build the P0.5 bitstream.
+# Drive the Windows Vivado from WSL to build the blinky bitstream.
 #
-# Why the staging copy: Vivado runs natively on Windows and is unreliable at
-# reading \\wsl.localhost UNC paths, so sources are staged onto the Windows
-# filesystem, built there, and the products copied back into fpga/build/.
-#
-# NOTE: the WSL<->Windows interop socket is blocked under the agent sandbox, so
-# this must run with the sandbox disabled (or from a normal shell).
+# Vivado runs natively on Windows and is unreliable reading \\wsl.localhost
+# paths, so sources are staged onto the Windows filesystem, built there, and
+# the products copied back into fpga/build/.  The WSL<->Windows interop socket
+# is blocked under the agent sandbox.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

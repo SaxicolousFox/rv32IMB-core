@@ -1,22 +1,10 @@
 // ============================================================================
 // Testbench-only wrapper: rvntt_decode with ctrl_t flattened to scalar ports.
 //
-// A packed struct is flattened by the simulator into a single wide vector, so
-// cocotb sees `ctrl` as one integer with no member access.  Reading it that way
-// would mean encoding the struct's bit layout in the Python testbench -- a
-// duplicated, unchecked copy of the field order, which is exactly the kind of
-// thing that silently starts comparing the wrong bits after someone inserts a
-// field.
-//
-// So the layout duplication lives here instead, in SystemVerilog, where the
-// field names are checked by the compiler: a renamed or deleted ctrl_t member
-// is a build error rather than a wrong comparison.  What this file CANNOT catch
-// is a field wired to the wrong port, so the A3 fault-injection table mutates
-// every ctrl field in turn -- a dropped or crossed connection here shows up as
-// a mutation that escapes.
-//
-// Not in rtl/: this is test scaffolding and must never reach synthesis.  It is
-// still linted, because run_cocotb.py builds this design with -Wall.
+// cocotb sees a packed struct as one integer with no member access, so the
+// layout duplication lives here, where the compiler checks the field names.
+// A field wired to the wrong port is caught by the mutation harness.  Not in
+// rtl/; linted because run_cocotb.py builds it with -Wall.
 // ============================================================================
 `default_nettype none
 

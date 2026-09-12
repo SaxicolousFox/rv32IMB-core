@@ -1,14 +1,9 @@
 // ============================================================================
-// Directed + randomised testbench for rvntt_regfile (plan A1).
+// Directed + randomised testbench for rvntt_regfile.
 //
-// A1's "Verify" names three cases: x0 writes must be discarded, same-cycle
-// read/write on one address must read through, and two ports must be able to
-// read the same register at once.  Those are all here as directed cases, but
-// the load-bearing part is the shadow model at the end: 200k random operations
-// compared against a C++ copy of the architectural contract.  A three-read-port
-// array's most likely defect is a copy-paste slip in the port replication, and
-// a directed test only catches that if it happens to drive the ports
-// differently at the right moment.  Random traffic catches it in milliseconds.
+// Directed cases: x0 writes discarded, same-cycle read/write on one address
+// reads through, both ports reading the same register.  Then 200k random
+// operations against a C++ shadow model of the architectural contract.
 // ============================================================================
 #include "Vrvntt_regfile.h"
 #include "verilated.h"
@@ -40,8 +35,8 @@ static void settle(int ra1, int ra2, int we, int wa, uint32_t wd) {
 // Take the posedge, committing any pending write.
 static void commit() { dut->clk = 1; dut->eval(); }
 
-// One full cycle: settle, verify the three read ports against the model, then
-// commit and advance the model.  Returns nothing -- failures are counted.
+// One full cycle: settle, verify both read ports against the model, then
+// commit and advance the model.  Failures are counted.
 static void step(int ra1, int ra2, int we, int wa, uint32_t wd,
                  const char* what) {
     settle(ra1, ra2, we, wa, wd);
@@ -81,11 +76,8 @@ int main(int argc, char** argv) {
     dut = new Vrvntt_regfile;
     for (int i = 0; i < 32; i++) model[i] = 0;
 
-    // ---------------------------------------------------------------------
-    // 1. Power-on state.  Every register must read zero before anything is
-    //    written.  This is what keeps A5's cosim aligned with Spike, whose
-    //    architectural state at reset is all-zero.
-    // ---------------------------------------------------------------------
+    // 1. Power-on state: every register must read zero before anything is
+    //    written (Spike's architectural reset state).
     for (int r = 0; r < 32; r++) {
         settle(r, r, 0, 0, 0);
         check(dut->rd1 == 0 && dut->rd2 == 0,
@@ -93,12 +85,8 @@ int main(int argc, char** argv) {
         commit();
     }
 
-    // ---------------------------------------------------------------------
-    // 2. x0 writes are discarded -- during the write cycle AND afterwards.
-    //    The "during" half matters: a write-through mux that forgets to check
-    //    wa != 0 passes the "afterwards" half and still corrupts x0 reads for
-    //    exactly one cycle, which in a pipeline is one wrong instruction.
-    // ---------------------------------------------------------------------
+    // 2. x0 writes are discarded, during the write cycle and afterwards (a
+    //    write-through mux that forgets wa != 0 corrupts x0 for one cycle).
     settle(0, 0, 1, 0, 0xDEADBEEFu);
     check(dut->rd1 == 0 && dut->rd2 == 0,
           "x0 must read zero during a write to x0 (write-through must not fire)");
@@ -108,19 +96,14 @@ int main(int argc, char** argv) {
           "x0 must still read zero after a write to x0");
     commit();
 
-    // ---------------------------------------------------------------------
-    // 3. Ordinary write, then read back on all three ports.
-    // ---------------------------------------------------------------------
+    // 3. Ordinary write, then read back on both ports.
     step(0, 0, 1, 5, 0xA5A5A5A5u, "write x5");
     settle(5, 5, 0, 0, 0);
     check(dut->rd1 == 0xA5A5A5A5u && dut->rd2 == 0xA5A5A5A5u,
           "both ports must read back a written register");
     commit();
 
-    // ---------------------------------------------------------------------
-    // 4. Simultaneous reads of the same register (A1 names this explicitly).
-    //    Also the mixed case: two ports on one register, the third elsewhere.
-    // ---------------------------------------------------------------------
+    // 4. Simultaneous reads of the same register, and the mixed case.
     step(0, 0, 1, 9, 0x0BADF00Du, "write x9");
     settle(9, 9, 0, 0, 0);
     check(dut->rd1 == 0x0BADF00Du && dut->rd2 == 0x0BADF00Du,
@@ -131,9 +114,7 @@ int main(int argc, char** argv) {
           "two ports on different registers");
     commit();
 
-    // ---------------------------------------------------------------------
-    // 5. Write-through, per port and then on all three at once.
-    // ---------------------------------------------------------------------
+    // 5. Write-through, per port and then on both at once.
     settle(7, 0, 1, 7, 0x11111111u);
     check(dut->rd1 == 0x11111111u, "write-through on port 1");
     check(dut->rd2 == 0, "non-matching port unaffected");
@@ -148,19 +129,14 @@ int main(int argc, char** argv) {
           "write-through on both ports at once");
     commit(); model[7] = 0x44444444u;
 
-    // ---------------------------------------------------------------------
     // 6. we == 0 must not write, even with a plausible address and data.
-    // ---------------------------------------------------------------------
     step(0, 0, 0, 7, 0xFFFFFFFFu, "we=0 must not write");
     settle(7, 0, 0, 0, 0);
     check(dut->rd1 == 0x44444444u, "register unchanged when we is low");
     commit();
 
-    // ---------------------------------------------------------------------
-    // 7. Address decode: give all 31 writable registers distinct values, then
-    //    read every one back.  Catches a stuck or swapped address bit, which a
-    //    single-register test cannot see.
-    // ---------------------------------------------------------------------
+    // 7. Address decode: all 31 writable registers distinct, then read back
+    //    (catches a stuck or swapped address bit).
     for (int r = 1; r < 32; r++)
         step(0, 0, 1, r, 0xC0DE0000u + r, "distinct-value fill");
     for (int r = 0; r < 32; r++) {
@@ -171,11 +147,8 @@ int main(int argc, char** argv) {
         commit();
     }
 
-    // ---------------------------------------------------------------------
-    // 8. Randomised comparison against the shadow model.  Address 0 is drawn
-    //    more often than uniform so the x0 and write-through-to-x0 corners keep
-    //    getting hit rather than appearing once in 32 draws.
-    // ---------------------------------------------------------------------
+    // 8. Randomised comparison against the shadow model, with address 0 drawn
+    //    more often than uniform.
     const int N = 200000;
     for (int i = 0; i < N; i++) {
         uint32_t r = rnd();

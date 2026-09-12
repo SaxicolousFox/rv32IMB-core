@@ -1,16 +1,11 @@
 """
-Constrained-random ALU verification against the Python golden model (plan A2).
+Constrained-random ALU verification against the Python golden model.
 
-A2's "Done when" is 10^5 random ALU vectors passing.  That is the headline test
-below, but random alone is a poor way to reach the corners of a 32-bit datapath
--- a uniform draw essentially never produces 0, -1, INT_MIN, or a shift amount
-of exactly 31.  So the random pass is preceded by a directed sweep over the
-values that actually break ALUs, crossed with every operation.
-
-The model is model/rv32i_ref.py, written from the ISA spec rather than from the
-RTL.  check_pkg_agreement() runs first: the model duplicates alu_op_e's
-encodings, and a duplicated constant nobody checks is how you end up testing the
-wrong operation and passing.
+10^5 random vectors, preceded by a directed sweep over the values that break
+ALUs (0, -1, INT_MIN, shift amounts of exactly 31) crossed with every
+operation.  The model is model/rv32i_ref.py, written from the ISA spec;
+check_pkg_agreement() runs first because the model duplicates alu_op_e's
+encodings.
 """
 import os
 import random
@@ -60,10 +55,8 @@ async def apply_and_check(dut, op, a, b, tag, failures):
 async def test_pkg_agreement(dut):
     """The model's enum encodings still match rtl/core/rv32i_pkg.sv."""
     n = ref.check_pkg_agreement()
-    # ref.PKG_MEMBERS_CHECKED, not a local copy of the sum.  This assertion
-    # used to spell the sum out here, went stale the moment A14 added the two
-    # multi-cycle latency constants to the guard, and stayed wrong through A21
-    # -- invisibly, because run_cocotb.py returned 0 whatever cocotb said.
+    # ref.PKG_MEMBERS_CHECKED rather than a local copy of the sum, which went
+    # stale once already.
     assert n == ref.PKG_MEMBERS_CHECKED, \
         f"spec-drift guard checked only {n} members"
     dut._log.info(f"package agreement OK ({n} enum members)")
@@ -112,7 +105,7 @@ async def test_alu_shift_amounts(dut):
 
 @cocotb.test()
 async def test_alu_random_100k(dut):
-    """A2's acceptance test: 10^5 random (a, b, op) triples."""
+    """10^5 random (a, b, op) triples."""
     rng = random.Random(SEED)
     failures = []
     N = 100_000

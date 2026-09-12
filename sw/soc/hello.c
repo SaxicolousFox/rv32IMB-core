@@ -1,11 +1,11 @@
 /*
- * A12's bring-up program: the thing whose output decides the done-when.
+ * The SoC bring-up program.  Its UART output is designed to be parsed
+ * (tb/fpga/parse_soc_uart.py): fixed banner, key=value lines, fixed
+ * terminator, repeating forever with a delay between blocks, so a capture
+ * started at any moment catches a whole block and `iter` distinguishes a
+ * stale capture from a live one.
  *
- * The UART output is designed to be PARSED, not read, because that is what
- * makes the hardware loop automatic (see tb/fpga/parse_soc_uart.py).  The shape
- * is fixed banner, delimited key=value lines, fixed terminator:
- *
- *     === rvntt A12 ===
+ *     === rvntt soc ===
  *     hello=Hello, world!
  *     sw=0xN btn=0xN
  *     mcycle=0xXXXXXXXX minstret=0xXXXXXXXX
@@ -14,27 +14,11 @@
  *     iter=0xXXXXXXXX
  *     === end ===
  *
- * It REPEATS forever with a delay between blocks, which matters more than it
- * looks: it means a capture started at any moment catches a whole block, so
- * programming the board and capturing the serial port do not have to be
- * ordered with respect to each other.  `iter` increments per block, so a stale
- * capture file is distinguishable from a live one -- a check that a
- * single-shot banner cannot support.
- *
- * `echo` proves the RECEIVE path from the same program: whatever byte the host
- * sent since the last block comes back.  Without it the UART would only ever be
- * tested in one direction.
- *
- * `img` is the program checking that IT HAS NOT OVERWRITTEN ITSELF, and it is
- * here for a specific reason.  MMIO lives at 0x40000000 and the RAM at
- * 0x80000000; rvntt_ram drops the high address bits rather than faulting, so an
- * MMIO store that was not gated out of the RAM would ALSO land at
- * (0x40000000 - 0x80000000) truncated -- which is word 0, the first instruction
- * of crt0.  Nothing would notice: crt0 runs once and is never revisited, so the
- * program keeps working while its own image rots underneath it.  That is exactly
- * how the `mmio_store_not_gated_from_ram` mutation escaped every other check
- * here.  Re-reading .text.init and comparing against the value taken before the
- * first store closes it.
+ * `echo` returns whatever byte the host sent since the last block, proving
+ * the receive path.  `img` re-reads .text.init and compares it against the
+ * value taken before the first store: rvntt_ram drops the high address bits,
+ * so an MMIO store not gated out of the RAM would land on word 0 (crt0) and
+ * nothing else would notice.
  */
 
 #define MMIO_BASE   0x40000000u
@@ -138,7 +122,7 @@ int main(void)
         cyc  = rd_mcycle();
         ins  = rd_minstret();
 
-        puts_("=== rvntt A12 ===\r\n");
+        puts_("=== rvntt soc ===\r\n");
         puts_("hello=Hello, world!\r\n");
 
         puts_("sw=");

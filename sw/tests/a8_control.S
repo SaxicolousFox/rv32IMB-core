@@ -1,17 +1,11 @@
 # ============================================================================
-# a8_control.S -- directed control-hazard tests (plan A8).
+# a8_control.S -- directed control-hazard tests.
 #
-# Checked against Spike two ways, as with a6/a7: the commit log for
-# architectural state, and the cycle span for timing.  The span matters here
-# because a redirect costs two cycles, so a flush that is one slot too shallow
-# shows up as BOTH a wrong log (a squashed instruction retires) and a wrong
-# span -- while a flush that is one slot too DEEP shows up only in the span.
+# Checked against Spike two ways: the commit log for architectural state and
+# the cycle span for timing.  A flush one slot too shallow shows up in both;
+# one slot too deep only in the span.
 #
-# `la` is used freely below.  It expands to auipc+addi with the addi reading the
-# auipc's rd at distance 1, which A6's forwarding makes legal; A4 had to
-# hand-expand it.
-#
-# x8 is the scratch pointer throughout and is never written after the prologue.
+# x8 is the scratch pointer and is never written after the prologue.
 # ============================================================================
         .section .text.init
         .globl _start
@@ -28,8 +22,7 @@ _start:
 
 # ---- case 1: all six conditions, both directions ---------------------------
 # x4 and x5 make the signed/unsigned distinction visible: blt and bltu on the
-# same operands must disagree, so a comparator that confuses them is caught here
-# rather than by luck in a random program.
+# same operands must disagree.
         beq     x2, x2, .Lt1
         addi    x10, x0, 99             # squashed
 .Lt1:   beq     x2, x3, .Ln1
@@ -57,9 +50,7 @@ _start:
 .Ln6:
 
 # ---- case 2: a branch on a value computed one instruction earlier ----------
-# The comparator reads the FORWARDED operands, not the register file.  Without
-# that it compares stale values and takes the wrong direction, which the commit
-# log sees immediately.
+# The comparator reads the forwarded operands, not the register file.
         sub     x16, x2, x2             # zero, via the ALU rather than a literal
         beq     x16, x0, .Lf1           # distance 1: taken
         addi    x17, x0, 99             # squashed
@@ -70,10 +61,8 @@ _start:
 .Lf2:
 
 # ---- case 2b: the forwarded value on the rs2 port --------------------------
-# Case 2 puts it on rs1 and leaves x0 on rs2, so the comparator's rs2 forwarding
-# path is never exercised.  The mutation harness found exactly that gap: wiring
-# `.b` to the register file instead of the forwarded operand was caught by the
-# random suite and sailed past this file.
+# Case 2 leaves x0 on rs2, so the comparator's rs2 forwarding path needs its
+# own case.
         sub     x16, x3, x3             # zero
         beq     x0, x16, .Lf5           # rs2 at distance 1: taken
         addi    x17, x0, 99             # squashed
@@ -84,9 +73,7 @@ _start:
 .Lf6:
 
 # ---- case 2c: both operands forwarded, from DIFFERENT stages ---------------
-# rs1 from WB and rs2 from MEM in the same comparison.  A comparator that shares
-# one forwarding select between its two ports gets this wrong and everything
-# above right.
+# rs1 from WB and rs2 from MEM in the same comparison.
         add     x16, x2, x3
         add     x17, x2, x3             # equal value, one stage younger
         beq     x16, x17, .Lf7          # taken
@@ -116,10 +103,8 @@ _start:
 .Lj2:   addi    x22, x0, 1
 
 # ---- case 5: JALR, with a nonzero offset and an odd sum --------------------
-# The spec says JALR clears bit 0 of the computed target.  The offset here is 1
-# and the base is 4-byte aligned, so the sum is odd and clearing bit 0 lands
-# back on the aligned target -- an offset of 3 would land 2 mod 4, which Spike
-# traps on and this core does not.
+# JALR clears bit 0 of the computed target.  The offset is 1 on an aligned
+# base, so the sum is odd and clearing bit 0 lands on the aligned target.
         la      x23, .Ljr1
         jalr    x24, 1(x23)
         addi    x25, x0, 99             # squashed
@@ -135,9 +120,7 @@ _start:
 .Ljr2:  addi    x28, x0, 1
 
 # ---- case 6: a taken branch in the shadow of a taken branch ----------------
-# The second branch is squashed, so it must neither retire nor redirect.  If
-# the flush only killed ID/EX and not IF/ID, this one would execute and the
-# program would end up at .Lshadow_bad.
+# The second branch is squashed, so it must neither retire nor redirect.
         beq     x0, x0, .Lsh1
         beq     x0, x0, .Lshadow_bad
         jal     x0, .Lshadow_bad

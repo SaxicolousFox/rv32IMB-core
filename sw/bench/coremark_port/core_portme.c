@@ -33,26 +33,14 @@ volatile ee_s32 seed5_volatile = 0;
 ee_u32 cm_cycles_start, cm_cycles_stop;
 ee_u32 cm_instret_start, cm_instret_stop;
 
-/* THE ORDER OF THESE THREE READS IS LOAD-BEARING, and A23 found out the hard
- * way.  Every counter is read by its own instruction, so the three windows are
- * nested rather than identical, and A18's identity
+/* The order of these three reads is load-bearing: every counter is read by
+ * its own instruction, so the windows nest, and the identity
  *
  *     cycles = retired + load-use + multi-cycle EX + 2 x redirects
  *
- * is exact only if all four terms bracket the same instructions.  On hardware
- * they cannot, so the residual is whatever the nesting makes it -- and the
- * ordering decides whether that is a handful of cycles or a couple of hundred.
- *
- * This function used to read instret OUTSIDE the HPM snapshot, which put the
- * two bench_hpm_read() calls -- roughly sixty instructions each -- INSIDE the
- * retired-instruction window and outside the cycle window.  The identity then
- * closed to -168 on hardware where Dhrystone, whose glue happens to nest the
- * other way, closed to -38.
- *
- * The order below matches sw/bench/dhry_glue.c exactly: HPM outermost, then
- * minstret, then mcycle innermost.  That makes the two regions' residuals
- * comparable and both small, and it makes the residual a property of the read
- * sequence rather than of which benchmark you happened to be looking at.
+ * is exact only if all four terms bracket the same instructions.  HPM
+ * outermost, then minstret, then mcycle innermost, matching
+ * sw/bench/dhry_glue.c, so the two regions' residuals are comparable.
  */
 void
 start_time(void)
@@ -83,11 +71,8 @@ get_time(void)
 secs_ret
 time_in_secs(CORE_TICKS ticks)
 {
-    /* HAS_FLOAT is 0, so secs_ret is ee_u32 and this truncates.  CoreMark uses
-     * it only for its own "at least 10 seconds" gate and its own integer
-     * Iterations/Sec; the reported score is computed from get_time()'s raw
-     * cycles.  Truncation therefore makes the 10-second gate STRICTER, never
-     * looser, which is the safe direction. */
+    /* HAS_FLOAT is 0, so secs_ret is ee_u32 and this truncates, which makes
+     * CoreMark's own 10-second gate stricter, never looser. */
     return (secs_ret)(ticks / EE_TICKS_PER_SEC);
 }
 
@@ -99,11 +84,9 @@ portable_init(core_portable *p, int *argc, char *argv[])
     (void)argc;
     (void)argv;
 
-    /* The UART needs no initialisation -- rvntt_uart_tx comes out of reset
-     * ready -- but the size assertions below are the reason this function is
-     * not empty, and they are worth keeping: ee_ptr_int too narrow for a
-     * pointer corrupts the matrix algorithm in a way that shows up as a wrong
-     * CRC and looks like a core bug. */
+    /* The UART needs no initialisation; the size assertions are the reason
+     * this function is not empty (ee_ptr_int too narrow for a pointer shows
+     * up as a wrong CRC). */
     if (sizeof(ee_ptr_int) != sizeof(ee_u8 *))
         ee_printf("ERROR! ee_ptr_int does not hold a pointer!\n");
     if (sizeof(ee_u32) != 4)

@@ -1,11 +1,7 @@
 // ============================================================================
-// rvntt_core_sim_top -- rvntt_core plus rvntt_ram, for simulation.
-//
-// The whole SoC A4 needs: one core, one dual-ported memory, and the retirement
-// trace brought out to the testbench.  No UART, no GPIO, no address decoder --
-// A12 builds those.  Keeping this separate from a future synthesisable top
-// means the simulation memory can be sized and initialised from a plusarg
-// without that machinery ever reaching a bitstream.
+// rvntt_core_sim_top -- rvntt_core plus rvntt_ram, for simulation.  No UART,
+// no GPIO, no address decoder; the memory is sized and initialised from a
+// parameter and the retirement trace is brought out to the testbench.
 // ============================================================================
 `default_nettype none
 
@@ -26,11 +22,9 @@ module rvntt_core_sim_top #(
     output logic [31:0] commit_wdata,
     output logic        dbg_unsupported,
 
-    // The data-store bus, brought out so a testbench can watch for the write
-    // to `tohost` that ends a riscv-tests program.  A store is issued from EX
-    // and nothing past EX is ever squashed (rvntt_core's trap invariant), so a
-    // write seen here is a write that architecturally happened -- which is what
-    // makes this usable as a stop condition rather than a hint.
+    // The data-store bus, so a testbench can watch for the write to `tohost`
+    // that ends a riscv-tests program (a store is issued from EX and nothing
+    // past EX is squashed, so a write seen here architecturally happened).
     output logic [31:0] dbg_store_addr,
     output logic [31:0] dbg_store_data,
     output logic [3:0]  dbg_store_be
@@ -44,24 +38,10 @@ module rvntt_core_sim_top #(
   assign dbg_store_data = dmem_wdata;
   assign dbg_store_be   = dmem_be;
 
-  // ---- A29: a DETERMINISTIC stand-in for the noise source -----------------
-  // A free-running LFSR, and it carries NO ENTROPY WHATSOEVER -- that is the
-  // point.  Every simulation in this project must be reproducible to the cycle,
-  // so the one thing the stub must not be is random.
-  //
-  // It exists because the alternative -- tying the stub low -- is a stuck
-  // source, which the health tests correctly kill within 21 samples.  Nothing
-  // in simulation reads `seed`, so a DEAD source would be harmless today and a
-  // baffling failure the first time a directed test tried to read one.
-  //
-  // The stub is NOT exposed as a port on this module.  It was, briefly, and
-  // every testbench that instantiates this top broke with PINMISSING -- the
-  // health tests are driven at the rvntt_seed level by
-  // tb/unit/test_entropy_health.py, which is where they belong, so the port
-  // bought nothing and cost a ripple through five files.
-  // The declaration initialiser is what keeps a four-state simulator from
-  // propagating X out of the LFSR before the first reset; rvntt_muldiv scopes
-  // the same waiver for the same reason.
+  // A deterministic stand-in for the noise source: a free-running LFSR with
+  // no entropy, so every simulation is reproducible and the health tests do
+  // not kill a stuck source.  The health tests themselves are driven at the
+  // rvntt_seed level by tb/unit/test_entropy_health.py.
   /* verilator lint_off PROCASSINIT */
   logic [15:0] stub_lfsr_q = 16'hACE1;
   /* verilator lint_on PROCASSINIT */

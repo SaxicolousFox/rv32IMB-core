@@ -1,30 +1,15 @@
 # ============================================================================
-# a14_muldiv.S -- directed M-extension tests (MODS_A A14).
+# a14_muldiv.S -- directed M-extension tests.
 #
-# Checked the same two ways every directed program here is, and it takes both:
+# Checked two ways: the commit log is diffed against Spike (the reference for
+# every value, including the cases the specification legislates for), and the
+# cycle span is compared against tb/cosim/cycle_model.py, which makes the
+# latency a checked property.  No M instruction may trap: the stop condition
+# is reaching `trap_handler`, so a core that trapped would diverge from Spike
+# in length at the offending instruction.
 #
-#   * the commit log is diffed against Spike, which is the reference for every
-#     value below -- including the three cases the specification legislates for
-#     and every implementation gets wrong;
-#   * the CYCLE SPAN is compared against tb/cosim/cycle_model.py, which is what
-#     makes the LATENCY a checked property rather than an assumption.  A
-#     multiplier that took three cycles instead of four, or a divider that
-#     terminated early on a small dividend, would produce a byte-identical
-#     commit log.
-#
-# NO M INSTRUCTION MAY TRAP.  RISC-V division raises no exceptions at all, so
-# neither a zero divisor nor the -2^31 / -1 overflow is an exception here.  That
-# is checked structurally rather than asserted: this program's stop condition is
-# reaching `trap_handler`, so a core that trapped would stop there and Spike --
-# which does not trap -- would carry on, and the two logs would diverge in
-# length at exactly the offending instruction.
-#
-# THE ORDER OF THE CASES IS NOT ARBITRARY.  The value cases come first, so that
-# a wrong answer is reported before a timing disagreement; the hazard cases come
-# after, because a hazard test over an arithmetic unit that is already wrong
-# tells you nothing.
-#
-# x8 is the scratch pointer throughout and is never written after the prologue.
+# Value cases first, hazard cases after.  x8 is the scratch pointer and is
+# never written after the prologue.
 # ============================================================================
         .section .text.init
         .globl _start
@@ -35,10 +20,8 @@ _start:
         # ================================================================
         # 1. All eight operations, ordinary operands, BACK TO BACK.
         # ================================================================
-        # Back-to-back is its own case: the unit deasserts `done` and the next
-        # instruction's first EX cycle is the very next cycle, so a sequencer
-        # that needed an idle cycle between operations would either lose one or
-        # cost an extra cycle the model does not predict.
+        # Back-to-back: the next instruction's first EX cycle is the very next
+        # cycle after `done`.
         li      x9,  0x12345678
         li      x10, 0x0000abcd
         mul     x11, x9, x10
@@ -54,11 +37,9 @@ _start:
         # 2. The sign matrix, which is the only thing separating the four
         #    multiplies from one another.
         # ================================================================
-        # With rs1 = -1 and rs2 = 0xFFFFFFFF the three high-half multiplies give
-        # three DIFFERENT answers -- 0x00000000, 0xFFFFFFFF and 0xFFFFFFFE --
-        # so an implementation that sign-extends the wrong operand cannot land
-        # on the right one by accident.  A test using small positive values
-        # would give the same answer for all three.
+        # With rs1 = -1 and rs2 = 0xFFFFFFFF the three high-half multiplies
+        # give three different answers, so a wrong sign extension cannot land
+        # on the right one by accident.
         li      x9,  -1
         li      x10, -1
         mulh    x11, x9, x10            # (-1) * (-1)          -> 0x00000000
@@ -96,12 +77,7 @@ _start:
         # ================================================================
         # 4. SIGNED OVERFLOW: -2^31 / -1.
         # ================================================================
-        # The quotient is -2^31 and the remainder is 0, and NEITHER TRAPS.  In
-        # this implementation both fall out of the general path -- |-2^31| is
-        # 0x80000000 in 32-bit two's complement and the sign rule says the
-        # quotient is positive, so it is never negated -- which is precisely why
-        # it is tested rather than reasoned about.  "It happens to work" is a
-        # claim, and this is the check on it.
+        # The quotient is -2^31 and the remainder is 0, and neither traps.
         li      x9,  0x80000000
         li      x10, -1
         div     x11, x9, x10            # -> 0x80000000
@@ -115,10 +91,8 @@ _start:
         # ================================================================
         # 5. ROUNDING TOWARD ZERO, all four sign combinations.
         # ================================================================
-        # This is the case a divider built on floor division gets wrong, and it
-        # is wrong in a way that looks like an off-by-one rather than like a
-        # sign bug: -7/2 is -3 remainder -1, not -4 remainder 1.  The identity
-        # to hold is  q * b + r == a  with  sign(r) == sign(a).
+        # -7/2 is -3 remainder -1, not -4 remainder 1: q * b + r == a with
+        # sign(r) == sign(a).
         li      x9,  7
         li      x10, 2
         div     x11, x9, x10            #  7 /  2 ->  3 r  1
@@ -144,27 +118,18 @@ _start:
         mul     x15, x9, x9             # the same register twice
         div     x16, x9, x9             # -> 1
         rem     x17, x9, x9             # -> 0
-        # rd == x0.  The result is discarded but the instruction still occupies
-        # EX for its full latency; a unit that skipped the operation when
-        # nothing could read it would be faster, change no architectural state,
-        # and be visible ONLY to the cycle model.
+        # rd == x0: the result is discarded but the instruction still occupies
+        # EX for its full latency, which only the cycle model can see.
         div     x0, x9, x10
         mul     x0, x9, x10
 
         # ================================================================
         # 7. THE OPERAND-CAPTURE CASE.  A producer at distance 1 into a DIVIDE.
         # ================================================================
-        # This is the shape rvntt_muldiv.sv's header is about.  During the
-        # divide's 33 stall cycles the producer drains out of MEM and then out
-        # of WB, so FWD_MEM stops matching after cycle 1 and FWD_WB after cycle
-        # 2, and the mux falls back to a register-file value that is two
-        # instructions stale.  A unit that re-read its inputs every cycle
-        # computes the right answer for four cycles and the wrong one for the
-        # remaining thirty.
-        #
-        # It has to be a DIVIDE.  With the four-cycle multiplier the fallback is
-        # only reached on the last cycle, and an operand captured then is still
-        # -- by luck -- capable of being right.
+        # During the divide's 33 stall cycles the producer drains out of MEM
+        # and then WB, so a unit that re-read its inputs every cycle would
+        # fall back to a stale register-file value.  It has to be a divide:
+        # the multiplier's fallback is only reached on its last cycle.
         li      x2, 1000
         li      x3, 7
         li      x4, 3
@@ -182,11 +147,8 @@ _start:
         nop
         nop
         div     x15, x9, x4             # distance 3: the register file's write-through
-        # The same shape into a MULTIPLY.  Four cycles is short enough that the
-        # forwarding mux only reaches its stale fallback on the last one, so
-        # this case is weaker than the divides above -- and it is still needed,
-        # because the multiplier's operand registers are separate logic from
-        # the divider's and a capture bug can live in one and not the other.
+        # The same shape into a multiply: weaker, but the multiplier's operand
+        # registers are separate logic from the divider's.
         add     x9, x2, x3
         mul     x17, x9, x4
         sub     x10, x2, x4

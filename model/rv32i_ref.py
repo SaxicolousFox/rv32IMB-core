@@ -1,19 +1,10 @@
 """
-Golden model for the RV32I ALU and immediate generator (plan A2).
+Golden model for the RV32I ALU, immediate generator and instruction decoder.
 
-Written from the ISA specification, NOT transcribed from the RTL.  The whole
-point of a golden model is that it fails for different reasons than the design
-does; if this file were derived from rvntt_alu.sv it would agree with it by
-construction and prove nothing.
-
-Follows the same rule as the rest of model/: **if the RTL disagrees with this
-file, the RTL is wrong.**  Do not adjust these functions to make hardware pass.
-
-`check_pkg_agreement()` is a spec-drift guard.  The enum encodings below are
-duplicated from rtl/core/rv32i_pkg.sv, and a duplicated constant that nobody
-checks is a bug waiting to happen: renumber alu_op_e in the package and every
-test here would keep passing while testing the wrong operations.  So the
-package is parsed and compared, and the tests call this first.
+Written from the ISA specification, not transcribed from the RTL: if the RTL
+disagrees with this file, the RTL is wrong.  check_pkg_agreement() parses
+rtl/core/rv32i_pkg.sv and compares the enum encodings duplicated below, so a
+renumbered enum is a test failure rather than a silently wrong test.
 """
 import os
 import re
@@ -59,13 +50,8 @@ IMM_FMTS = {
 IMM_FMT_WIDTH = 3         # imm_fmt_e is logic [2:0]
 
 # ----------------------------------------------------------------- bm_op_e
-# B (Zba + Zbb + Zbs) and Zbkb, A21 (MODS_A2).  One member per OPERATION, not
-# per encoding: rori is BM_ROR with the immediate operand, and bseti/bclri/
-# binvi/bexti are their register forms the same way.
-#
-# Checked against the package by check_pkg_agreement() below, like alu_op_e and
-# imm_fmt_e -- a decoder equivalence sweep that agrees on a renumbered enum is
-# comparing two wrong answers.
+# B (Zba + Zbb + Zbs) and Zbkb: one member per operation, not per encoding
+# (rori is BM_ROR with the immediate operand).  Checked against the package.
 BM_NONE, BM_SH1ADD, BM_SH2ADD, BM_SH3ADD = 0, 1, 2, 3
 BM_ANDN, BM_ORN, BM_XNOR                 = 4, 5, 6
 BM_CLZ, BM_CTZ, BM_CPOP                  = 7, 8, 9
@@ -76,7 +62,7 @@ BM_ROL, BM_ROR                           = 19, 20
 BM_BSET, BM_BCLR, BM_BINV, BM_BEXT       = 21, 22, 23, 24
 BM_PACK, BM_PACKH                        = 25, 26
 BM_BREV8, BM_ZIP, BM_UNZIP               = 27, 28, 29
-BM_CZEQZ, BM_CZNEZ                       = 30, 31   # Zicond (A22)
+BM_CZEQZ, BM_CZNEZ                       = 30, 31   # Zicond
 
 BM_OPS = {
     "BM_NONE": BM_NONE, "BM_SH1ADD": BM_SH1ADD, "BM_SH2ADD": BM_SH2ADD,
@@ -94,15 +80,10 @@ BM_OPS = {
 BM_OP_WIDTH = 6           # bm_op_e is logic [5:0]
 
 # ------------------------------------------------------- multi-cycle latency
-# EX OCCUPANCY in cycles for the M instructions (MODS_A A14).  An instruction
-# with occupancy N sits in EX for N cycles and inserts N-1 bubbles behind it,
-# which is the term tb/cosim/cycle_model.py adds to its span prediction.
-#
-# DUPLICATED FROM rv32i_pkg.sv ON PURPOSE, and compared by
-# check_pkg_agreement().  Reading the number out of the RTL would make the
-# "independent" cycle model agree with the pipeline by construction, which is
-# precisely what the model exists not to do; duplicating it and checking makes a
-# retune a test failure rather than a silent re-derivation.
+# EX occupancy in cycles for the M instructions: an instruction with occupancy
+# N sits in EX for N cycles and inserts N-1 bubbles behind it.  Duplicated
+# from rv32i_pkg.sv on purpose and compared by check_pkg_agreement(), so the
+# cycle model stays independent of the RTL.
 MUL_CYCLES = 2
 DIV_CYCLES = 34
 
@@ -233,17 +214,11 @@ _PKG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 def _parse_enum(text, typename):
     """
     Pull `NAME = <n>'d<value>` pairs out of one typedef enum in the package.
-
-    Only the decimal `'dN` form is matched, which is the form the package uses
-    for these two enums.  If someone writes a member as 4'h5 or as a bare
-    integer this returns nothing for it and the comparison below fails loudly
-    -- which is the correct outcome for a parser that no longer understands the
-    file it is guarding.
+    Only the decimal `'dN` form is matched; anything else fails the comparison
+    loudly.
     """
-    # The body is `[^}]*`, not `.*?`.  With a non-greedy `.*?` and re.S the
-    # match happily STARTS at the first typedef in the file (opcode_e) and runs
-    # all the way to `} alu_op_e`, reporting opcode_e's width as alu_op_e's.
-    # Forbidding a closing brace inside the body pins the match to one enum.
+    # `[^}]*` rather than `.*?`, so the match cannot run from one typedef to
+    # the closing brace of the next.
     m = re.search(r"typedef\s+enum\s+logic\s*\[(\d+):0\]\s*\{([^}]*)\}\s*"
                   + typename, text, re.S)
     if not m:
@@ -284,9 +259,7 @@ def check_pkg_agreement():
                 f"but {val} in model/rv32i_ref.py")
             checked += 1
 
-    # The multi-cycle latency contract (A14).  Not an enum, so it is parsed
-    # separately -- and it is the number a performance change is most likely to
-    # touch without anyone thinking of the cycle model.
+    # The multi-cycle latency contract: not an enum, so parsed separately.
     for name, expected in (("MULDIV_MUL_CYCLES", MUL_CYCLES),
                            ("MULDIV_DIV_CYCLES", DIV_CYCLES)):
         m = re.search(r"localparam\s+int\s+" + name + r"\s*=\s*(\d+)\s*;", text)
@@ -298,16 +271,8 @@ def check_pkg_agreement():
             f"independent cycle model silently stops being independent")
         checked += 1
 
-    # The non-vacuity count.  If a new enum is added to the loop above and
-    # forgotten here, this fires -- which is how BM_OPS was caught being added
-    # without being counted.
-    #
-    # EXPORTED as PKG_MEMBERS_CHECKED rather than written out again by each
-    # caller.  tb/cocotb/test_alu_cocotb.py and test_immgen_cocotb.py both
-    # asserted their own copy of this sum, both got it wrong when A14 added the
-    # two latency constants, and BOTH FAILURES WERE INVISIBLE FOR SEVEN STEPS
-    # because tb/cocotb/run_cocotb.py returned 0 unconditionally.  One
-    # expression, one place to update.
+    # The non-vacuity count, exported as PKG_MEMBERS_CHECKED so callers do not
+    # each keep their own copy of the sum.
     assert checked == PKG_MEMBERS_CHECKED, (
         f"the spec-drift guard checked {checked} members, expected "
         f"{PKG_MEMBERS_CHECKED} -- an enum was added to the loop above and not "
@@ -321,15 +286,9 @@ if __name__ == "__main__":
 
 
 # =============================================================================
-# Instruction decoder (plan A3)
+# Instruction decoder
 # =============================================================================
-# Written from the ISA specification and, for the custom opcodes, delegated to
-# model/isa/xkntt.py -- the FROZEN contract.  Delegating rather than
-# reimplementing is the point: the four-way agreement in the root CLAUDE.md is
-# defined as the RTL decoder, model/isa/xkntt.py, Spike and the LLVM SchedModel
-# all matching.  A second hand-written copy of the Xkntt decode rules here would
-# be a fourth thing to keep in sync, and it could agree with the RTL while both
-# disagreed with the contract.
+# Written from the ISA specification.
 
 # ------------------------------------------------------------------ opcodes
 OPC_LOAD     = 0x03
@@ -365,10 +324,7 @@ CTRL_FIELDS = [
 
 F7_BASE, F7_ALT, F7_MULDIV = 0b0000000, 0b0100000, 0b0000001
 
-# A21.  Every row here was read off docs/RISC-V_NTT_MODS_A2.txt Appendix A,
-# which was generated by riscv-none-elf-as and objdump.  Written as flat tables
-# so they can be diffed by eye against rvntt_decode.sv's, which are the same
-# tables in SystemVerilog.
+# Flat tables, so they can be diffed by eye against rvntt_decode.sv's.
 F7_ZBA_SHADD  = 0b0010000
 F7_ZBB_MINMAX = 0b0000101
 F7_ZBB_ROT    = 0b0110000
@@ -376,7 +332,7 @@ F7_ZBKB_PACK  = 0b0000100
 F7_ZBS_BSET   = 0b0010100
 F7_ZBS_BCLR   = 0b0100100
 F7_ZBS_BINV   = 0b0110100
-F7_ZICOND     = 0b0000111    # Zicond (A22)
+F7_ZICOND     = 0b0000111    # Zicond
 
 # (funct7, funct3) -> op, for the register-register forms in OP.
 _BM_OP_R = {
@@ -402,7 +358,7 @@ _BM_OP_R = {
     # right answer for it, so there is no BM_ZEXTH row here either.
     (F7_ZBKB_PACK,  0b100): BM_PACK,
     (F7_ZBKB_PACK,  0b111): BM_PACKH,
-    # Zicond (A22).  000-100 and 110 under this funct7 stay illegal.
+    # Zicond.  000-100 and 110 under this funct7 stay illegal.
     (F7_ZICOND,     0b101): BM_CZEQZ,
     (F7_ZICOND,     0b111): BM_CZNEZ,
 }
@@ -459,20 +415,15 @@ def _blank():
 def decode(insn):
     """
     Decode one 32-bit word into the ctrl_t bundle, as a dict keyed by
-    CTRL_FIELDS, plus the four register addresses.
+    CTRL_FIELDS, plus the register addresses.
 
-    Returns (ctrl, regs) where regs is {"rd", "rs1", "rs2", "rs3"}.
+    Returns (ctrl, regs) where regs is {"rd", "rs1", "rs2"}.
 
-    Legality follows three separate rules; see rtl/core/rvntt_decode.sv's header
-    for why they are not one rule:
-      1. Xkntt reserved fields are strict (delegated to model/isa/xkntt.py).
-      2. FENCE's unused fields are ignored, per the base ISA.
-      3. Anything outside
-         rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr_xkntt0p1
-         (tb/cosim/spike_asm.py ISA_XKNTT) is illegal.  M is IN it as of A14
-         (MODS_A); B, Zbkb and Zicond as of A21/A22 (MODS_A2), each legal only
-         at the exact encodings in _BM_OP_R and _bm_op_i.  Zifencei is not, so
-         FENCE.I stays illegal.
+    Legality: FENCE's unused fields are ignored, per the base ISA; everything
+    outside rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr
+    (tb/cosim/spike_asm.py ISA_BASE) is illegal, with B, Zbkb and Zicond legal
+    only at the exact encodings in _BM_OP_R and _bm_op_i.  Zifencei is not
+    included, so FENCE.I stays illegal.
     """
     insn = u32(insn)
     opcode = bits(insn, 6, 0)
@@ -489,9 +440,8 @@ def decode(insn):
     c = _blank()
     f7_base = funct7 == F7_BASE
     f7_alt = funct7 == F7_ALT
-    # A21.  In OP-IMM this is NOT a register: it is part of the opcode for the
-    # unary forms, which is the one place a don't-care silently accepts illegal
-    # encodings.  Named imm_rs2 rather than rs2 so the two uses stay distinct.
+    # In OP-IMM this is not a register: it is part of the opcode for the unary
+    # forms.  Named imm_rs2 so the two uses stay distinct.
     imm_rs2 = bits(insn, 24, 20)
     bm_r = _BM_OP_R.get((funct7, funct3))
     bm_i = _bm_op_i(funct7, funct3, imm_rs2)
@@ -536,10 +486,8 @@ def decode(insn):
     elif opcode == OPC_OP_IMM:
         c.update(reg_write=1, uses_rs1=1, imm_fmt=IMM_I, alu_src_b=SRCB_IMM,
                  result_sel=RES_ALU)
-        # A21 FIRST, exactly as rvntt_decode.sv orders it: the B immediate
-        # forms share funct3 001 and 101 with SLLI/SRLI/SRAI and are separated
-        # only by imm[11:5], so anything that is not one of them falls through
-        # to the base funct7 checks and therefore to illegal.
+        # B immediate forms first, as rvntt_decode.sv orders it: they share
+        # funct3 001/101 with SLLI/SRLI/SRAI and are separated by imm[11:5].
         if bm_i is not None:
             c.update(is_bitmanip=1, bm_op=bm_i, alu_op=ALU_ADD, is_illegal=0)
         elif funct3 in _ALU_BY_F3:
@@ -554,16 +502,13 @@ def decode(insn):
         c.update(reg_write=1, uses_rs1=1, uses_rs2=1, alu_src_b=SRCB_RS2,
                  result_sel=RES_ALU)
         if funct7 == F7_MULDIV:
-            # M (A14).  Total: all eight funct3 values are legal under this
-            # funct7, so there is no illegal case here.  result_sel stays
-            # RES_ALU because rvntt_core delivers the product or quotient
-            # through `ex_result`, not through a new result_sel member.
+            # M: all eight funct3 values are legal under this funct7.  result_sel
+            # stays RES_ALU; rvntt_core delivers the product through ex_result.
             c.update(is_muldiv=1, muldiv_op=funct3, alu_op=ALU_ADD,
                      is_illegal=0)
         elif bm_r is not None:
-            # A21.  Seven more legal funct7 values, one of which -- 0100000 --
-            # was already legal for SUB and SRA.  Those are funct3 000 and 101;
-            # these are 100, 110 and 111, so this cannot steal one of them.
+            # B/Zbkb/Zicond funct7 values; 0100000 is shared with SUB and SRA at
+            # funct3 000 and 101, disjoint from these at 100, 110 and 111.
             c.update(is_bitmanip=1, bm_op=bm_r, alu_op=ALU_ADD, is_illegal=0)
         elif funct3 == 0b000:                       # ADD / SUB
             c.update(alu_op=ALU_SUB if f7_alt else ALU_ADD,

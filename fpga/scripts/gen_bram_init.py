@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 """
-Generate the BRAM init image and its expected checksum.
-
-Plan B3: "Initialize from a generated .mem file, never a hand-typed literal."
-The same rule applies here -- the expected checksum is derived from the same
-data in the same script, so the two can never disagree.
+Generate the BRAM init image and its expected checksum, from the same data in
+the same script so the two can never disagree.
 
 Outputs:
   fpga/generated/bram_init.mem       -- $readmemh image, one 32-bit word per line

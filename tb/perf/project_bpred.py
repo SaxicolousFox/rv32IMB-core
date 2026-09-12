@@ -1,24 +1,13 @@
 #!/usr/bin/env python3
 """
-A19's projection, and later A19's check: run docs/a19-bpred-spec.md over a
-retired control-transfer trace and say what the predictor would do.
-
-This exists BEFORE the RTL, on purpose.  MODS_A A19 quotes a table of expected
-gains that was computed from A13's RV32I counts and warns, in its own words,
-that "after A14 the instruction mix changes and the branch fraction with it, so
-retake the baseline and recompute the projection before believing the delta".
-This is that recomputation, and afterwards it is the independent model the
-implementation is measured against.
-
-The arithmetic is A18's identity with one term replaced:
+Run model/bpred.py over a retired control-transfer trace and say what the
+predictor would do, independently of the RTL:
 
     cycles       = retired + load-use + multi-cycle EX + 2 x redirects
-    cycles(pred) = retired + load-use + multi-cycle EX + 2 x MISPREDICTS
+    cycles(pred) = retired + load-use + multi-cycle EX + 2 x mispredicts
 
-Nothing else moves.  The predictor changes when instructions are fetched, never
-which ones retire, so `retired` and both stall terms are invariants of the
-change -- and if a measured run ever shows one of them moving, that is a bug in
-the predictor and not a result.
+The predictor changes when instructions are fetched, never which ones retire,
+so `retired` and both stall terms are invariants.
 """
 import argparse, csv, json, os, sys
 
@@ -30,10 +19,8 @@ import bpred                                             # noqa: E402
 def load_trace(path):
     """Yields (fetch_cycle, pc, insn, next_pc).
 
-    FETCH, not retire: the visibility rule is about when a lookup happened, and
-    `retire - fetch` is not constant -- an instruction held in ID by a load-use
-    interlock has already been predicted.  See model/bpred.py's VISIBILITY_GAP.
-    Older traces without a `fetch` column cannot be used; regenerate them.
+    Fetch, not retire: `retire - fetch` is not constant (an instruction held
+    in ID has already been predicted); see model/bpred.py's VISIBILITY_GAP.
     """
     with open(path) as f:
         rdr = csv.DictReader(f)
@@ -55,31 +42,24 @@ def main() -> int:
 
     prof = json.load(open(a.profile))
     events = list(load_trace(a.trace))
-    # The region bounds in the profile JSON are retire cycles; the trace is now
-    # dated by fetch.  A transfer's fetch precedes its retirement by at least
-    # four cycles, so widening the window by a few cycles on each side cannot
-    # include a transfer from outside it -- and the region-boundary csrr reads
-    # are not control transfers, so nothing sits exactly on the edge.
+    # The region bounds in the profile JSON are retire cycles and the trace is
+    # dated by fetch; a transfer's fetch precedes its retirement by at least
+    # four cycles, so widening the window slightly cannot admit an outsider.
     SLACK = 8
 
     out, problems = {}, []
     for name, d in prof["regions"].items():
         lo, hi = d["lo_cycle"], d["hi_cycle"]
-        # The predictor is WARMED on everything that ran before the region and
-        # then measured only inside it.  Starting it cold at the region boundary
-        # would credit the design with a cold-start penalty it does not pay on
-        # the board, where the same code has been running since reset.
+        # Warmed on everything before the region, measured only inside it, as
+        # on the board.
         warm = [e for e in events if e[0] <= lo - SLACK]
         seg  = [e for e in events if lo - SLACK < e[0] <= hi - SLACK]
         if not seg:
             problems.append("%s: no control transfers in the trace window" % name)
             continue
 
-        # DelayedBPred, not BPred: an update takes four retire cycles to reach
-        # a lookup (spec section 8), and the trace carries the cycle of every
-        # transfer, so the projection can honour the rule exactly rather than
-        # assume the predictor learns instantly.  It matters -- a tight loop
-        # mispredicts on alternate iterations because of it.
+        # DelayedBPred, not BPred: an update takes four cycles to reach a
+        # lookup, and the trace carries the cycle of every transfer.
         b = bpred.DelayedBPred()
         for c, pc, insn, nxt in warm:
             taken = nxt != (pc + 4) & 0xFFFFFFFF
@@ -88,7 +68,7 @@ def main() -> int:
         n = _run_warm(b, seg)
 
         if n["transfers"] != d["xfer"] + d["br_ntaken"]:
-            problems.append("%s: the trace holds %d control transfers but A18 "
+            problems.append("%s: the trace holds %d control transfers but the profile "
                             "counted %d -- the trace and the profile disagree"
                             % (name, n["transfers"], d["xfer"] + d["br_ntaken"]))
 
@@ -125,12 +105,8 @@ def main() -> int:
                  o["ntaken_predicted_taken"], o["not_taken"]))
 
     # ---- fault injection ---------------------------------------------------
-    # Every one of these is ARCHITECTURALLY INVISIBLE -- the core still retires
-    # the same instructions in the same order, so no commit-log diff, no
-    # riscv-formal check and no compliance test can see any of them.  They show
-    # up here or nowhere, which is MODS_A A19's reason for requiring that at
-    # least one fault be caught by the cycle model rather than by a correctness
-    # check.
+    # Every one of these is architecturally invisible: they show up here or
+    # nowhere.
     if a.selftest:
         print("\n--- selftest: each fault must move the mispredict count ---")
         name = next(iter(out))
@@ -141,12 +117,8 @@ def main() -> int:
                2: "the 2-bit counter wraps instead of saturating",
                3: "the RAS push condition is dropped",
                4: "a cold entry is predicted taken"}
-        # Cold on both sides, and INSTANT-update on both sides: the warmed run
-        # above starts from a predictor that has already seen the program and
-        # honours the visibility window, so comparing a cold instant-update
-        # fault against it would report the warm-up and the window as if they
-        # were the fault.  What this selftest asks is only whether each fault
-        # moves the count, and it asks it of two identically-configured runs.
+        # Cold and instant-update on both sides, so only the fault moves the
+        # count.
         cold = seg
         base = bpred.run(cold, fault=0)["mispredicts"]
         for f in (1, 2, 3, 4):

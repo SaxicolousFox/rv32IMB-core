@@ -1,29 +1,18 @@
 #!/usr/bin/env python3
 """
-Run the riscv-tests ISA suite on the RTL (plan A9).
+Run the riscv-tests ISA suite on the RTL.
 
-This is the first EXTERNALLY AUTHORED test suite the core has faced.  Everything
-before it -- the random generator, the directed programs, the mutation manifest
--- was written alongside the design, by the same hand, and shares its blind
-spots.  riscv-tests does not.
+Each program ends by storing to the `tohost` symbol: 1 for pass, otherwise
+`(failing_case << 1) | 1`.  The testbench watches the store bus for that
+address (a store is issued from EX and nothing past EX is squashed).
 
-HOW A TEST REPORTS ITS RESULT.  Each program ends by storing to the `tohost`
-symbol: 1 for pass, and otherwise `(failing_case << 1) | 1`, so a failure names
-the numbered TEST_CASE that broke.  The testbench watches the store bus for a
-write to that address, which works because a store is issued from EX and nothing
-past EX is ever squashed (rvntt_core's trap invariant).
+The p-environment's reset vector reads mhartid, writes mtvec, mie, mstatus,
+mepc and mscratch, returns through MRET, and deliberately touches CSRs this
+core does not have (satp, pmpaddr0, pmpcfg0, medeleg, mideleg) with mtvec
+pointed at the next line, so the traps have to be right, not merely absent.
 
-WHY THE p-ENVIRONMENT NEEDS A9 AT ALL.  Its reset vector is not a formality: it
-reads mhartid, writes mtvec, mie, mstatus, mepc and mscratch, and returns to the
-test body through MRET.  Every one of those is A9's.  It also deliberately
-touches CSRs an M-only core does not have -- satp, pmpaddr0, pmpcfg0, medeleg,
-mideleg -- having first pointed mtvec at the label just after each one, so that
-an illegal-instruction trap lands on the next line and the test carries on.
-Passing therefore requires the traps to be RIGHT, not merely absent.
-
-EVERY TEST IS RUN ON SPIKE FIRST.  A test that does not pass on the reference
-model is a broken build or a wrong ISA string, and reporting it as an RTL
-failure would send the reader to the wrong place entirely.
+Every test is run on Spike first: a test that fails on the reference model is
+a broken build or a wrong ISA string, not an RTL failure.
 """
 import argparse
 import os
@@ -38,7 +27,7 @@ import spike_asm                   # noqa: E402
 import test_core_verilator as t4   # noqa: E402
 
 TESTS_DIR = os.path.join(ROOT, "toolchain/riscv-tests")
-ISA = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr"   # M: A14; B+Zbkb: A21 (MODS_A2)
+ISA = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr"
 
 # The RV32I user-level suite, minus the two that are outside this core's ISA.
 RV32UI = [
@@ -48,10 +37,7 @@ RV32UI = [
     "srai", "srl", "srli", "sub", "sw", "xor", "xori", "ld_st", "st_ld",
 ]
 
-# The M extension (MODS_A A14).  Eight tests, one per instruction, and they are
-# the reason A14 built M rather than starting from Xkntt: they are somebody
-# else's tests for an instruction set with a published definition, which is
-# exactly what the custom extension does not have.
+# The M extension: eight tests, one per instruction.
 RV32UM = ["mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"]
 
 # Machine mode.  See SKIPPED below for the ones deliberately absent.
@@ -61,9 +47,8 @@ RV32MI = [
     "sw-misaligned", "zicntr", "instret_overflow",
 ]
 
-# Each entry is (suite, name, why).  These are not failures being hidden: each
-# names a feature the plan's §1.5 subset explicitly excludes, and a core that
-# passed them would be implementing something it deliberately does not have.
+# Each entry is (suite, name, why).  Each names a feature this core
+# deliberately does not have.
 SKIPPED = [
     ("rv32ui", "fence_i",
      "Zifencei. The target ISA is rv32im_zicsr_zicntr; FENCE.I is not in it, "

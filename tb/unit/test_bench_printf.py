@@ -2,20 +2,12 @@
 """
 Diff sw/bench/bench_io.c's printf against glibc's over a corpus.
 
-The benchmark's console is the only path from a cycle counter to a reported
-number, so a formatting bug and a slow core produce the same artefact: a capture
-with a wrong figure in it.  Nothing else in A13 can tell those apart.
-
---inject breaks one thing in the formatter and re-runs, to show the diff can
-actually fail.  Zero padding is the one that would silently corrupt a result:
-CoreMark prints its CRCs as 0x%04x, and a dropped pad turns 0x0123 into 0x123.
-
-Dropping the `l` modifier is deliberately NOT in the list.  It escaped when it
-was, and correctly so: on RV32 long and int are both 32 bits, so `l` is a no-op
-there, and the only reason the host build can tell the difference at all is that
-its long is 64-bit.  A mutation that changes nothing on the target is not an
-escape to be plugged -- forcing it to "fail" would mean testing a property the
-target does not have.
+The console is the only path from a cycle counter to a reported number, so a
+formatting bug and a slow core produce the same capture.  --inject breaks one
+thing in the formatter and re-runs, to show the diff can fail; zero padding is
+the case that would silently corrupt a CoreMark CRC (0x%04x).  Dropping the
+`l` modifier is deliberately not in the list: on RV32 long and int are both 32
+bits, so it is a no-op on the target.
 """
 import argparse, os, re, subprocess, sys, tempfile
 

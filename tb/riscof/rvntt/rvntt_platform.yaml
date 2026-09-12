@@ -1,6 +1,5 @@
-# Platform description for RISCOF.  The core has no timer and no NMI source --
-# plan 1.5 defers interrupts entirely -- so both are marked absent rather than
-# given plausible-looking addresses that nothing decodes.
+# Platform description for RISCOF.  The core has no timer and no NMI source,
+# so both are marked absent.
 mtime:
   implemented: false
 mtimecmp:

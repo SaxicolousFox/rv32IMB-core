@@ -1,8 +1,5 @@
 # ============================================================================
-# P0.5 -- non-project batch build of the blinky/UART/BRAM de-risk bitstream.
-#
-# Non-project mode on purpose: everything is scripted and reproducible, there is
-# no .xpr to drift, and the same script shape carries straight over to A12.
+# Non-project batch build of the blinky/UART/BRAM bitstream.
 #
 # Run from the staging directory (bram_init.mem must be in the cwd, because
 # $readmemh resolves relative to it during synthesis):
@@ -15,7 +12,7 @@ set OUTDIR    [pwd]/out
 
 file mkdir $OUTDIR
 
-puts "=== rvntt P0.5: building $TOP for $PART ==="
+puts "=== rvntt: building $TOP for $PART ==="
 puts "=== Vivado [version -short] ==="
 
 # ------------------------------------------------------------------ sources
@@ -31,9 +28,7 @@ synth_design -top $TOP -part $PART -include_dirs [list [pwd] [pwd]/rtl]
 write_checkpoint -force $OUTDIR/post_synth.dcp
 report_utilization  -file $OUTDIR/post_synth_util.rpt
 
-# Confirm the BRAM was actually inferred as a block RAM rather than turned into
-# fabric.  This is a load-bearing check: if it silently became LUTRAM, A12's
-# 64 KB instruction memory would not fit and we would find out much later.
+# Confirm the BRAM was inferred as a block RAM rather than fabric.
 set nbram [llength [get_cells -hierarchical -filter {PRIMITIVE_TYPE =~ BMEM.*.*}]]
 puts "=== inferred BRAM primitives: $nbram ==="
 if {$nbram < 1} {
@@ -53,8 +48,7 @@ report_clock_utilization -file $OUTDIR/post_route_clock_util.rpt
 report_drc            -file $OUTDIR/post_route_drc.rpt
 
 # --------------------------------------------------------------- timing gate
-# Fail the build on negative slack.  A bitstream that does not meet timing is
-# worse than no bitstream: it usually works on the bench and fails later.
+# Fail the build on negative slack.
 set wns [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -setup]]
 set whs [get_property SLACK [get_timing_paths -max_paths 1 -nworst 1 -hold]]
 puts "=== WNS = $wns ns   WHS = $whs ns ==="
@@ -68,7 +62,6 @@ if {$wns < 0 || $whs < 0} {
 write_bitstream -force $OUTDIR/${TOP}.bit
 puts "=== bitstream written: $OUTDIR/${TOP}.bit ==="
 
-# Report the MMCM ratio actually implemented, so the LED check has something to
-# be compared against rather than being taken on trust.
+# Report the MMCM ratio actually implemented.
 puts "=== done ==="
 exit 0

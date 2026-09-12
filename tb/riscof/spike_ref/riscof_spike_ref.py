@@ -1,45 +1,16 @@
 """
-RISCOF REFERENCE plugin: Spike (plan A10).
+RISCOF reference plugin: Spike.
 
-Spike rather than Sail.  The plan names either, Sail's C emulator is a large
-build, and Spike is already this project's golden model -- for A5's lockstep
-cosimulation, for the riscv-tests runs in A9, and for the whole C track.  One
-reference model across the project is worth more than a second opinion that
-nobody else uses.
+Derived from riscv-arch-test's `spike_simple`: compiles each test exactly as
+the DUT plugin does and runs Spike with `+signature=`.  Two deliberate
+differences: no `--misaligned` (this core traps on misaligned accesses, and
+the reference must be configured the same way), and the ISA string is
+derived from tb/riscof/rvntt/rvntt_isa.yaml rather than written here, with a
+completeness check and a timeout -- a reference told a narrower ISA than the
+DUT does not fail, it traps to an unset handler and spins.
 
-This is thin glue, derived from riscv-arch-test's own `spike_simple` plugin: it
-compiles each test exactly as the DUT plugin does and runs Spike with
-`+signature=` to dump the signature region.  It exists rather than using
-`spike_simple` directly because that plugin reads `ispec['PMP']`
-unconditionally, and riscv-config 3.18 has no such key -- so using it would mean
-describing this core's ISA in an older schema than the installed validator
-accepts, which is the wrong thing to bend.
-
-TWO DELIBERATE DIFFERENCES FROM `spike_simple`:
-
-  * no `--misaligned`.  The upstream plugin lets Spike complete misaligned
-    accesses; this core traps on them, and a reference configured differently
-    from the DUT is a reference that hides exactly the disagreements worth
-    finding.  (The RV32I suite has no misaligned tests, so today this changes
-    nothing -- which is the right time to get it right.)
-  * the ISA string is built only from what this core claims -- READ OUT OF THE
-    ISA YAML, not written here.  It used to be the literal 'rv32i' plus an
-    optional '_zicsr', which was true and stayed true right up until A14 added
-    M.  The tests were then compiled -march=rv32im from the suite's own ISA
-    field while Spike was still told rv32i, so it took an illegal-instruction
-    trap on the first `mul`, vectored to an unset handler, and SPUN FOREVER.
-    Nothing failed; the run simply stopped making progress for 25 minutes.
-    That is the same failure mode -mno-relax produces (run_riscof.py's header),
-    and it has now happened twice -- so the reference also gets a TIMEOUT below.
-    THE ISA STRING LIVES IN THREE PLACES and all three must move together:
-    tb/riscof/rvntt/rvntt_isa.yaml, rvntt_csr.sv's MISA_VALUE, and here.  This
-    one is now derived from the first, so there are really only two.
-
-THE ENVIRONMENT IS SHARED WITH THE DUT on purpose.  `model_test.h` and
-`link.ld` define the PLATFORM -- where memory is, how a test halts, where the
-signature lives -- and both sides must agree on those or the comparison is
-meaningless.  What must not be shared is how each side computes the answer, and
-none of that is in there.
+The environment (`model_test.h`, `link.ld`) is shared with the DUT on
+purpose: both sides must agree on the platform.
 """
 import os
 import re
@@ -58,7 +29,7 @@ ENV = os.path.join(ROOT, "tb/riscof/rvntt/env")
 
 class spike_ref(pluginTemplate):
     __model__ = "spike"
-    __version__ = "A10"
+    __version__ = "1.0"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -73,18 +44,10 @@ class spike_ref(pluginTemplate):
         self.work_dir = work_dir
         self.suite_dir = suite
         self.compile_cmd = (
-            # -mno-relax IS REQUIRED, and the reason is worth writing down.
-            # arch_test.h's LA macro wraps its `.align` in `.option rvc` so the
-            # padding can be two bytes when it needs to be, then switches back
-            # with `.option norvc`.  With linker relaxation on, the alignment
-            # becomes an R_RISCV_ALIGN relocation that the LINKER fills -- and
-            # the linker fills it with COMPRESSED nops, because the relocation
-            # was recorded while rvc was still enabled.  The result is c.nop
-            # instructions in the instruction stream of a test for a core with
-            # no C extension: Spike faults on the first one, vectors to the
-            # unset mtvec at address 0, and spins there forever.  With
-            # -mno-relax the assembler resolves the alignment itself, under the
-            # norvc that was intended.
+            # -mno-relax is required: arch_test.h's LA macro wraps its `.align`
+            # in `.option rvc`, and with linker relaxation the linker fills the
+            # alignment with compressed nops, which a core with no C extension
+            # traps on.
             'riscv-none-elf-gcc -march={0} -mno-relax'
             ' -static -mcmodel=medany -fvisibility=hidden -nostdlib'
             ' -nostartfiles -g'
@@ -96,36 +59,18 @@ class spike_ref(pluginTemplate):
         ispec = utils.load_yaml(isa_yaml)['hart0']
         if 64 in ispec['supported_xlen']:
             raise SystemExit("spike_ref is configured for RV32 only")
-        # The single-letter extensions, taken from the yaml rather than
-        # written down.  [A-WY] deliberately excludes X and Z, which introduce
-        # multi-letter names and must not be swallowed as letters.
+        # The single-letter extensions, from the yaml.  [A-WY] excludes X and
+        # Z, which introduce multi-letter names.
         raw = ispec["ISA"]
         m = re.match(r"RV32([A-WY]*)", raw.upper())
         letters = (m.group(1).lower() if m and m.group(1) else 'i')
 
-        # EVERY Z EXTENSION, not just zicsr.  The previous version tested for
-        # the literal string "zicsr" and appended it, which was true and stayed
-        # true right up until A21 added Zba/Zbb/Zbkb/Zbs -- at which point the
-        # tests were compiled -march=rv32izbb from the suite's own ISA field
-        # while Spike was told rv32im_zicsr, took an illegal-instruction trap on
-        # the first `clz`, and SPUN UNTIL THE 600-SECOND TIMEOUT.  Three tests
-        # at a time, 118 tests, on a run that reports nothing while it happens.
-        #
-        # THAT IS THE SECOND TIME THIS EXACT BUG HAS BEEN IN THIS FUNCTION --
-        # the header above describes A14's version of it, with `mul` instead of
-        # `clz`.  Both times the cause was the same: a derivation that keeps
-        # only the extensions someone thought to enumerate.  So this one keeps
-        # ALL of them and then CHECKS that it did.
+        # Every Z extension, not an enumerated subset.
         zexts = [z.lower() for z in re.findall(r"Z[a-z]+", raw, re.I)]
         self.isa = 'rv32' + letters + ''.join('_' + z for z in zexts)
 
-        # The completeness check that makes the above a fix rather than a patch.
-        # Reconstructing the yaml's own string from the parsed pieces and
-        # comparing catches ANY extension this parser does not understand,
-        # including ones that do not exist yet -- which is the only way to stop
-        # this happening a third time.  Refusing to run is the correct
-        # behaviour: a reference model that quietly implements less than the
-        # DUT does not fail, it HANGS, and a hang reports nothing at all.
+        # Completeness check: rebuilding the yaml's own string from the parsed
+        # pieces catches any extension this parser does not understand.
         rebuilt = ('rv32' + letters + ''.join(zexts)).lower()
         if rebuilt != raw.replace('_', '').lower():
             raise SystemExit(
@@ -159,12 +104,8 @@ class spike_ref(pluginTemplate):
             macros = ' -D' + " -D".join(entry['macros'])
             cmd = self.compile_cmd.format(entry['isa'].lower(),
                                           entry['test_path'], elf, macros)
-            # A TIMEOUT, because a reference model that hangs must FAIL rather
-            # than stop the run silently.  A mismatch between the ISA the test
-            # is compiled for and the ISA Spike is told about does not produce
-            # an error: the illegal instruction traps to an unset handler and
-            # the model spins.  600 s is roughly fifty times the slowest test
-            # here, so it can only fire on a real hang.
+            # A timeout, because a reference model that hangs must fail rather
+            # than stop the run silently.  600 s is ~fifty times the slowest test.
             sim = ('timeout 600 {} --isa={} +signature={} '
                    '+signature-granularity=4 {}').format(
                 shlex.quote(self.dut_exe), self.isa, shlex.quote(sig), elf)

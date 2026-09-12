@@ -1,11 +1,6 @@
 // Decodes the UART line out of rvntt_blinky_top and checks both the exact
-// banner AND the interval between repeats.
-//
-// The interval check exists because its absence let a real bug reach hardware:
-// the report FSM used a hardcoded 27-bit counter compared against CLK_HZ/16,
-// so it emitted ~15 lines/second while the comment claimed one.  A testbench
-// that stops after the first message cannot see that.  Anything the design
-// promises should be checked, including its timing.
+// banner and the interval between repeats (a hardcoded divider once emitted
+// ~15 lines/second while claiming one).
 #include "Vrvntt_blinky_top.h"
 #include "verilated.h"
 #include <cstdio>
@@ -14,7 +9,7 @@
 
 static const int  BIT_CYCLES = 651;          // CLK_HZ / BAUD = 75e6 / 115200
 static const int  CLK_HZ     = 75000000;
-static const int  MSG_LEN    = 43;
+static const int  MSG_LEN    = 45;   // strlen("rvntt blinky clk=75MHz bram=0xD76C0E8D PASS\r\n")
 
 int main(int argc, char** argv) {
     Verilated::commandArgs(argc, argv);
@@ -77,7 +72,7 @@ int main(int argc, char** argv) {
     delete dut;
 
     int failures = 0;
-    const std::string want = "rvntt P0.5 clk=75MHz bram=0xD76C0E8D PASS\r\n";
+    const std::string want = "rvntt blinky clk=75MHz bram=0xD76C0E8D PASS\r\n";
 
     std::string shown;
     for (char x : first_msg) {
