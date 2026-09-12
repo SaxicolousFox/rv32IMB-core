@@ -15,8 +15,8 @@ faults and requires each to be rejected.
 """
 import argparse, json, os, re, sys
 
-BEGIN = "=== rvntt A13 ==="
-END   = "=== end A13 ==="
+BEGIN = "=== rvntt bench ==="
+END   = "=== end bench ==="
 
 # 1757 Dhrystones/sec is one VAX 11/780 MIPS.
 VAX_DHRY_PER_SEC = 1757.0

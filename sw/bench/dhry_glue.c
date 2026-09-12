@@ -2,21 +2,11 @@
  * Dhrystone's platform hook, and the check that the benchmark actually ran.
  *
  * setStats() is called by dhrystone_main.c immediately outside its own
- * Start_Timer/Stop_Timer pair, so it is the natural place to sample minstret
- * alongside mcycle: IPC needs both counters over windows that are the same to
- * within a few instructions, and this is the only pair of points where that is
- * true without editing the benchmark.  Both windows are reported, so the fact
- * that setStats's is a handful of instructions WIDER is visible in the output
- * rather than assumed away; tb/fpga/parse_bench_uart.py checks they agree.
- *
- * The snapshot is here for a less obvious reason.  Dhrystone's Ptr_Glob and
- * Next_Ptr_Glob come from alloca() INSIDE main(), so the moment dhry_main()
- * returns they point at dead stack -- and on a bare-metal machine with nothing
- * to reuse it, reading them afterwards would usually still "work", which is the
- * worst possible behaviour for a check.  setStats(0) fires while that frame is
- * still live and the loop has just finished, i.e. exactly when the published
- * "final values of the variables" are final.  Copying the two records out there
- * makes the verification well-defined instead of luckily-correct.
+ * Start_Timer/Stop_Timer pair, so it samples minstret alongside mcycle; both
+ * windows are reported and tb/fpga/parse_bench_uart.py checks they agree.
+ * Dhrystone's Ptr_Glob and Next_Ptr_Glob come from alloca() inside main(),
+ * so setStats(0) copies the two records out while that frame is still live
+ * and the published final values are final.
  */
 #include "dhrystone.h"
 #include "util.h"
@@ -39,11 +29,8 @@ void setStats(int enable)
 {
     if (enable) {
         /* minstret first on entry and last on exit, so the instruction window
-         * strictly contains the cycle window rather than straddling it. */
-        /* A20: the HPM snapshot goes OUTSIDE the cycle window on entry and
-         * outside it on exit, for the same reason minstret does -- six csrr's
-         * are six cycles, and they must not land inside the region they are
-         * describing. */
+         * strictly contains the cycle window; the HPM snapshot goes outside
+         * both, since six csrr's are six cycles. */
 #ifdef BENCH_HPM
         bench_hpm_read(bench_hpm_dhry0);
 #endif

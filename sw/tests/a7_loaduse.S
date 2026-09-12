@@ -1,26 +1,14 @@
 # ============================================================================
-# a7_loaduse.S -- directed load-use interlock tests (plan A7).
+# a7_loaduse.S -- directed load-use interlock tests.
 #
-# Checked two ways, and it takes both:
+# Checked two ways: the commit log against Spike catches a stall that was
+# missing; the cycle span against tb/cosim/cycle_model.py catches a stall that
+# should not have happened.  Half the cases are therefore "must NOT stall"
+# cases, which only the span can see.
 #
-#   * the commit log is diffed against Spike, which catches a stall that was
-#     MISSING (the consumer reads a stale register);
-#   * the CYCLE SPAN is compared against tb/cosim/cycle_model.py, which catches
-#     a stall that should not have happened.  A phantom stall changes no
-#     architectural state at all, so the commit log is byte-identical and only
-#     the cycle count moves.
-#
-# Half the cases below are therefore "must NOT stall" cases.  They are the ones
-# the diff cannot see, and they are where an interlock predicate that is nearly
-# right goes wrong: `rs1 != 0` instead of `uses_rs1`, or forgetting that a load
-# into x0 has no result anyone can read.
-#
-# ADDRESSES LOADED FROM MEMORY.  A test that loads a value and then uses it as
-# an address needs that value to be a real, aligned address, or Spike traps
-# where the RTL happily aliases.  `ptrs` holds linker-resolved pointers into
-# `scratch` for exactly that.
-#
-# x8 is the scratch pointer throughout and is never written after the prologue.
+# `ptrs` holds linker-resolved pointers into `scratch`, so a value loaded and
+# then used as an address is a real, aligned address.  x8 is the scratch
+# pointer and is never written after the prologue.
 # ============================================================================
         .section .text.init
         .globl _start
@@ -42,9 +30,7 @@ _start:
         sub     x10, x2, x9
 
         # ---- case 3: load -> dependent STORE DATA.  MUST STALL. ----------
-        # Plan A7 calls this "the case people forget": the store's rs2 never
-        # reaches the ALU, so a stall condition written in terms of the ALU's
-        # operands misses it entirely.
+        # The store's rs2 never reaches the ALU.
         lw      x9, 8(x8)
         sw      x9, 32(x8)
 
@@ -62,9 +48,7 @@ _start:
         add     x15, x14, x14
 
         # ---- case 7: distance 2.  MUST NOT STALL. ------------------------
-        # The load is in WB by the time the consumer reaches EX, so FWD_WB
-        # supplies it with no bubble.  An interlock that compares against the
-        # MEM stage as well as EX would stall here, correctly and needlessly.
+        # The load is in WB by the time the consumer reaches EX.
         lw      x16, 16(x8)
         nop
         add     x17, x16, x2
@@ -74,20 +58,16 @@ _start:
         add     x19, x2, x3
 
         # ---- case 9: `lw x0`.  MUST NOT STALL. ---------------------------
-        # The result is discarded, so nothing can depend on it -- but rd == x0
-        # matches every instruction that names x0 as a source, and every `nop`
-        # is `addi x0, x0, 0`.  An interlock missing the rd != 0 term stalls on
-        # a huge fraction of all code and is still functionally correct.
+        # rd == x0 matches every instruction that names x0 as a source,
+        # including every `nop`.
         lw      x0, 24(x8)
         add     x20, x0, x2
         lw      x0, 24(x8)
         nop
 
         # ---- case 10: a NON-SOURCE register field.  MUST NOT STALL. ------
-        # LUI has no rs1 operand; insn[19:15] is part of its immediate.  This
-        # LUI's immediate makes those bits read as x21, immediately after a load
-        # into x21.  An interlock keyed on the field rather than on `uses_rs1`
-        # inserts a bubble here that nothing can observe except the cycle count.
+        # LUI has no rs1 operand; insn[19:15] is part of its immediate and
+        # here reads as x21, immediately after a load into x21.
         lw      x21, 28(x8)
         lui     x22, 8
 
@@ -104,8 +84,6 @@ _start:
         lw      x25, 0(x24)
 
         # ---- case 12: an ALU result at distance 1.  MUST NOT STALL. ------
-        # Forwarded, never waited for.  A stall here would be correct and slow,
-        # which is the hardest kind of bug to notice.
         add     x26, x2, x3
         add     x27, x26, x2
         sub     x28, x27, x26

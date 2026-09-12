@@ -1,22 +1,11 @@
 #!/usr/bin/env python3
 """
-A5 acceptance: run programs on Spike and the RTL and diff their commit logs.
+Run programs on Spike and the RTL and diff their commit logs.
 
-Plan A5's "Done when" is that a NOP-padded program produces a byte-identical
-commit log between Spike and the RTL.  This runs the hand-written A4 checksum
-program plus a batch of generated random ones, and diffs each.
-
-The simulator is built ONCE and reused across programs.  The memory image is a
-module parameter, so a rebuild per program would dominate the runtime and put a
-Verilator invocation between a failure and its report.  Instead the image is
-supplied through a plusarg-free mechanism: the RAM's INIT_FILE parameter points
-at a fixed path that this script rewrites before each run.
-
-Densities are all zero here.  The A4/A5 core has no forwarding, no load-use
-interlock and no control flow, so the generated programs must be fully padded
-and branch-free -- rvntt_core's dbg_unsupported fires otherwise.  A6, A7 and A8
-raise --raw-density, --load-use-density and --branch-density in turn against
-this same generator and this same differ.
+The hand-written checksum program plus a batch of generated random ones.
+The simulator is built once: the memory image is a module parameter, so the
+RAM's INIT_FILE points at a fixed path that this script rewrites before each
+run.
 """
 import argparse
 import os
@@ -33,13 +22,9 @@ import spike_asm          # noqa: E402
 import commit_diff        # noqa: E402
 import cycle_model        # noqa: E402
 
-# A19.  The span identity's control term is `2 x redirects` on a statically
-# not-taken core and `2 x mispredicts` on a predicting one, and cycle_model.py
-# implements both -- see its header and docs/a19-bpred-spec.md.  This says
-# which machine is being checked.  It is a constant rather than a probe of the
-# RTL on purpose: the model is supposed to know what the core is from the
-# specification, and a model that sniffs the design for the answer has stopped
-# being independent of it.
+# The span identity's control term is `2 x redirects` on a statically
+# not-taken core and `2 x mispredicts` on a predicting one.  A constant rather
+# than a probe of the RTL, so the model stays independent of the design.
 CORE_HAS_PREDICTOR = True
 import gen_random_prog    # noqa: E402
 import test_core_verilator as t4   # noqa: E402
@@ -149,9 +134,9 @@ def main():
     ap.add_argument("--load-use-density", type=float, default=0.0)
     ap.add_argument("--branch-density", type=float, default=0.0)
     ap.add_argument("--mul-density", type=float, default=0.0,
-                    help="A14: probability an instruction is an M one")
+                    help="probability an instruction is an M one")
     ap.add_argument("--bm-density", type=float, default=0.0,
-                    help="A21: density of B / Zbkb instructions")
+                    help="density of B / Zbkb / Zicond instructions")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
 
@@ -162,8 +147,7 @@ def main():
 
         failures = []
 
-        # 1. The hand-written A4 program: the plan's "NOP-padded program
-        #    produces a byte-identical commit log" in its most literal form.
+        # 1. The hand-written checksum program.
         elf = t4.build_elf(tmp)
         if not run_one(exe, elf, tmp, image, "a4_checksum", verbose=True):
             failures.append("a4_checksum")

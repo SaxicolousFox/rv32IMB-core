@@ -2,22 +2,12 @@
 """
 Run one riscv-arch-test ELF on the RTL and emit its RISCOF signature.
 
-RISCOF's contract with a DUT is narrow: for each test, produce a file of the
-memory contents between `begin_signature` and `end_signature` after the program
-has run, one 32-bit word per line in lowercase hex.  It then diffs that against
-the reference model's file.  Everything else -- test selection, the report -- is
-RISCOF's.
-
-THE SIGNATURE IS RECONSTRUCTED FROM THE STORE BUS, not read out of the RAM.
-Peeking inside the memory would mean marking `mem` public for Verilator, i.e.
-putting a simulator-specific annotation on synthesisable RTL for the benefit of
-a test.  Replaying the program's committed stores onto its own load image gives
-the same answer from information the core already exposes, and it is sound for
-the same reason the tohost watch is: a store is issued from EX, and nothing past
-EX is ever squashed (rvntt_core's trap invariant).
-
-Words the test never writes come from the ELF image, which is why the replay
-starts from the image rather than from zeros.
+For each test RISCOF wants the memory between `begin_signature` and
+`end_signature` after the run, one 32-bit word per line in lowercase hex.
+The signature is reconstructed from the store bus rather than read out of the
+RAM: the program's committed stores are replayed onto its own load image,
+which is sound because a store is issued from EX and nothing past EX is ever
+squashed.
 """
 import argparse
 import os
@@ -69,9 +59,8 @@ def main():
     if r.returncode != 0:
         print("rvntt_run: the DUT did not finish the test\n" + out,
               file=sys.stderr)
-        # Still emit whatever signature the run produced: an empty or short one
-        # makes RISCOF report a mismatch, which is a better failure than a
-        # missing file (which it reports as an infrastructure error).
+        # Still emit whatever signature the run produced: a short one makes
+        # RISCOF report a mismatch rather than an infrastructure error.
 
     # ---- replay the committed stores onto the load image ----------------
     mem = [int(line, 16) for line in open(hexf)]

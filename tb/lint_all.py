@@ -22,12 +22,8 @@ INC  = ["-I" + os.path.join(ROOT, d)
 SKIP_STANDALONE = {"rvntt_blinky_top.sv"}
 
 
-# Code behind an `ifdef is code, and lint has to see it.  rvntt_core's RVFI port
-# and rvntt_rvfi.sv are only compiled when RISCV_FORMAL is set -- by
-# riscv-formal's generated .sby files, never by the simulation build -- so
-# without a pass that sets it, the one file whose whole job is verification
-# would be the one file nothing lints.  A5's own experience applies: an
-# unexercised checking mechanism rots silently.
+# Code behind an `ifdef is code, and lint has to see it: rvntt_core's RVFI port
+# and rvntt_rvfi.sv are only compiled when RISCV_FORMAL is set.
 DEFINE_PASSES = [
     ("RISCV_FORMAL", ["rtl/core/rvntt_rvfi.sv", "rtl/core/rvntt_core.sv"]),
 ]

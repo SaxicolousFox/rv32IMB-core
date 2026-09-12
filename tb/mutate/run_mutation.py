@@ -1,34 +1,19 @@
 #!/usr/bin/env python3
 """
-Mutation testing for the Track A pipeline.
+Mutation testing for the pipeline.
 
-"Fault-inject every checking mechanism" is the working norm in this repo, and
-through A5 it was done with a throwaway script per step.  That made each result
-unreproducible the moment the session ended, which is the wrong property for the
-habit that has caught more real bugs here than anything else.  This is the same
-technique, kept.
-
-WHAT MAKES A RESULT MEANINGFUL.  Every mutation declares WHICH tests must catch
-it, and both directions are failures:
-
-  * ESCAPED   -- no declared catcher failed.  The bug is invisible to the suite.
-  * NOT-CAUGHT-BY -- a test that was declared to catch it did not.  Either the
-    test is weaker than believed or the manifest is stale; both are worth
-    knowing, and a manifest that only had to be caught by *something* would
-    slowly decay into every mutation being caught by the one broadest test.
-
-A mutation that fails to BUILD proves nothing -- it is reported as an error, not
-a catch, because deleting an expression's only use makes the tool the detector
-rather than the test.  Two A4 mutations were rejected on exactly those grounds.
-
-The baseline run comes first: every test named anywhere in the manifest is run
-against unmutated RTL and must pass.  Without it a stuck-at-fail test would
-appear to catch everything.
+Every mutation declares which tests must catch it, and both directions are
+failures: ESCAPED (no declared catcher failed) and NOT-CAUGHT-BY (a declared
+catcher did not fail, so either the test is weaker than believed or the
+manifest is stale).  A mutation that fails to build proves nothing and is
+reported as an error, not a catch.  The baseline run comes first: every test
+named in the manifest must pass against unmutated RTL.
 
 Usage:
     python3 tb/mutate/run_mutation.py                 # every mutation
     python3 tb/mutate/run_mutation.py --step A6       # one step's
     python3 tb/mutate/run_mutation.py --only fwd_priority_swapped
+    python3 tb/mutate/run_mutation.py --check-anchors # 0.1 s pre-flight
 """
 import argparse
 import concurrent.futures as cf
@@ -70,15 +55,9 @@ MMIO    = "rtl/soc/rvntt_mmio.sv"
 SOCTOP  = "rtl/soc/rvntt_soc_top.sv"
 UARTRX  = "rtl/soc/rvntt_uart_rx.sv"
 
-# Files that must be MIRRORED so they can be mutated, but which are not part of
-# the Verilator simulation build.  rvntt_rvfi.sv is instantiated only under
-# `RISCV_FORMAL, so t4.RTL -- which is the simulator's source list -- does not
-# name it, and without this a mutation to the RVFI port would be reported as
-# "not in the build's source list" rather than run.
-# A12's SoC is a second design over the same core: rvntt_soc_top instantiates
-# rvntt_core, rvntt_ram and rvntt_mmio, and none of them are in t4.RTL either
-# (that list is the CORE simulator's).  Mirroring them lets `soc:` mutations
-# reach the address decoder, the peripherals and the top level.
+# Files that must be mirrored so they can be mutated, but which are not in
+# the Verilator core build: rvntt_rvfi.sv is instantiated only under
+# `RISCV_FORMAL, and the SoC modules are a second design over the same core.
 MIRROR_EXTRA = [RVFI, MMIO, SOCTOP, UARTRX,
                 "rtl/soc/rvntt_soc_sim_top.sv", "rtl/soc/rvntt_clkgen.sv",
                 "rtl/soc/rvntt_uart_tx.sv", "rtl/soc/rvntt_ram.sv",
@@ -90,24 +69,15 @@ BENCH_RUNNER = os.path.join(ROOT, "tb/unit/test_bench_verilator.py")
 
 MUTATIONS = [
     # --------------------------------------------------------------- A13 ----
-    # The benchmarks are the only workload here that reads mcycle and minstret
-    # for their VALUES rather than to check a single architectural rule, so they
-    # are the only thing that can notice a counter which is self-consistent but
-    # wrong.  rtl/core/rvntt_csr.sv says as much: "mcycle is a real cycle counter
-    # and therefore does NOT agree with Spike ... Nothing compares it."  These
-    # three are what makes that sentence false.
+    # The benchmarks are the only workload that reads mcycle and minstret for
+    # their values, so they are the only thing that can notice a counter which
+    # is self-consistent but wrong.
     dict(step="A13", name="mcycle_counts_retires_not_cycles",
          why="mcycle advances once per retired instruction instead of once per "
              "clock -- exactly Spike's behaviour, and self-consistent enough "
              "that IPC comes out at a perfectly plausible 1.00.  Every cycle "
              "count, every score and every derived second would be wrong "
              "together, with nothing in the output looking odd",
-         # A20 MOVED THIS.  mcountinhibit put a guard in front of the
-         # increment, so the bare statement this used to match no longer
-         # exists.  FIFTH time an anchor has gone stale under an edit here --
-         # and this one was only visible because the A19 session fixed
-         # run_regress.py's 40-line output truncation, which had been hiding
-         # exactly these lines above the tail.
          edits=[(CSR, "      if (!inhibit_cy_q) mcycle_q <= mcycle_q + 64'd1;",
                       "      if (!inhibit_cy_q && instret_bump) mcycle_q <= mcycle_q + 64'd1;")],
          caught=["bench"]),
@@ -117,30 +87,17 @@ MUTATIONS = [
              "-- impossible for a single-issue in-order pipeline, which is the "
              "only reason it is detectable at all from a number with no "
              "independent reference",
-         # A20 MOVED THIS TOO -- mcountinhibit's IR bit joined the condition and
-         # the statement wrapped onto a second line.  Same cause as the row
-         # above; see its note.
          edits=[(CSR, "      if (instret_bump && !minstret_written && !inhibit_ir_q)\n"
                       "        minstret_q <= minstret_q + 64'd1;",
                       "      if (instret_bump && !minstret_written && !inhibit_ir_q)\n"
                       "        minstret_q <= minstret_q + 64'd2;")],
          caught=["bench"]),
 
-    # Not a counter bug: a datapath bug, checked by the benchmarks' OWN output
-    # rather than by anything this project wrote.  CoreMark validates its results
-    # against published CRCs and dhry_verify() checks Dhrystone's published final
-    # values, so this asks whether those two are worth anything as checkers.
-    #
-    # It replaces a first attempt that ESCAPED, and the reason is worth keeping:
-    # making SRA fill with zeros changed nothing here.  Both benchmarks do
-    # arithmetic right shifts -- libgcc's __divsi3 opens with `srai a2,a0,31` to
-    # capture the sign -- but only ever on non-negative values, where SRA and SRL
-    # agree.  Negative-operand SRA is covered by riscv-tests and riscv-formal and
-    # NOT by A13; recording that is more useful than inventing a benchmark input
-    # that would reach it.
-    # Written as a two-byte enable rather than the obvious 4'b1111, which left
-    # ex_byte_off unreferenced and would not build -- the same reformulation the
-    # A12 mutations needed, and for the same reason.
+    # A datapath bug checked by the benchmarks' own output: CoreMark's CRCs and
+    # dhry_verify().  SRA filling with zeros escaped here, because both
+    # benchmarks only shift non-negative values arithmetically; negative-operand
+    # SRA is covered by riscv-tests and riscv-formal.  A two-byte enable rather
+    # than 4'b1111, which would leave ex_byte_off unreferenced and not build.
     dict(step="A13", name="sb_writes_two_bytes",
          why="a byte store also writes the byte above it.  Dhrystone's inner "
              "loop is three 31-byte strcpy calls, so this corrupts the "
@@ -160,10 +117,8 @@ MUTATIONS = [
                        "  always_comb ram_be = dmem_be;")],
          caught=["soc"]),
 
-    # Formulated as a wrong VALUE in sel_ram_q rather than as
-    # `dmem_rdata = is_ram ? ...`, which was the first attempt: that version left
-    # sel_ram_q unreferenced and Verilator refused to build it.  A mutation that
-    # does not compile proves nothing, so every signal has to stay live.
+    # A wrong value in sel_ram_q rather than a rewrite of the mux, which would
+    # leave sel_ram_q unreferenced and not build.
     dict(step="A12", name="mmio_read_mux_never_selects_mmio",
          why="the read mux always returns RAM data, so every peripheral read "
              "gets whatever the aliased RAM word holds.  The bus has no "
@@ -172,14 +127,8 @@ MUTATIONS = [
                        "      sel_ram_q    <= 1'b1;")],
          caught=["soc"]),
 
-    # This one ESCAPED twice before it meant anything, and both reasons are
-    # worth keeping.  First formulation moved the sample to 25% of a bit, which
-    # is still comfortably inside it -- a mutation that does not change
-    # behaviour proves nothing.  Second, even a true boundary sample decodes
-    # perfectly when the host's edges are ideal, so with the original 8-cycle
-    # sim baud NOTHING could distinguish the two.  tb_soc.cpp now transmits ~2.9%
-    # slow at a 34-cycle divisor, which is what the receiver claims to tolerate;
-    # the STIMULUS was the gap, not the checker.
+    # tb_soc.cpp transmits ~2.9% slow at a 34-cycle divisor, which is what
+    # makes a moved sample point observable at all.
     dict(step="A12", name="uart_rx_samples_on_bit_edge",
          why="the receiver samples on the bit BOUNDARY instead of the midpoint, "
              "so it decodes correctly only from a host with perfect edges and "
@@ -192,17 +141,9 @@ MUTATIONS = [
                          "              state_q <= R_DATA;")],
          caught=["soc"]),
 
-    # NOT "the synchroniser is missing".  Bypassing the two-flop synchroniser
-    # (.sw(sw) instead of .sw(sw_sync_q)) is behaviourally IDENTICAL under a
-    # testbench that holds the switches steady, so that mutation would escape --
-    # and the stimulus is the reason, not the checker.  Metastability is not
-    # simulatable here; the synchroniser is justified by the XDC's false paths
-    # (rtl/soc/CLAUDE.md) and by review, not by this harness.  What IS checkable
-    # is that the readback path works at all, so that is what this claims.
-    # Zeroing the synchroniser output was the obvious formulation and left
-    # sw_meta_q unreferenced, so it would not build.  Swapping the two fields
-    # keeps every signal live AND is the more realistic bug: a packed read whose
-    # field order is wrong looks completely plausible in review.
+    # Not "the synchroniser is missing": bypassing it is behaviourally
+    # identical under a testbench that holds the switches steady.  Swapping the
+    # two fields keeps every signal live and is the realistic bug.
     dict(step="A12", name="gpio_in_fields_swapped",
          why="GPIO_IN returns {sw, btn} instead of {btn, sw}, so software reads "
              "the buttons where it expects the switches.  Both halves are still "
@@ -214,8 +155,7 @@ MUTATIONS = [
 
     # ---------------------------------------------------------------- A6 ----
     dict(step="A6", name="fwd_priority_swapped",
-         why="the older producer wins over the younger one -- the exact case "
-             "plan A6 names as its directed test",
+         why="the older producer wins over the younger one",
          edits=[(FWD,
                  "      if      (mem_supplies && (mem_rd_addr == ex_rs1_addr)) fwd_a = rv32i_pkg::FWD_MEM;\n"
                  "      else if (wb_supplies  && (wb_rd_addr  == ex_rs1_addr)) fwd_a = rv32i_pkg::FWD_WB;",
@@ -240,18 +180,15 @@ MUTATIONS = [
          caught=["formal:rvntt_forward", "directed:a6_forward"]),
 
     dict(step="A6", name="fwd_store_data_not_forwarded",
-         why="the store DATA operand keeps its stale register read -- plan A7 "
-             "calls this the case people forget, and it never goes through the "
-             "ALU so an arithmetic-only test cannot see it",
+         why="the store DATA operand keeps its stale register read; it never "
+             "goes through the ALU, so an arithmetic-only test cannot see it",
          edits=[(CORE, "          dmem_wdata = ex_rs2_fwd;\n          dmem_be    = 4'b1111;",
                        "          dmem_wdata = id_ex_q.rs2_data;\n          dmem_be    = 4'b1111;")],
          caught=["directed:a6_forward", "random:raw"]),
 
     dict(step="A6", name="fwd_valid_ignored",
          why="an && typo'd to ||, so an invalid MEM/WB slot can supply a "
-             "value.  Only formal catches this at A6: the only invalid slots "
-             "before A8 are the reset bubbles, whose rd is x0 and which the "
-             "rd != 0 term already excludes.  A8 adds the flushed-slot case",
+             "value",
          edits=[(FWD, "  wire wb_supplies  = wb_valid  && wb_reg_write  && (wb_rd_addr  != 5'd0);",
                       "  wire wb_supplies  = (wb_valid  || wb_reg_write) && (wb_rd_addr  != 5'd0);")],
          caught=["formal:rvntt_forward"]),
@@ -262,15 +199,13 @@ MUTATIONS = [
              "generator that pads to 3 would sit in it",
          edits=[(RF, "assign rd1 = (wr_en && (wa == ra1)) ? wd : regs[ra1];",
                      "assign rd1 = regs[ra1];")],
-         # NOT a4_checksum: that program pads every RAW with three NOPs, so
-         # its dependencies are at distance 4 and never touch the
-         # write-through path at all.  Found by this harness reporting it as
-         # PARTIAL, which is the manifest earning its keep.
+         # Not a4_checksum: it pads every RAW with three NOPs, so its
+         # dependencies never touch the write-through path.
          caught=["formal:rvntt_regfile", "directed:a6_forward", "random:raw"]),
 
     dict(step="A6", name="break_sra",
-         why="the plan's own suggested injection, kept as a permanent check "
-             "that the differ still localises an ordinary datapath bug",
+         why="a permanent check that the differ still localises an ordinary "
+             "datapath bug",
          edits=[(ALU, "rv32i_pkg::ALU_SRA:    y = $unsigned($signed(a) >>> shamt);",
                       "rv32i_pkg::ALU_SRA:    y = a >> shamt;")],
          caught=["formal:rvntt_alu", "random:raw"]),
@@ -287,8 +222,7 @@ MUTATIONS = [
 
     dict(step="A7", name="interlock_rs2_watches_rs1",
          why="the rs2 comparison is wired to rs1, so a load feeding a STORE'S "
-             "DATA operand does not stall.  That operand never reaches the ALU, "
-             "which is why plan A7 names it specifically",
+             "DATA operand does not stall.  That operand never reaches the ALU",
          edits=[(CORE, "      .id_rs2_addr (id_rs2),",
                        "      .id_rs2_addr (id_rs1),")],
          caught=["directed:a7_loaduse", "random:loaduse"]),
@@ -307,7 +241,7 @@ MUTATIONS = [
          why="the interlock keys on the rs1 FIELD rather than on whether the "
              "instruction reads rs1, so LUI and AUIPC -- whose insn[19:15] is "
              "part of an immediate -- stall behind an unrelated load.  Again no "
-             "value changes; this is the phantom stall the plan warns about",
+             "value changes: a phantom stall",
          edits=[(CORE, "      .id_uses_rs1 (id_ctrl.uses_rs1),",
                        "      .id_uses_rs1 (1'b1),")],
          caught=["directed:a7_loaduse", "random:loaduse"]),
@@ -315,14 +249,8 @@ MUTATIONS = [
     dict(step="A7", name="stall_lets_the_pc_advance",
          why="IF is not held, so the fetch stream runs on by one during the "
              "bubble and an instruction is skipped entirely",
-         # A19 MOVED THIS.  The PC hold used to be a branch of the pc_q
-         # always_ff; the predictor turned the whole thing into a combinational
-         # pc_next mux, so the hold is now an arm of that mux and the old anchor
-         # matched nothing.  The harness reported NO-OP rather than scoring a
-         # mutation it had not applied, which is the correct behaviour and the
-         # fourth time an anchor has gone stale under a rename here.  Deleting
-         # this arm still means "the fetch stream runs on during the bubble":
-         # pc_next falls through to the predicted target or pc+4.
+         # The hold is an arm of the combinational pc_next mux; deleting it
+         # means the fetch stream runs on during the bubble.
          edits=[(CORE, "    else if (front_stall)   pc_next = pc_q;\n", "")],
          caught=["directed:a7_loaduse", "random:loaduse"]),
 
@@ -338,10 +266,8 @@ MUTATIONS = [
 
     dict(step="A7", name="stall_injects_no_bubble",
          why="ID/EX is not cleared, so the consumer is issued twice -- a "
-             "stalled cycle retires an instruction, which is exactly what plan "
-             "A7's done-when forbids",
-         # A14 split `stall` into id_stall and ex_stall and gave ID/EX a third
-         # arm; the interlock's bubble is now the id_stall half of the second.
+             "stalled cycle retires an instruction",
+         # The interlock's bubble is the id_stall half of ID/EX's second arm.
          edits=[(CORE, "    end else if (id_stall || ex_redirect) begin",
                        "    end else if (ex_redirect) begin")],
          caught=["directed:a7_loaduse", "random:loaduse"]),
@@ -371,11 +297,9 @@ MUTATIONS = [
              "operand, so a branch on a value computed one instruction earlier "
              "-- `sub` then `beqz`, which is how every compiler writes a "
              "comparison -- takes the wrong direction",
-         # The .funct3 line is part of the anchor because A14's rvntt_muldiv is
-         # wired from the same two forwarded operands with the same port names
-         # and the same spacing.  Without it this matched TWICE and the harness
-         # silently mutated the multiplier instead of the comparator -- which is
-         # why mirror_rtl now rejects an ambiguous anchor outright.
+         # The .funct3 line is part of the anchor because rvntt_muldiv is
+         # wired from the same two forwarded operands; mirror_rtl rejects an
+         # ambiguous anchor.
          edits=[(CORE, "      .funct3 (id_ex_q.insn[14:12]),\n"
                        "      .a      (ex_rs1_fwd),",
                        "      .funct3 (id_ex_q.insn[14:12]),\n"
@@ -398,21 +322,11 @@ MUTATIONS = [
              "-- rvntt_ram ignores the low address bits by design -- so the "
              "core executes the right instruction at a pc that is off by one, "
              "and only the commit log's pc column shows it",
-         # A26 lever 1 moved JALR's target off the ALU and onto A17's address
-         # adder, so the anchor moved with it.  The mutation is unchanged in
-         # substance -- it still fails to clear bit 0 -- and its catchers are
-         # unchanged, because neither of them cares which adder produced the
-         # number.  The 0.04 s anchor pre-flight found this on the first
-         # regression after the edit, which is the sixth time it has paid for
-         # itself.
+         # JALR's target comes from the address adder, not the ALU.
          edits=[(CORE, "{ex_mem_addr[31:1], 1'b0}", "{ex_mem_addr[31:1], ex_mem_addr[0]}")],
-         # A11 added the second catcher, and it is the interesting one: RISCOF
-         # passes 76/76 over this mutation (see the A10 table in CLAUDE.md),
-         # because no arch-test computes an odd JALR target.  riscv-formal's
-         # jalr model states the `& ~1` directly, so it cannot be missed.
-         # pc_fwd does NOT catch it -- the core is self-consistent, fetching
-         # from exactly the odd pc it reports -- which is why the catcher has to
-         # be the instruction model and not a consistency check.
+         # RISCOF passes over this mutation (no arch-test computes an odd
+         # JALR target); riscv-formal's jalr model states the `& ~1` directly.
+         # pc_fwd does not catch it: the core is self-consistent.
          caught=["directed:a8_control", "rvfi:insn_jalr_ch0"]),
 
     dict(step="A8", name="jump_does_not_redirect",
@@ -479,8 +393,7 @@ MUTATIONS = [
 
     dict(step="A9", name="illegal_instruction_does_not_trap",
          why="an illegal instruction retires instead of trapping.  It is the "
-             "one case rvntt_core's dbg_unsupported still watches for, which is "
-             "why that guard was kept when A9 made it unreachable",
+             "one case rvntt_core's dbg_unsupported still watches for",
          edits=[(CORE, "      if (id_ex_q.ctrl.is_illegal ||\n"
                        "          (id_ex_q.ctrl.is_csr && ex_csr_illegal)) begin",
                        "      if (1'b0 && (id_ex_q.ctrl.is_illegal ||\n"
@@ -489,8 +402,7 @@ MUTATIONS = [
 
     dict(step="A9", name="misaligned_load_does_not_trap",
          why="a misaligned load aliases onto the containing word instead of "
-             "faulting -- which is what this core did before A9, and which no "
-             "test written alongside it would have questioned",
+             "faulting",
          edits=[(CORE, "      end else if (id_ex_q.ctrl.mem_read && ex_addr_misaligned) begin\n"
                        "        ex_trap = 1'b1; ex_trap_cause = 5'd4;  ex_trap_val = ex_mem_addr;\n", "")],
          caught=["riscv:rv32mi/lw-misaligned", "riscv:rv32mi/ma_addr"]),
@@ -508,15 +420,11 @@ MUTATIONS = [
              "breaks three things at once: minstret counts it, the commit log "
              "gains a line Spike does not have, and the register write it was "
              "supposed to abandon happens",
-         # A14 added ex_stall as a second reason to bubble here.  Deleting the
-         # whole arm would delete that too and test two things at once, so this
-         # removes only the trap term and leaves the stall bubble intact.
+         # Only the trap term is removed; the ex_stall bubble stays intact.
          edits=[(CORE, "    end else if (ex_trap || ex_stall) begin",
                        "    end else if (ex_stall) begin")],
-         # NOT a9_minstret: that program never traps, so its counter is
-         # unaffected.  A squashed-instruction bug shows up where instructions
-         # actually fault -- and in every random program, whose closing ECALL
-         # would then retire and appear in a log Spike has no line for.
+         # Not a9_minstret: that program never traps.  Every random program's
+         # closing ECALL would retire and appear in a log Spike has no line for.
          caught=["riscv:rv32mi/illegal", "random:branch"]),
 
     dict(step="A9", name="csrrs_with_x0_writes_anyway",
@@ -534,16 +442,12 @@ MUTATIONS = [
          why="writing a counter shadow silently does nothing instead of "
              "trapping.  Nothing observes the lost write; the missing trap is "
              "the whole of the failure",
-         # A29 added `|| seed_illegal` to this expression, so the anchor moved
-         # with it.  The mutation is unchanged in substance -- a write to a
-         # read-only CSR stops trapping -- and dropping ONLY the read_only term
-         # keeps `seed`'s rule intact, so this still tests exactly what it
-         # tested before rather than accidentally testing two things.
+         # Dropping only the read_only term keeps `seed`'s rule intact.
          edits=[(CSR, "  assign illegal = !known || (wen && read_only) || seed_illegal;",
                       "  assign illegal = !known || seed_illegal;")],
          caught=["formal:rvntt_csr", "csr:a9_csr"]),
 
-    # A29.  The rule that makes `seed` safe to read.
+    # The rule that makes `seed` safe to read.
     dict(step="A29", name="seed_is_an_ordinary_readable_csr",
          why="Zkr's `seed` accepts a read-only access instead of trapping.  "
              "`csrrs rd, seed, x0` -- what a debugger's register dump or a "
@@ -551,11 +455,8 @@ MUTATIONS = [
              "every time anyone looked at the machine.  The architecture "
              "requires the write precisely so that reading cannot happen by "
              "accident",
-         # THE SENSE IS INVERTED RATHER THAN THE TERM REMOVED.  Deleting
-         # `seed_illegal` from the expression leaves the wire unreferenced and
-         # Verilator's -Wall makes that a BUILD ERROR -- and a mutation that
-         # does not compile proves nothing.  Inverting the condition is also
-         # the more realistic slip: `!wen` versus `wen` is one character.
+         # The sense is inverted rather than the term removed: deleting
+         # `seed_illegal` leaves the wire unreferenced and does not build.
          edits=[(CSR, "  wire seed_illegal = seed_access && !wen;",
                       "  wire seed_illegal = seed_access && wen;")],
          caught=["formal:rvntt_csr"]),
@@ -596,14 +497,13 @@ MUTATIONS = [
                        "  wire ex_target_misaligned = ex_ctrl_xfer && ex_jump_target[0];")],
          caught=["riscv:rv32mi/ma_fetch"]),
     # --------------------------------------------------------------- A11 ----
-    # These are mutations of the RVFI PORT rather than of the pipeline: a
-    # verification interface that misreports is exactly as dangerous as a broken
-    # datapath, because everything downstream believes it.  Each one names the
-    # single riscv-formal check that states the property directly.
+    # Mutations of the RVFI port: a verification interface that misreports is
+    # as dangerous as a broken datapath.  Each names the single riscv-formal
+    # check that states the property directly.
     dict(step="A11", name="rvfi_order_skips_traps",
          why="rvfi_order stops counting trapped instructions -- which is what "
-             "it would do if it were derived from minstret, the trap plan A11 "
-             "warns about.  Two instructions then share an index, and every "
+             "it would do if it were derived from minstret.  Two instructions "
+             "then share an index, and every "
              "check that identifies an instruction BY its order is quietly "
              "looking at the wrong one",
          edits=[(RVFI, "    else if (mw_q.valid) order_q <= order_q + 64'd1;",
@@ -613,8 +513,8 @@ MUTATIONS = [
     dict(step="A11", name="rvfi_trap_not_reported",
          why="the trapped instruction is dropped from RVFI instead of being "
              "reported with rvfi_trap -- i.e. RVFI is wired straight out of the "
-             "commit tracer, which is what plan A11 says to do and what does "
-             "not work.  The stream then jumps from the instruction before the "
+             "commit tracer, which does not work.  The stream then jumps from "
+             "the instruction before the "
              "fault to the handler's first instruction, and pc_fwd sees a "
              "pc_rdata that does not follow the previous pc_wdata",
          edits=[(RVFI, "    ex_pkt.valid    = ex_valid;",
@@ -661,58 +561,20 @@ MUTATIONS = [
          caught=["rvfi:pc_fwd_ch0"]),
 
     # --------------------------------------------------------------- A14 ----
-    # The M extension, and the multi-cycle EX mechanism under it.  Two of these
-    # are the interesting ones and neither changes an architectural value:
-    # `muldiv_done_one_cycle_late` is visible ONLY to the cycle model, and
-    # `minstret_counts_stalled_cycles` ONLY to a9_minstret.  Everything else in
-    # the tree -- Spike, rv32um, the commit-log differ -- is structurally blind
-    # to both, which is the same shape as A7's phantom stall.
-    # ---- A26 (MODS_A2) --------------------------------------------------
+    # The M extension and the multi-cycle EX mechanism.
+    # `muldiv_done_one_cycle_late` is visible only to the cycle model and
+    # `minstret_counts_stalled_cycles` only to a9_minstret; Spike, rv32um and
+    # the commit-log differ are blind to both.
     #
-    # THE FOURTH MUTATION HERE WAS WRITTEN AND THEN NOT ADDED, and the reason
-    # is worth more than the mutation would have been.  Dropping the load-use
-    # exclusion from the ID-stage forwarding precompute -- `mem_mem_read` tied
-    # to 0 -- escapes cosimulation AND riscv-formal, and it escapes CORRECTLY.
-    # The exclusion is structurally redundant there: the only way a load in EX
-    # can match the ID instruction's rs is the exact condition rvntt_hazard
-    # stalls on, and a stalled ID instruction never latches the precompute.
-    # The port stays wired to the real signal because the redundancy is a
-    # property of the INTERLOCK and not of the forwarding unit, and a mutation
-    # aimed somewhere it could never bite is the shape A14 already rejected
-    # once.  Same finding, same response.
-    #
-    # A SECOND ONE WAS WRITTEN AND NOT ADDED, for a different reason: reverting
-    # lever 1 -- putting JALR's target back on ex_alu_y -- cannot be caught by
-    # anything, because a_jalr_target_matches_alu says the two adders produce
-    # the same NUMBER and riscv-formal proves it at depth 14.  A mutation whose
-    # verdict is "no observable difference" is a proof restated as a test, and
-    # a worse one.  The equality is the check; the mutation would only measure
-    # timing, which is A26's own measurement and not the mutation set's job.
-    #
-    # AND A THIRD, which is the one that took real work to settle.  A26 lever 5
-    # gives rvntt_bpred a `hold` input and lets `flush` OUTRANK it, so that a
-    # redirect arriving during a front-end stall clears the held prediction
-    # instead of preserving one about an address the core will no longer fetch.
-    # Removing that override escapes directed:a19_bpred, rvfi:pc_fwd_ch0,
-    # random:loaduse, random:branch and directed:a7_loaduse -- five catchers,
-    # none of which see it -- and it escapes for a reason worth writing down.
-    #
-    # `front_stall && ex_redirect` needs the instruction in EX to be BOTH a
-    # load (id_stall's condition) and something that redirects.  ex_stall is
-    # excluded structurally, ex_redirect being gated on !ex_stall.  ex_mret is
-    # not a load.  ex_mispredict cannot happen to a load at all: only a branch
-    # or a jump ever allocates a BTB entry, index and tag together are the whole
-    # word address, so a load can never hit and never be predicted taken.  What
-    # is left is a MISALIGNED LOAD with a dependent instruction behind it -- and
-    # even then the consequence is one stale prediction, which the next EX
-    # resolution corrects.  Architecturally invisible, and worth at most a
-    # cycle.
-    #
-    # So `|| flush` is kept and NOT mutated: it is a guard against a case that
-    # is nearly unreachable and entirely harmless, and A20 already settled what
-    # to do with those -- keep the guard, do not pretend a test covers it.
+    # Deliberately absent: dropping the load-use exclusion from the ID-stage
+    # forwarding precompute (structurally redundant with the interlock, so it
+    # escapes correctly); reverting JALR's target onto the ALU
+    # (a_jalr_target_matches_alu proves the two adders agree); and removing
+    # the predictor's flush-over-hold override, which needs a misaligned load
+    # with a dependent instruction behind it and costs at most one stale
+    # prediction.
     dict(step="A26", name="fwd_precompute_does_not_decay",
-         why="A26 lever 2's precomputed forwarding select is HELD through a "
+         why="the precomputed forwarding select is HELD through a "
              "multi-cycle EX stall instead of decaying MEM -> WB -> REG.  The "
              "producers drain out from under the stalled instruction, so a "
              "held FWD_MEM reads a bubble -- zero -- instead of the register "
@@ -739,44 +601,22 @@ MUTATIONS = [
          why="the result is taken one cycle before it exists: for MUL that is "
              "the previous operation's product still sitting in the output "
              "register, for DIV it is 31 iterations instead of 32.  This is "
-             "the partial-result failure MODS_A A14 names, in the place it "
-             "actually lives -- the unit's own done condition rather than the "
+             "the partial-result failure in the place it actually lives -- "
+             "the unit's own done condition rather than the "
              "forwarding network, which never sees a partial value at all "
              "because EX/MEM is bubbled on every stalled cycle",
          edits=[(MD, "  assign done = req && active_q && (cnt_q == target);",
                      "  assign done = req && active_q && (cnt_q == target - 6'd1);")],
-         # A28 DROPPED riscv:rv32um/mul FROM THIS LIST, and the reason is a
-         # property of the 2-cycle multiply rather than a weakening of the test.
-         #
-         # At MUL_CYCLES = 4 the mutation read m_p2_q a cycle before the product
-         # reached it -- the PREVIOUS multiply's answer, a wrong VALUE, which
-         # rv32um/mul sees.  At MUL_CYCLES = 2 there is no product register at
-         # all: MUL_PIPE is 0 and the 33x33 is combinational from the operand
-         # registers, which are held by their enable.  So `done` a cycle early
-         # cannot read a partial result, because there is nothing partial to
-         # read.  What actually happens is that cnt_q (which starts at 1) never
-         # equals target-1 = 0 until it WRAPS at 64, so MUL takes 65 cycles and
-         # returns the right answer.  A timing-only mutation, and the two span
-         # checks catch it: directed:a14_muldiv and random:muldiv both do.
-         #
-         # rv32um/div stays, because the divider is untouched at 34 cycles and
-         # its loop really does hold partial state.
+         # riscv:rv32um/mul is not a catcher: at MUL_CYCLES = 2 there is no
+         # product register to read early, so `done` a cycle early is a
+         # timing-only fault (cnt_q wraps and MUL takes 65 cycles).  The two
+         # span checks catch it; rv32um/div still does, the divider being
+         # untouched.
          caught=["directed:a14_muldiv", "random:muldiv", "riscv:rv32um/div"]),
 
-    # THIS ENTRY REPLACED ONE THAT ESCAPED, AND THE ESCAPE WAS THE FINDING.
-    # The first version dropped the multiplier's operand-register ENABLE, so
-    # m_a_q/m_b_q reloaded from the drifting forwarding muxes on every stalled
-    # cycle.  It escaped every declared catcher -- correctly.  The multiplier is
-    # a three-deep register CHAIN whose latency equals its depth, so the value
-    # read on the done cycle is the product of the operands present on the START
-    # cycle whether or not the enable is there; the later ones are still in
-    # flight behind it.  The enable is load-bearing for the DIVIDER, whose state
-    # is a loop rather than a chain, and structurally redundant for the
-    # multiplier.  That is recorded in rvntt_muldiv.sv rather than papered over
-    # with a mutation aimed somewhere it could never bite.
-    #
-    # The bug the original entry was trying to reach lives one level up, in how
-    # the CORE feeds the unit -- and there it is real for both halves.
+    # The operand-register enable is structurally redundant for the multiplier
+    # (a register chain whose latency equals its depth) and load-bearing for
+    # the divider (a loop); the bug lives in how the core feeds the unit.
     dict(step="A14", name="muldiv_reads_the_register_file_not_forwarding",
          why="the multi-cycle unit is fed id_ex_q.rs1_data/rs2_data instead of "
              "the forwarding muxes' outputs, which is the ordinary way a new "
@@ -794,21 +634,11 @@ MUTATIONS = [
                        "      .a      (id_ex_q.rs1_data),\n      .b      (id_ex_q.rs2_data),")],
          caught=["directed:a14_muldiv", "random:muldiv"]),
 
-    # A25 (MODS_A2).  The bug the multiply-latency PARAMETER made possible.
-    #
-    # A14's multiplier had three named registers and a hardcoded MUL_CYCLES=4;
-    # A25 derived the product pipeline's depth FROM the latency so the two
-    # cannot drift.  The failure that replaces the old one is therefore this:
-    # the derivation itself is wrong, and the pipeline is deeper than the
-    # latency allows.  `done` then fires while the product is still in flight
-    # and the result read is the PREVIOUS multiply's.
-    #
-    # The opposite direction -- a pipeline SHALLOWER than the latency -- is
-    # deliberately not a mutation, and the reason is the same one that made
-    # A14's operand-enable mutation escape correctly: the operands are held, so
-    # the product arrives early and simply sits there being right.  It wastes a
-    # cycle and changes no value, which is `muldiv_done_one_cycle_late`'s
-    # territory, and that entry already exists.
+    # The product pipeline's depth is derived from the latency; if the
+    # derivation is wrong and the pipeline is deeper, `done` fires while the
+    # product is still in flight and the result read is the previous multiply's.
+    # A shallower pipeline wastes a cycle and changes no value, which
+    # `muldiv_done_one_cycle_late` covers.
     dict(step="A25", name="mul_pipeline_deeper_than_its_latency",
          why="MUL_PIPE is derived as MUL_CYCLES-1 instead of MUL_CYCLES-2, so "
              "the product pipeline is one register longer than the occupancy "
@@ -896,7 +726,8 @@ MUTATIONS = [
 
     dict(step="A14", name="idex_bubbles_instead_of_holding",
          why="ID/EX takes a bubble on a multi-cycle stall instead of holding, "
-             "which is A7's behaviour applied to A14's stall.  The instruction "
+             "which is the interlock's behaviour applied to the multi-cycle "
+             "stall.  The instruction "
              "is dropped on the floor mid-operation: the unit sees req go low, "
              "aborts, and nothing ever retires",
          edits=[(CORE, "      id_ex_q <= id_ex_q;",
@@ -920,8 +751,7 @@ MUTATIONS = [
          caught=["directed:a14_muldiv", "random:muldiv"]),
 
     # --------------------------------------------------------------- A15 ----
-    # A14's own formal work found a real bug in the RVFI port and nothing else
-    # could have.  This entry is what stops it coming back.
+    # The RVFI-port bug the formal work found; this stops it coming back.
     dict(step="A15", name="rvfi_samples_the_last_ex_cycle",
          why="the RVFI shadow reports the operands the forwarding muxes held on "
              "a multi-cycle instruction's LAST EX cycle rather than its first. "
@@ -962,13 +792,9 @@ MUTATIONS = [
                  "riscv:rv32um/div", "riscv:rv32um/divu"]),
 
     # ---- A17: the dedicated address adder ---------------------------------
-    # The adder exists for timing, so most of what could go wrong with it is
-    # invisible to timing and visible only here.  Note what is NOT in this
-    # list: pointing the misalignment check back at ex_alu_y.  That is the
-    # fault injection MODS_A A17 asks for, and it is deliberately absent,
-    # because a_addr_adder_matches_alu proves the two are the same number --
-    # so it is a NO-OP by construction and only an implementation run can see
-    # it.  It is done as a timing experiment instead; see docs/a17-fmax.md.
+    # Pointing the misalignment check back at ex_alu_y is not here:
+    # a_addr_adder_matches_alu proves the two are the same number, so it is a
+    # no-op that only an implementation run can see.
     dict(step="A17", name="addr_adder_drops_carry_into_bit2",
          why="the address adder carries within [1:0] and within [31:2] but not "
              "between them.  Chosen because it is nearly invisible: an aligned "
@@ -1006,14 +832,8 @@ MUTATIONS = [
          caught=["bench", "random:raw"]),
 
     # ---- A19: the branch predictor ----------------------------------------
-    # FOUR OF THESE SIX ARE ARCHITECTURALLY INVISIBLE.  The core retires the
-    # same instructions in the same order with every one of them applied, so
-    # no commit-log diff, no riscv-formal check and no compliance test can see
-    # them -- they are caught by tb/cosim/cycle_model.py's SPAN check and
-    # nowhere else.  MODS_A A19 asks for exactly that ("at least one must be
-    # caught by the cycle model rather than by a correctness check"), and it is
-    # the reason the cycle model was taught the predictor from
-    # docs/a19-bpred-spec.md rather than from this RTL.
+    # Four of these six are architecturally invisible and are caught by
+    # tb/cosim/cycle_model.py's span check and nowhere else.
     dict(step="A19", name="btb_tag_compared_against_the_wrong_bits",
          why="the stored tag is compared against the lookup tag ROTATED LEFT "
              "by one -- an off-by-one slice, and the most ordinary way to get "
@@ -1050,15 +870,10 @@ MUTATIONS = [
                      "  wire up_call = 1'b0;")],
          caught=["directed:a19_bpred"]),
 
-    # THE VALID BIT HAS NO MUTATION, and the reason is worth recording rather
-    # than leaving as an eight-entry list where a reader expects nine.
-    # Dropping `btb_valid_q[lk_i]` from the hit test is a NO-OP in simulation:
-    # an entry that was never written reads as all zeros, so its tag is zero,
-    # and nothing in this project executes below address 0x400 -- the tag
-    # comparison alone rejects it.  The valid bit is therefore defence in depth
-    # against a memory that does NOT power up zeroed, which is the case the
-    # specification's section 6 reset argument is written for and the case no
-    # simulation here can produce.  A mutation that cannot fail is not evidence.
+    # The valid bit has no mutation: dropping it from the hit test is a no-op
+    # in simulation (an unwritten entry reads all zeros and nothing executes
+    # below 0x400, so the tag comparison rejects it).  It is defence in depth
+    # against a memory that does not power up zeroed.
     dict(step="A19", name="btb_never_replaces_a_live_entry",
          why="the BTB refuses to overwrite an entry belonging to a different "
              "address -- a plausible 'do not thrash' policy, and wrong: with a "
@@ -1099,8 +914,7 @@ MUTATIONS = [
 
     dict(step="A19", name="rvfi_pc_wdata_falls_through_a_taken_branch",
          why="pc_wdata comes from the trap vector or from pc + 4, never from "
-             "the branch target.  This is the shape of the bug A19 nearly "
-             "shipped: pc_wdata used to be gated on ex_redirect, and a "
+             "the branch target.  pc_wdata used to be gated on ex_redirect, and a "
              "correctly predicted taken branch no longer redirects, so the old "
              "expression would have reported a fall-through on exactly the "
              "branches the predictor got RIGHT.  ex_redirect was deleted from "
@@ -1125,12 +939,9 @@ MUTATIONS = [
          caught=["directed:a19_bpred"]),
 
     # ---------------------------------------------------------------- A20
-    # The counters are OBSERVATIONAL: nothing in the datapath reads them, so
-    # every mutation here is architecturally perfect by construction and the
-    # commit log is byte-identical with all of them applied.  What catches them
-    # is either the directed CSR contract test or -- for the two that get the
-    # ATTRIBUTION wrong rather than the plumbing -- the comparison against A18's
-    # instrument, which is the reason that comparison exists.
+    # The counters are observational, so every mutation here is architecturally
+    # perfect; the catchers are the directed CSR contract test and, for the two
+    # that get the attribution wrong, the comparison against the instrument.
     dict(step="A20", name="mcountinhibit_does_not_inhibit_mcycle",
          why="the inhibit bit is stored, and reads back correctly, and does "
              "nothing.  The plausible version of this bug: the register is "
@@ -1159,19 +970,16 @@ MUTATIONS = [
          caught=["csr:a20_hpm"]),
 
     # ---------------------------------------------------------------- A21
-    # B (Zba+Zbb+Zbs) and Zbkb.  Every one of these is architecturally VISIBLE
-    # -- a wrong bit-manipulation result is a wrong register value -- so the
-    # catchers are the ones that compare architectural state: RISCOF's B suite,
-    # the random cosim against Spike, and rvntt_bitmanip's own proof.
+    # B and Zbkb: every one of these is architecturally visible, so the
+    # catchers compare architectural state.
     dict(step="A21", name="rev8_and_brev8_swapped",
          why="rev8 reverses BYTES and brev8 reverses BITS WITHIN each byte. "
              "They sound alike, they are adjacent in the encoding (imm[11:5] "
              "0110100 for both, differing only in the rs2 field), and swapping "
              "them is the ordinary mistake.  Both are involutions, so a "
              "round-trip test would pass with them swapped",
-         # BOTH arms are swapped.  Pointing rev8 at brev8_v alone leaves
-         # rev8_v unreferenced and Verilator rejects the build -- and a
-         # mutation that does not compile proves nothing.
+         # Both arms are swapped; pointing rev8 at brev8_v alone leaves rev8_v
+         # unreferenced and does not build.
          edits=[(BM,
                  "      rv32i_pkg::BM_REV8:   y = rev8_v;",
                  "      rv32i_pkg::BM_REV8:   y = brev8_v;"),
@@ -1205,9 +1013,8 @@ MUTATIONS = [
     dict(step="A21", name="bitmanip_result_never_reaches_writeback",
          why="the EX result mux ignores is_bitmanip, so every B instruction "
              "writes back the ALU's output instead.  The unit is correct, the "
-             "decoder is correct, and the answer is wrong -- which is what the "
-             "separate-result-lane design of MODS_A2 section 3.4 costs if the "
-             "lane is not actually selected",
+             "decoder is correct, and the answer is wrong -- the cost of a "
+             "separate result lane if the lane is not actually selected",
          edits=[(CORE, "    else if (id_ex_q.ctrl.is_bitmanip) ex_result = ex_bm_result;",
                        "    else if (1'b0) ex_result = ex_bm_result;")],
          caught=["random:bitmanip"]),
@@ -1218,8 +1025,8 @@ MUTATIONS = [
              "as a don't-care makes the decoder accept rs2 = 3, 6 and 7, which "
              "are RESERVED and must trap.  ARCHITECTURALLY INVISIBLE to every "
              "functional test, because no functional test emits a reserved "
-             "encoding -- this is the exact class A3's 10^6-word sweep exists "
-             "for, and the only thing here that catches it",
+             "encoding -- the decoder equivalence sweep is the only thing here "
+             "that catches it",
          edits=[(DEC,
                  "          rv32i_pkg::RS2_SEXTH: bm_op_i = rv32i_pkg::BM_SEXTH;\n"
                  "          default:              bm_op_i = rv32i_pkg::BM_NONE;",
@@ -1251,40 +1058,18 @@ MUTATIONS = [
          why="funct7 0000111 has exactly two legal funct3 values, 101 and 111.  "
              "This makes 110 decode as czero.nez as well.  ARCHITECTURALLY "
              "INVISIBLE: no assembler emits it, so only the decoder equivalence "
-             "sweep sees it -- the same class as A21's reserved rs2 field, on "
-             "the newest extension in the core",
+             "sweep sees it",
          edits=[(DEC, "      {rv32i_pkg::F7_ZICOND,     3'b111}: bm_op_r = rv32i_pkg::BM_CZNEZ;",
                       "      {rv32i_pkg::F7_ZICOND,     3'b110},\n"
                       "      {rv32i_pkg::F7_ZICOND,     3'b111}: bm_op_r = rv32i_pkg::BM_CZNEZ;")],
          caught=["cocotb:decode"]),
 
-    # TWO A20 MUTATIONS ARE DELIBERATELY NOT IN THIS MANIFEST, and both are
-    # recorded here rather than left out silently.
-    #
-    # "the stall tie is broken the wrong way" -- hpm_event[LOADUSE] made
-    # `id_stall` instead of `id_stall && !ex_stall`.  IT IS NOT HERE BECAUSE IT
-    # IS NOT A MUTATION: it was injected, the counters came back identical on
-    # both benchmarks, and the reason is that the two stalls are DISJOINT BY
-    # CONSTRUCTION -- id_stall requires a load in EX, ex_stall requires a
-    # multiply or divide there, and one instruction cannot be both.  The guard
-    # is a semantically-equivalent rewrite, so removing it mutates nothing and
-    # the harness would rightly call it a NO-OP.
-    #
-    # The disjointness is now asserted in rvntt_core.sv
-    # (a_stalls_are_disjoint) and proved by every riscv-formal check at depth
-    # 14, which is a stronger statement than any mutation of it could be.  This
-    # note is kept because the ORIGINAL comment in the core claimed the guard
-    # was load-bearing, and fault injection is what showed it was not.
-    #
-    # "BTB hit counted when the prediction was suppressed" -- pred_hit ignoring
-    # `flush`, so the instruction at a redirect target is recorded as a hit even
-    # though no lookup described its address.  NOTHING HERE CATCHES IT, and that
-    # is a real gap rather than an oversight: the retired instruction stream
-    # contains no evidence about whether the BTB held an entry, so no check
-    # built on it can see the difference.  run_stall_profile.py reports the hit
-    # count rather than checking it, and says so.  Closing this needs an RTL
-    # assertion relating pred_hit to the previous cycle's flush, which is
-    # rvntt_bpred's formal job and not a mutation's.
+    # Not in the manifest: `id_stall` instead of `id_stall && !ex_stall` for
+    # the load-use event is not a mutation (the two stalls are disjoint by
+    # construction, asserted as a_stalls_are_disjoint); and a BTB hit counted
+    # when the prediction was suppressed is not caught by anything, since the
+    # retired stream carries no evidence of whether the BTB held an entry --
+    # run_stall_profile.py reports the hit count rather than checking it.
 ]
 # ------------------------------------------------------------------- the tests
 RANDOM_SUITES = {
@@ -1298,12 +1083,9 @@ RANDOM_SUITES = {
                     seed=0xA7000000),
     "branch":   dict(n=8, length=250, raw=1.0, lu=1.0, br=0.12, mul=0.0,
                     seed=0xA8000000),
-    # A14.  mul is 0.12 and not higher on purpose: a 34-cycle divide is 34
-    # cycles in which nothing else is exercised, so a denser stream would trade
-    # away the hazard coverage that makes these programs worth running at all.
-    # A21.  B and Zbkb at a density that makes them the majority of the
-    # program, because the mutations here are single-operation bugs and a
-    # 29-way choice means each operation appears rarely at a low density.
+    # mul is 0.12: a 34-cycle divide exercises nothing else.  B and Zbkb at a
+    # density that makes them the majority, because the mutations here are
+    # single-operation bugs.
     "bitmanip": dict(n=8, length=250, raw=1.0, lu=1.0, br=0.10, mul=0.0,
                      bm=0.35, seed=0xB1000000),
     "muldiv":   dict(n=8, length=250, raw=1.0, lu=1.0, br=0.12, mul=0.12,
@@ -1326,16 +1108,8 @@ def mirror_rtl(work, name, edits):
         n = s.count(old)
         if n == 0:
             return d, f"anchor not found in {rel}"
-        # AN AMBIGUOUS ANCHOR IS WORSE THAN A MISSING ONE, and until A14 this
-        # went unchecked.  `replace(old, new, 1)` hits whichever match comes
-        # first in the file, so a second match somewhere unrelated makes the
-        # mutation silently break a DIFFERENT part of the design -- and the
-        # verdict then says something true about a bug nobody meant to inject.
-        # A14 created exactly that: rvntt_muldiv is instantiated from the same
-        # two forwarded operands, with the same port names and the same spacing,
-        # as rvntt_branch, so A8's `.a (ex_rs1_fwd),` anchor began matching the
-        # multiplier first.  It surfaced as a PARTIAL -- the right smell for
-        # entirely the wrong reason.
+            # An ambiguous anchor is worse than a missing one: `replace(old,
+            # new, 1)` would silently mutate a different part of the design.
         if n > 1:
             return d, (f"anchor matches {n} times in {rel} -- ambiguous, so the "
                        f"mutation would land on whichever comes first")
@@ -1365,11 +1139,8 @@ def build(work, name, rtl_dir, image, jobs=4):
     return os.path.join(build_dir, "Vrvntt_trace_top"), None
 
 
-# Depth is picked from the deepest property, never from a default -- the rule
-# rtl/core/CLAUDE.md states for every proof here.  rvntt_muldiv is the first
-# module whose deepest property is a LATENCY rather than a dependency distance:
-# a divide presents its result on its 34th EX cycle, so nothing about it can be
-# observed before step 34.
+# Depth is picked from the deepest property: a divide presents its result on
+# its 34th EX cycle.
 FORMAL_DEPTH = {"rvntt_muldiv": 37}
 FORMAL_DEPTH_DEFAULT = 8
 
@@ -1400,27 +1171,18 @@ def run_formal(work, name, rtl_dir, design):
 def run_rvfi(rtl_dir, check, core_name="rvntt"):
     """Run ONE riscv-formal check against the mutated tree.  True if it PASSES.
 
-    One check per manifest entry rather than the whole set, for the same reason
-    the random suites here are eight programs and not a thousand: the entry is a
-    claim about WHICH check sees the bug, and running all 43 would let one broad
-    check be credited with everything.  It also keeps the cost sane -- the full
-    set is about 40s wall, a single check two to ten.
+    One check per manifest entry rather than the whole set: the entry is a
+    claim about which check sees the bug.
     """
-    # --core-name is what makes this safe to run in parallel: run_riscv_formal
-    # generates checks.cfg and a tree of .sby files into riscv-formal's
-    # cores/<name>, and a shared one would have workers overwrite each other's
-    # generated checks -- producing not an error but a check that describes
-    # somebody else's design.  Found by running the harness parallel for the
-    # first time, where every rvfi: mutation died at once.
+    # --core-name is what makes this safe to run in parallel: each worker gets
+    # its own cores/<name> in the riscv-formal checkout.
     r = subprocess.run([sys.executable, RVFI_RUNNER, "--rtl-dir", rtl_dir,
                         "--core-name", core_name,
                         "--only", check, "-j", "1"],
                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     if r.returncode not in (0, 1):
-        # Exit 2 means the design would not elaborate or the solver gave up.
-        # rvntt_rvfi.sv is not in the simulator's source list, so build() cannot
-        # vet a mutation to it -- and a mutation that does not compile must not
-        # be counted as caught.  Loud, not silent.
+        # Exit 2 means the design would not elaborate or the solver gave up;
+        # a mutation that does not compile must not be counted as caught.
         raise RuntimeError("riscv-formal could not run %s:\n%s"
                            % (check, r.stdout.decode("utf-8", "replace")[-2000:]))
     return r.returncode == 0
@@ -1482,18 +1244,9 @@ class Fixture:
 
 
 def prebuild_fixtures(fx, muts):
-    """Build every ELF the selected mutations will need, SERIALLY, up front.
-
-    Fixture caches lazily, which is right for a serial run and wrong for a
-    parallel one: eight workers reaching for the same uncompiled ELF would
-    compile it eight times into the same path, and the one that loses writes a
-    truncated file under another's feet.  Forcing them all first turns the
-    Fixture into read-only shared state, which is safe to inherit across a
-    fork and needs no locking anywhere.
-
-    It also moves compile errors to the front of the run, where they are a
-    setup failure rather than a mutation verdict.
-    """
+    """Build every ELF the selected mutations will need, serially, up front,
+    so the Fixture is read-only shared state across the fork and compile
+    errors are a setup failure rather than a mutation verdict."""
     kinds = sorted({k for m in muts for k in m["caught"]})
     n = 0
     for kind in kinds:
@@ -1520,13 +1273,9 @@ def prebuild_fixtures(fx, muts):
 def baseline_job(spec):
     """Run one baseline task: either a single kind, or the whole exe-using group.
 
-    THE SPLIT IS NOT ARBITRARY.  Kinds that run the simulator all read the one
-    memory image baked into the baseline exe at build time, so they cannot run
-    beside each other -- they go in a single task and stay serial within it.
-    Everything else (the formal proofs, the riscv-formal checks, cocotb, bench,
-    soc) touches neither, and those are the expensive ones: formal:rvntt_muldiv
-    alone is depth 37 and about three minutes, which was a third of this
-    harness's entire fixed cost while the baseline was serial.
+    Kinds that run the simulator all read the one memory image baked into the
+    baseline exe, so they stay serial in one task; everything else is
+    independent.
     """
     kinds, label = spec
     buf = io.StringIO()
@@ -1556,13 +1305,9 @@ _BASE_WORK = None
 
 
 def mutation_job(idx):
-    """Run one mutation end to end.  Returns a result dict; prints nothing.
-
-    All output is CAPTURED and returned so the parent can print the verdict
-    table in manifest order.  A parallel run that interleaved its own lines
-    would produce a report that is different every time, and this table is
-    meant to be diffable between runs.
-    """
+    """Run one mutation end to end.  Returns a result dict; prints nothing --
+    all output is captured so the parent prints the verdict table in manifest
+    order, diffable between runs."""
     m = _MUTS[idx]
     res = {"idx": idx, "name": m["name"], "verdict": None, "detail": "",
            "problem": False, "extra": ""}
@@ -1607,40 +1352,25 @@ def mutation_job(idx):
                 res.update(verdict="CAUGHT", detail=", ".join(caught_by))
             return res
     finally:
-        # Reclaim as we go.  86 mirrored trees and object directories is tens
-        # of gigabytes if they all survive to the end of the run, and in
-        # parallel they would all exist at once rather than one at a time.
+        # Reclaim as we go: 89 mirrored trees and object directories is tens
+        # of gigabytes.
         shutil.rmtree(jwork, ignore_errors=True)
-        # The per-worker riscv-formal core directory lives inside the
-        # gitignored checkout rather than in jwork, so it needs removing by
-        # name.  Leaving 86 of them behind would be tidy-looking clutter that
-        # slowly fills the disk and, worse, could be picked up by a later run
-        # that expected only cores/rvntt to exist.
+        # The per-worker riscv-formal core directory lives inside the checkout,
+        # so it needs removing by name.
         shutil.rmtree(os.path.join(ROOT, "toolchain/riscv-formal/cores",
                                    "mut_" + m["name"]), ignore_errors=True)
 
 
 def job_image(work):
-    """The memory image for one mutation, inside ITS OWN work directory.
-
-    THIS IS WHAT MAKES PARALLELISM SAFE.  a5.run_one() copies each test's hex
-    over the image path baked into the simulator at build time, and the trace
-    it writes lands in the same directory.  A single shared image.hex was fine
-    while mutations ran one at a time and is a data race the moment they do
-    not -- one worker's program silently running under another's expectations,
-    which would show up as an ESCAPED or PARTIAL verdict that is not about the
-    mutation at all.
-    """
+    """The memory image for one mutation, inside its own work directory: a
+    shared image path would be a data race between parallel workers."""
     return os.path.join(work, "image.hex")
 
 
 def run_test(kind, fx, exe, rtl_dir, work, mut_name, quiet=True):
     """Run one named test.  True = PASSED (so False = caught the mutation)."""
-    # A failing cosim prints its whole first-divergence report.  That is the
-    # right behaviour for the acceptance runs and the wrong one here, where a
-    # failure is the EXPECTED outcome and there may be dozens of them: the
-    # verdict table is the report.  The baseline run is not quiet, because
-    # there a failure is real and its detail is the point.
+    # Quiet: a failing cosim would print its whole first-divergence report,
+    # and here failure is the expected outcome.  The baseline run is not quiet.
     if quiet:
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
@@ -1649,12 +1379,8 @@ def run_test(kind, fx, exe, rtl_dir, work, mut_name, quiet=True):
 
 
 def run_soc(rtl_dir, work, mut_name):
-    """Build and run the A12 SoC testbench from a mirrored RTL tree.
-
-    Unlike the core tests this one has its own Verilator build (a different top,
-    a different memory image), so it gets its own object directory per mutation
-    -- sharing one would have each mutation silently rebuild over the last.
-    """
+    """Build and run the SoC testbench from a mirrored RTL tree, with its own
+    object directory per mutation."""
     build = os.path.join(work, "obj_soc_" + mut_name)
     r = subprocess.run([sys.executable, SOC_RUNNER,
                         "--rtl-dir", rtl_dir, "--build-dir", build],
@@ -1669,14 +1395,8 @@ def run_soc(rtl_dir, work, mut_name):
 
 
 def run_bench(rtl_dir, work, mut_name):
-    """Build and run the A13 benchmark image on a mirrored RTL tree.
-
-    Deliberately tiny counts: this is asking whether the mutation is VISIBLE,
-    not how fast the core is, and 30 Dhrystone runs plus one CoreMark iteration
-    already exercise every path a full run does.  One block, because the
-    block-to-block reproducibility check is about the machine being
-    deterministic, which no mutation here is meant to break.
-    """
+    """Build and run the benchmark image on a mirrored RTL tree, with tiny
+    counts and one block: this asks whether the mutation is visible."""
     build = os.path.join(work, "obj_bench_" + mut_name)
     r = subprocess.run([sys.executable, BENCH_RUNNER,
                         "--rtl-dir", rtl_dir, "--build-dir", build,
@@ -1728,14 +1448,9 @@ def _run_test(kind, fx, exe, rtl_dir, work, mut_name):
         ok, _out = ct.run(exe, elf, work, job_image(work), extra)
         return ok
     if kind.startswith("cocotb:"):
-        # A21.  The A3 decoder equivalence sweep -- 10^6 random words, RTL
-        # against model/rv32i_ref.py -- is the ONLY thing here that can see a
-        # reserved-field mutation, because no functional test ever emits a
-        # reserved encoding.  It costs about 45 seconds, which is why exactly
-        # one mutation names it.
-        #
-        # It runs against the MUTATED rtl dir, which means the flat wrapper and
-        # the package have to come from there too.
+            # The decoder equivalence sweep (10^6 random words against
+            # model/rv32i_ref.py) is the only thing that can see a reserved-
+            # field mutation.  It runs against the mutated rtl dir.
         design = kind.split(":", 1)[1]
         r = subprocess.run([sys.executable,
                             os.path.join(ROOT, "tb/cocotb/run_cocotb.py"),
@@ -1777,20 +1492,8 @@ def main():
         print("no mutations selected")
         return 2
 
-    # ---- the anchor pre-flight.
-    #
-    # WHY THIS EXISTS, AND WHY IT IS SEPARATE FROM THE RUN.  A mutation whose
-    # search text no longer appears in the file mutates nothing, and the harness
-    # correctly reports it as NO-OP -- but only after building and running
-    # everything else, a quarter of an hour later, in a report long enough that
-    # the two NO-OP lines landed above run_regress.py's output tail and were
-    # invisible until that truncation was fixed.
-    #
-    # ANCHORS HAVE NOW GONE STALE FIVE TIMES IN THIS PROJECT, every time for the
-    # same reason: a later step edited the line a mutation was anchored to.  The
-    # check is a string search.  It costs a tenth of a second and it is the
-    # difference between "your rename broke two mutations" arriving now and
-    # arriving after the next full regression.
+        # ---- the anchor pre-flight: a string search, so a stale anchor is
+        # reported now rather than as a NO-OP after a full run.
     stale = []
     srcs = {}
     for m in muts:
@@ -1899,16 +1602,8 @@ def main():
         # ---- the mutations.
         print("\n%-32s %-10s %s" % ("mutation", "verdict", "caught by"))
         print("-" * 96)
-        # ---- run them, in parallel, and report in MANIFEST ORDER.
-        #
-        # Each mutation is independent -- mirror, build, run, report -- and
-        # shares nothing with any other now that the image and work directory
-        # are per-job and the fixtures are pre-built.  So the only reason this
-        # was serial is that it was written before it was slow.
-        #
-        # The RESULTS ARE PRINTED IN MANIFEST ORDER regardless of completion
-        # order, because this table is meant to be diffable between runs and a
-        # report whose line order depends on scheduling is not.
+        # ---- run them, in parallel, and report in manifest order, so the
+        # table is diffable between runs.
         results = [None] * len(muts)
         done = 0
         if a.jobs <= 1:

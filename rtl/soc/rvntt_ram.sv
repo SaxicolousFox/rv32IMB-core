@@ -1,27 +1,13 @@
 // ============================================================================
 // rvntt_ram -- true dual-port synchronous RAM, the core's whole memory system.
 //
-// Plan §1.4: BRAM only, no DDR3, no MIG.  Split I/D access "Harvard-style, both
-// from the same physical BRAM array via true dual-port", which is what this is:
-// port A is instruction fetch (read only), port B is load/store.  One array, so
-// a program and its data live in one image and the addresses match the ELF --
-// which is what lets A5 run the identical binary on Spike and on the RTL.
-//
-// SYNCHRONOUS READ, and the pipeline is built around that rather than fighting
-// it.  Each port's address input is registered inside the RAM, so that register
-// *is* a pipeline register:
-//
-//   * port A's address comes from the PC register in IF, so rdata_a is the
-//     instruction during ID -- the RAM's output register is the IF/ID insn.
-//   * port B's address comes from the COMBINATIONAL ALU result in EX, not from
-//     the EX/MEM register, so rdata_b is valid during MEM.  Driving it from the
-//     registered result instead would push load data into WB and add a second
-//     load-use bubble that the plan's timing does not have.
-//
-// Byte enables on port B only; instruction fetch never writes.
-//
-// Addresses are byte addresses in the ELF's space (BASE = 0x80000000).  The
-// low two bits are ignored -- alignment is the LSU's problem, not the RAM's.
+// Port A is instruction fetch (read only), port B is load/store with byte
+// enables.  Each port's address is registered inside the RAM, so its output
+// register is a pipeline register: port A's address comes from the PC, so
+// rdata_a is the instruction during ID; port B's comes from the EX address
+// adder, so rdata_b is valid during MEM.  Byte addresses in the ELF's space
+// (BASE = 0x80000000); the low two bits are ignored, and everything above the
+// array aliases rather than faults.
 // ============================================================================
 `default_nettype none
 
@@ -47,30 +33,16 @@ module rvntt_ram #(
 
   logic [31:0] mem [0:WORDS-1];
 
-  // Power-on contents.  The loop-then-$readmemh order matters: $readmemh leaves
-  // any address the file does not cover untouched, so without the loop those
-  // words would be X in simulation and a fetch from an unwritten address would
-  // propagate X through the whole pipeline instead of behaving like the zeroed
-  // BRAM a real FPGA gives you.
-  //
-  // The `initial` loop rather than a declaration initialiser: Yosys does not
-  // parse `'{default: '0}` (see rtl/core/CLAUDE.md).
+  // Zero first, then $readmemh, so uncovered words are zero rather than X
+  // (as on a real FPGA).  An `initial` loop, because Yosys does not parse
+  // `'{default: '0}`.
   initial begin
     for (int i = 0; i < WORDS; i++) mem[i] = 32'h0;
     if (INIT_FILE != "") $readmemh(INIT_FILE, mem);
   end
 
-  // Byte address -> word index.  Everything above the array is dropped, which
-  // makes the memory alias rather than fault; A9 owns access faults, and until
-  // then aliasing is far easier to spot in a trace than an X.
-  // Sliced rather than shifted-and-truncated: `(addr - BASE) >> 2` is a 32-bit
-  // expression assigned to AW bits, which is a WIDTHTRUNC warning and, more to
-  // the point, hides exactly which bits are being dropped.
-  //
-  // Two groups of bits are dropped on purpose, so UNUSEDSIGNAL is scoped to
-  // these two declarations: the low two bits, because alignment is the LSU's
-  // problem and not the array's, and everything above AW+1, because the memory
-  // aliases rather than faults.
+  // Byte address -> word index, sliced so the dropped bits are explicit: the
+  // low two (alignment is the LSU's problem) and everything above AW+1.
   /* verilator lint_off UNUSEDSIGNAL */
   wire [31:0] off_a = addr_a - BASE;
   wire [31:0] off_b = addr_b - BASE;

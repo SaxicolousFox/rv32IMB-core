@@ -1,9 +1,5 @@
-# Program the Arty's XC7A100T over JTAG from a batch Vivado run.
-#
-# Volatile configuration only -- nothing is written to the QSPI flash, so a
-# power cycle returns the board to whatever was there before.  That is the right
-# default for a bring-up loop: every run starts from a known state and no
-# mistake here can leave the board unable to boot.
+# Program the Arty's XC7A100T over JTAG from a batch Vivado run.  Volatile
+# configuration only: nothing is written to the QSPI flash.
 #
 #   vivado -mode batch -source program_soc.tcl -tclargs <path-to-.bit>
 set BIT [lindex $argv 0]

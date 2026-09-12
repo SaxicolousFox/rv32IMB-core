@@ -1,36 +1,17 @@
 # =============================================================================
-# A4 acceptance program: a NOP-padded, straight-line checksum over an array.
+# a4_checksum.S -- a NOP-padded, straight-line checksum over an array.
 #
-# Plan A4 asks for "a NOP-padded program that computes something nontrivial (a
-# checksum over an array, say) [that] produces the right value in a register,
-# verified by a $display at ECALL".  This is that program.
+# Padding rules: every RAW dependency is separated by 3 NOPs, which also
+# satisfies the load-use rule; no branches or jumps before the ECALL.  `la`
+# and `li` are hand-expanded where their natural forms would violate them.
 #
-# THE PADDING RULES, which this file obeys everywhere:
+# The checksum is rotate-left-1 then add, so word order matters.  The tail
+# exercises every load and store width, including the sign-extending ones,
+# and folds each readback into the same accumulator.
 #
-#   * Every RAW dependency is separated by 3 NOPs.  The A4 core has no
-#     forwarding, so a result is only visible to ID once it has reached WB.
-#   * That also satisfies the load-use rule (no dependent use within 2
-#     instructions of a load), so no extra load padding is needed.
-#   * No branches and no jumps before the ECALL.  The A4 core's PC is pc+4,
-#     always; control flow arrives in A8.  rvntt_core's `dbg_unsupported`
-#     output fires if this rule is ever broken, so it cannot rot silently.
-#
-# Two macro expansions are written out by hand because their natural forms
-# violate the padding rules:
-#
-#   * `la reg, sym` expands to auipc+addi with a ZERO-separation RAW on reg.
-#   * `li reg, big` expands to lui+addi with the same problem.  Every `li` here
-#     is small enough to be a single addi.
-#
-# The checksum is rotate-left-1 then add, so word ORDER matters: a plain sum or
-# XOR would still pass if the address generator walked the array backwards or
-# read one element repeatedly.  The tail then exercises every load and store
-# width, including the sign-extending ones, and folds each readback into the
-# same accumulator -- so one register carries evidence that all of it worked.
-#
-# The expected value is NOT written down here.  tb/unit/test_core_verilator.py
-# parses the .word literals out of this file and computes it, and Spike runs the
-# same ELF as an independent third opinion.
+# The expected value is not written down here: tb/unit/test_core_verilator.py
+# parses the .word literals out of this file and computes it, and Spike runs
+# the same ELF as an independent third opinion.
 # =============================================================================
 
         .section .text.init
@@ -62,8 +43,7 @@
         .endm
 
 _start:
-        # s0 = &checksum_data.  Hand-expanded `la`: auipc and addi have a RAW
-        # on s0 with no separation at all in the assembler's expansion.
+        # s0 = &checksum_data, hand-expanded `la`.
 1:      auipc   s0, %pcrel_hi(checksum_data)
         nop
         nop
@@ -136,9 +116,8 @@ _start:
         nop
         nop
 
-        # byte, SIGN-extended, at a NONZERO byte offset.  0x80 stored and read
-        # back with lb must become 0xFFFFFF80; with lbu it would be 0x00000080,
-        # and the two differ by 0xFFFFFF00, far too large to look like rounding.
+        # byte, SIGN-extended, at a NONZERO byte offset: 0x80 must become
+        # 0xFFFFFF80.
         addi    t3, x0, 0x80
         nop
         nop
@@ -153,16 +132,9 @@ _start:
         nop
 
         # Four distinct bytes into the four lanes of ONE word, then the whole
-        # word read back.  This is the part that exercises byte-lane selection:
-        # every earlier store and load in this program happens to sit at byte
-        # offset 0, where a store that forgets to replicate its data across the
-        # lanes, a load that always takes lane 0, and a RAM that ignores its
-        # byte enables are all indistinguishable from correct.  Fault injection
-        # found exactly those three escaping before this block existed.
-        #
-        # Reading the full word back also catches collateral damage: a byte
-        # enable applied to the wrong lane corrupts a neighbour, which a
-        # per-byte readback would miss.
+        # word read back: exercises byte-lane selection, which every earlier
+        # access at byte offset 0 cannot, and catches a byte enable applied to
+        # the wrong lane.
         addi    t3, x0, 0x11
         nop
         nop
@@ -258,10 +230,7 @@ _start:
         nop
 
         # ---- arm Spike's trap handler, then stop ---------------------------
-        # `csrw mtvec, t0` is csrrw x0, mtvec, t0: it writes no register, so the
-        # A4 core (which has no CSR file) and Spike agree on architectural state
-        # even though only Spike acts on it.  rvntt_core excludes exactly this
-        # case from dbg_unsupported.
+        # `csrw mtvec, t0` writes no register, so only Spike acts on it.
 3:      auipc   t0, %pcrel_hi(trap_handler)
         nop
         nop
@@ -289,13 +258,9 @@ trap_handler:
 9:      j       9b
 
 # -----------------------------------------------------------------------------
-# Data.  These literals are the single source of truth for the expected result:
-# tb/unit/test_core_verilator.py parses them out of this file rather than
-# carrying its own copy.
-#
-# The pattern is deliberately not a ramp or a constant.  A ramp checksums
-# correctly even if the address generator is broken in ways that preserve the
-# multiset of values read; these are unrelated to each other and to their index.
+# Data.  These literals are the single source of truth for the expected result;
+# tb/unit/test_core_verilator.py parses them out of this file.  The pattern is
+# deliberately not a ramp or a constant.
 # -----------------------------------------------------------------------------
         .section .data
         .align 2

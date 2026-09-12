@@ -1,24 +1,10 @@
-// Runs the A13 benchmark image on rvntt_soc_sim_top and writes what comes out
-// of the UART to a file, for tb/fpga/parse_bench_uart.py to check.
+// Runs the benchmark image on rvntt_soc_sim_top and writes the UART output to
+// a file for tb/fpga/parse_bench_uart.py, so the simulation capture and the
+// board capture go through the same (self-tested) parser.
 //
-// The point of decoding to a FILE rather than checking here is that the sim
-// capture and the board capture then go through the SAME parser.  That parser is
-// fault-injected (--selftest, 20 cases); duplicating its checks in C++ would
-// mean a second set that is not.
-//
-// Two things are checked here and nowhere else, because they are not visible in
-// the UART text:
-//
-//   led0_r is dbg_unsupported latched -- the core retiring something it does not
-//   implement.  Dhrystone and CoreMark are the first RV32I workloads on this SoC
-//   large enough to reach parts of the ISA the cosimulation's random programs
-//   only sampled, and libgcc's __divsi3/__mulsi3 are hand-written assembly that
-//   nothing else here has ever executed.  If any of it decodes as illegal, this
-//   is what says so.
-//
-//   Progress.  A benchmark that hangs produces the same empty capture as one
-//   that never started, so a stalled UART is reported as a stall rather than as
-//   a timeout with no explanation.
+// Checked here because they are not visible in the UART text: led0_r
+// (dbg_unsupported latched -- an illegal instruction retired) and progress (a
+// stalled UART is reported as a stall rather than a bare timeout).
 #include "Vrvntt_soc_sim_top.h"
 #include "verilated.h"
 #include <cstdio>
@@ -56,7 +42,7 @@ int main(int argc, char** argv) {
     dut->btn         = 0x0;
     dut->eval();
 
-    static const char END[] = "=== end A13 ===\r\n";
+    static const char END[] = "=== end bench ===\r\n";
     const size_t ENDN = sizeof(END) - 1;
 
     long c;

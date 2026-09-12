@@ -1,14 +1,6 @@
-# Authoritative port -> pin table for the Digilent Arty A7-100T.
-#
-# EXTRACTED MECHANICALLY, and that is the entire point.  A12 assigned the
-# RGB LED by reading the master file's three lines by eye; the master lists
-# them in the order led0_b, led0_g, led0_r, they were read as r, g, b, and
-# red and blue were swapped.  Everything built, every automated check passed,
-# and the design ran correctly on hardware -- the only symptom was the wrong
-# colour lighting up, which took a person looking at the board to notice.
-#
-# tb/fpga/check_xdc_pins.py compares every fpga/constraints/*.xdc against
-# this file, so the same mistake cannot be made a second time by hand.
+# Authoritative port -> pin table for the Digilent Arty A7-100T, extracted
+# mechanically from the vendor file.  tb/fpga/check_xdc_pins.py compares every
+# fpga/constraints/*.xdc against it.
 #
 # Source: https://github.com/Digilent/digilent-xdc
 #         Arty-A7-100-Master.xdc

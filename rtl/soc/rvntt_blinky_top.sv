@@ -1,16 +1,10 @@
-// P0.5 -- de-risk the FPGA flow before the core exists.
+// Blinky/UART/BRAM self-test top: exercises the XDC, the MMCM, the reset
+// synchroniser, BRAM inference with $readmemh, the USB-UART pinout and the
+// batch Tcl build, with no core.
 //
-// Exercises, on real hardware, every part of the toolchain that A12 will depend
-// on: XDC syntax and pin assignment, the MMCM, a reset synchroniser, BRAM
-// inference with $readmemh initialisation, the USB-UART pinout, and the batch
-// Tcl build.  Nothing else exists yet, so anything that breaks is one of those.
-//
-// LED semantics -- chosen so the MMCM ratio is PROVEN, not assumed:
 //   led[0]  1 Hz, counted in the raw 100 MHz oscillator domain
-//   led[1]  1 Hz, counted in the 75 MHz MMCM domain
-//           -> both are nominally 1 Hz, so they must stay visibly in lockstep.
-//              If the MMCM ratio is wrong they drift apart within seconds, which
-//              is far easier to see than judging one LED's absolute rate.
+//   led[1]  1 Hz, counted in the 75 MHz MMCM domain (must stay in lockstep
+//           with led[0], which proves the MMCM ratio)
 //   led[2]  MMCM locked
 //   led[3]  BRAM self-test passed
 `default_nettype none
@@ -37,9 +31,7 @@ module rvntt_blinky_top #(
       .locked    (mmcm_locked)
   );
 
-  // Reset for each domain: asserted asynchronously, released synchronously.
-  // The core domain additionally waits for MMCM lock, or logic clocks on a
-  // frequency that is still ramping.
+  // One reset per domain; the core domain additionally waits for MMCM lock.
   wire rst_n_osc, rst_n_core;
 
   rvntt_sync_reset #(.STAGES(3)) u_rst_osc (

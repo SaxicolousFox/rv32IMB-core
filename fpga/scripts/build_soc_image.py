@@ -1,15 +1,10 @@
 #!/usr/bin/env python3
 """
-Build the A12 SoC memory image: C + crt0 -> ELF -> $readmemh .mem.
+Build the SoC memory image: C + crt0 -> ELF -> $readmemh .mem.
 
-The .mem is what both Verilator and Vivado load, so the simulated program and
-the programmed one cannot diverge -- a class of bug that is otherwise very hard
-to see, because the symptom is "it works in simulation".
-
-Placement is taken from the ELF's PROGRAM HEADERS, not from `objcopy -O binary`.
-objcopy flattens from the lowest LMA and would silently produce a correct-looking
-image if a section were linked somewhere unexpected; walking p_paddr means an
-address outside the array is an error here rather than an alias in the RAM.
+The .mem is what both Verilator and Vivado load.  Placement is taken from the
+ELF's program headers rather than `objcopy -O binary`, so an address outside
+the array is an error here rather than an alias in the RAM.
 """
 import argparse, os, struct, subprocess, sys
 

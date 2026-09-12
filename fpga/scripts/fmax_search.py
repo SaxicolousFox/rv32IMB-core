@@ -1,29 +1,18 @@
 #!/usr/bin/env python3
 """
-A12's Fmax measurement -- binary search, by the plan's method and only by it.
+Fmax measurement by binary search on post-route WNS.
 
-    1. constrain the target period T
+    1. constrain the target period T (through the MMCM divider, gen_soc_clk.py)
     2. synthesise and implement to routed
-    3. read WNS from the POST-ROUTE timing report
+    3. read WNS from the post-route timing report
     4. binary search T until WNS is barely non-negative
     5. report Fmax = 1/T_min with the Vivado version, strategy and speed grade
 
-The rule that makes the number mean anything: DO NOT report 1/(T - WNS) from a
-passing run.  The router optimises to the constraint and stops there, so a run
-that passes with +2 ns of slack says nothing about whether it would pass 2 ns
-faster -- it says the router had no reason to try.  Only a run that was actually
-CONSTRAINED at T and met it is evidence about T.  This script therefore reports
-the fastest constraint that passed, and prints the extrapolated number nowhere.
-
-The constraint is set through the MMCM divider (fpga/scripts/gen_soc_clk.py),
-because with an MMCM-generated clock Vivado derives the period from the MMCM
-rather than from a create_clock; build_soc.tcl re-reads the derived period and
-prints it, so intent and implementation are compared every iteration.  The MMCM
-grid is about 1.4 MHz wide near 70 MHz, so the search resolution is bounded
-below by the hardware, not by patience.
-
-The memory image is held constant across iterations: the only variable is the
-clock constraint.
+The number reported is the fastest constraint that passed, never 1/(T - WNS):
+the router optimises to the constraint and stops there.  build_soc.tcl
+re-reads the derived period and prints it.  The MMCM grid is about 1.4 MHz
+wide near 100 MHz, which bounds the resolution.  The memory image is held
+constant across iterations.
 """
 import argparse, json, os, re, subprocess, sys, time
 
@@ -73,37 +62,18 @@ def main() -> int:
     ap.add_argument("--tol", type=float, default=1.0, help="stop when hi-lo < tol")
     ap.add_argument("--max-iters", type=int, default=8)
     ap.add_argument("--out", default=os.path.join(ROOT, "fpga/build/fmax"))
-    # A17 lever 3.  The strategy is part of the MEASUREMENT, not of the tooling:
-    # A12's number, A16's and A17 lever 1's were all taken under "default", and a
-    # number taken under anything else is comparable only to other numbers taken
-    # under the same thing.  It is recorded in the summary for that reason.
+    # The strategy is part of the measurement, so it is recorded in the summary.
     ap.add_argument("--strategy", default="default",
                     choices=["default", "explore_postroute"])
-    # H1.  ONE implementation run at one constraint, and no search.
-    #
-    # The question "did this lever help?" does not need a converged Fmax -- it
-    # needs one point compared against a known one, and a search spends six to
-    # eight runs answering it.  A23 used this to test whether registering the
-    # HPM event bus recovered the clock (it did, by 3.58 MHz) before committing
-    # to a three-hour search, and that instinct is worth making a flag rather
-    # than a remembered trick with --max-iters 1.
-    #
-    # What it does NOT produce is an Fmax.  A single passing point is a lower
-    # bound and a single failing point is an upper bound; the plan's method is
-    # a binary search on post-route WNS and this does not replace it.  The
-    # output says so, so a probe result cannot be quoted as a measurement.
+    # --probe: one implementation run at one constraint, and no search.  A
+    # single passing point is a lower bound, not an Fmax, and the output says so.
     ap.add_argument("--probe", type=float, default=None, metavar="MHZ",
                     help="implement once at this frequency and report "
                          "PASS/fail with WNS.  Not a search and not an Fmax.")
     a = ap.parse_args()
 
-    # ABSOLUTE, always.  build_soc.sh cds into its Windows staging directory
-    # before it copies products to $OUT, and it wipes that directory at the
-    # start of every run -- so a RELATIVE --out silently writes each iteration's
-    # reports somewhere that the next iteration deletes.  The search still
-    # produces the right number, because WNS is parsed from stdout, but the
-    # post-route timing report that says WHERE the critical path went is gone.
-    # Found the hard way at A16.
+    # Absolute, always: build_soc.sh cds into its staging directory and wipes
+    # it at the start of every run.
     a.out = os.path.abspath(a.out)
     os.makedirs(a.out, exist_ok=True)
 
@@ -122,9 +92,9 @@ def main() -> int:
               % (d["luts"], d["ffs"], d["bram"], d.get("dsp", "?"), a.strategy))
         json.dump(d, open(os.path.join(a.out, "probe.json"), "w"), indent=1)
         print("\nPROBE_%s at %.3f MHz -- THIS IS NOT AN Fmax.  A passing probe "
-              "is a lower bound and a failing one is an upper bound; the "
-              "plan's method is a binary search on post-route WNS.  Use it to "
-              "decide whether a lever helped, then search."
+              "is a lower bound and a failing one is an upper bound; an Fmax is "
+              "a binary search on post-route WNS.  Use it to decide whether a "
+              "lever helped, then search."
               % ("PASS" if ok else "FAIL", d["mhz"]))
         return 0 if ok else 1
 

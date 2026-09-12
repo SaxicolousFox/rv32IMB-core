@@ -1,11 +1,5 @@
 #!/usr/bin/env python3
-"""
-Build and run the A12 SoC top-level testbench under Verilator.
-
-This is step 1 of A12's sequence and the gate on everything after it: a
-memory-mapped UART is testable in simulation long before it is testable on a
-board, so "Hello" has to come out of Verilator before anyone plugs anything in.
-"""
+"""Build and run the SoC top-level testbench under Verilator."""
 import argparse, os, subprocess, sys, shutil, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -18,10 +12,8 @@ SOC = ("rvntt_soc_sim_top.sv", "rvntt_soc_top.sv", "rvntt_clkgen.sv",
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    # The mutation harness copies the RTL tree, edits one file and points this
-    # at the copy.  Same convention as tb/formal/run_riscv_formal.py: a base
-    # directory that the same relative paths are joined onto, so there is one
-    # source list and no second copy of it to drift.
+    # The mutation harness copies the RTL tree and points this at the copy:
+    # one source list joined onto a base directory.
     ap.add_argument("--rtl-dir", default=None)
     ap.add_argument("--build-dir", default=None)
     a = ap.parse_args()

@@ -39,11 +39,9 @@ set_false_path -to   [get_ports { led[*] }]
 set_false_path -to [get_ports uart_rxd_out]
 
 ## ------------------------------------------------------------- clock relationship
-## sys_clk (100 MHz) and the MMCM's 75 MHz output are physically related, but no
-## DATA crosses between them in this design: the only crossings are the two reset
-## synchronisers, which are asynchronous by construction (async assert, sync
-## release).  Declaring the groups asynchronous stops Vivado from timing paths
-## that do not exist.  Revisit this the moment real data crosses domains.
+## sys_clk (100 MHz) and the MMCM's 75 MHz output: no data crosses between
+## them; the only crossings are the reset synchronisers, which are asynchronous
+## by construction.
 set_clock_groups -asynchronous \
   -group [get_clocks sys_clk] \
   -group [get_clocks -of_objects [get_pins u_clkgen/u_mmcm/CLKOUT0]]

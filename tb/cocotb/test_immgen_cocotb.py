@@ -1,29 +1,12 @@
 """
-Immediate-generator verification against the Python golden model (plan A2).
+Immediate-generator verification against the Python golden model.
 
-A2's "Done when" is that the immediate generator matches a Python decoder on
-10^5 random instruction words for all five formats.  That is
-test_immgen_random_100k below, run over all SEVEN encodings (the five plus
-IMM_NONE and the Zicsr IMM_Z), so it strictly exceeds the requirement.
-
-The interesting tests are the other two, because immgen is a pure wire
-permutation plus sign extension:
-
-  * Walking ones and walking zeros over all 32 instruction bits is COMPLETE for
-    detecting any mis-routed wire.  If bit i of the instruction is connected to
-    the wrong place -- or to nothing -- exactly the vector with bit i set
-    differs from the model.  Random vectors find the same bugs eventually;
-    walking bits find them deterministically, in 64 vectors per format.
-
-  * Exhaustive over the 12-bit I/S/B immediate fields with the rest random,
-    which is what plan A2 asks for and costs 4096 vectors per format.
-
-The 20-bit U/J fields are not swept exhaustively by default: 2^20 each is ~22 s
-of simulation to re-prove what walking-bits already establishes for a pure
-permutation, and rvntt_immgen additionally carries a formal proof that pins
-every output bit to its source bit for ALL inputs, which strictly subsumes an
-exhaustive sweep.  Set IMMGEN_EXHAUSTIVE=1 to run them anyway, following the
-KYBER_KAT_FULL precedent in tb/cosim/test_kyber_kat_spike.py.
+test_immgen_random_100k runs 10^5 random words over all seven encodings.
+Walking ones and zeros over all 32 instruction bits is complete for any
+mis-routed wire in a pure permutation, and the 12-bit I/S/B fields are swept
+exhaustively with the remaining bits random.  The 20-bit U/J fields are not
+swept by default (~22 s each, and rvntt_immgen carries a formal proof that
+subsumes it); set IMMGEN_EXHAUSTIVE=1 to run them.
 """
 import os
 import random
@@ -69,10 +52,8 @@ async def apply_and_check(dut, insn, fmt, tag, failures):
 async def test_pkg_agreement(dut):
     """The model's enum encodings still match rtl/core/rv32i_pkg.sv."""
     n = ref.check_pkg_agreement()
-    # ref.PKG_MEMBERS_CHECKED, not a local copy of the sum.  This assertion
-    # used to spell the sum out here, went stale the moment A14 added the two
-    # multi-cycle latency constants to the guard, and stayed wrong through A21
-    # -- invisibly, because run_cocotb.py returned 0 whatever cocotb said.
+    # ref.PKG_MEMBERS_CHECKED rather than a local copy of the sum, which went
+    # stale once already.
     assert n == ref.PKG_MEMBERS_CHECKED, \
         f"spec-drift guard checked only {n} members"
     dut._log.info(f"package agreement OK ({n} enum members)")
@@ -153,7 +134,7 @@ async def test_exhaustive_20bit_fields(dut):
 
 @cocotb.test()
 async def test_immgen_random_100k(dut):
-    """A2's acceptance test: 10^5 random instruction words, every format."""
+    """10^5 random instruction words, every format."""
     rng = random.Random(SEED)
     failures = []
     N = 100_000

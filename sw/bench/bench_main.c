@@ -62,7 +62,7 @@ int main(void)
     for (;;) {
         unsigned int bad;
 
-        bench_printf("=== rvntt A13 ===\r\n");
+        bench_printf("=== rvntt bench ===\r\n");
         bench_printf("iter=0x%08x\r\n", iter);
         bench_printf("clk_hz=%u\r\n", (unsigned int)CORE_HZ);
 #ifdef BENCH_HOST
@@ -104,8 +104,8 @@ int main(void)
         bench_printf("cm_hpm_xfertaken=%u\r\n",  bench_hpm_cm1[5] - bench_hpm_cm0[5]);
 #endif
 
-        /* The "A13" markers name the report FORMAT; the parser keys on them. */
-        bench_printf("=== end A13 ===\r\n");
+        /* The markers name the report format; the parser keys on them. */
+        bench_printf("=== end bench ===\r\n");
 
         iter++;
         if (BENCH_BLOCKS && iter >= (unsigned int)BENCH_BLOCKS)

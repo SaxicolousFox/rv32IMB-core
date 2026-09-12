@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
 """
-MODS_A2 A29 -- the entropy path's health tests, the `seed` state machine, and
-the cutoffs the tests use.
+The entropy path's health tests, the `seed` state machine and the cutoffs.
 
-TWO THINGS ARE CHECKED HERE AND THEY ARE DIFFERENT KINDS OF CHECK.
-
-1. THE CUTOFFS ARE RECOMPUTED from SP 800-90B's own definitions and compared
-   against the RTL's parameters.  Health-test cutoffs are exactly the constant
-   this project has learned not to take from memory: the widely-quoted "821"
-   for a 1024-sample adaptive-proportion window belongs to a different assumed
-   entropy rate, and using it here would have made the test four sigma looser
-   than intended while looking authoritative.
-
-2. THE TESTS ARE SHOWN TO FIRE, on a stuck-at-0, a stuck-at-1 and two biased
-   sources, and NOT to fire on a good one.  A29's own words: a health test that
-   has never been observed to fire is not a health test.
+Two checks: the SP 800-90B cutoffs are recomputed from the standard's own
+definitions and compared against the RTL's parameters (the widely quoted 821
+for a 1024-sample window assumes a different entropy rate); and the tests are
+shown to fire on stuck and biased sources and not on a good one.
 """
 import os, re, subprocess, sys, tempfile
 from math import comb, ceil
@@ -36,11 +27,8 @@ def repetition_cutoff(h=H_BITS, alpha_log2=ALPHA_LOG2):
 
 def adaptive_cutoff(w, h=H_BITS, alpha_log2=ALPHA_LOG2):
     """SP 800-90B 4.4.2: the smallest C with P[Bin(W, 2^-H) >= C] <= alpha.
-
-    Computed exactly with Fractions rather than floats: the tail is about
-    2^-20, which is where double precision starts to matter and where being
-    quietly off by one would move the cutoff without anything noticing.
-    """
+    Exact, with Fractions: the tail is about 2^-20, where doubles start to
+    matter."""
     assert h == 1.0, "only the binary case is derived here"
     p = Fraction(1, 2)
     alpha = Fraction(1, 1 << alpha_log2)

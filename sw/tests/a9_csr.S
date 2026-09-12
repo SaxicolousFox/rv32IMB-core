@@ -1,17 +1,10 @@
 # ============================================================================
-# a9_csr.S -- directed Zicsr and trap tests (plan A9).
+# a9_csr.S -- directed Zicsr and trap tests.
 #
-# SELF-CHECKING, using riscv-tests' own protocol: a store of 1 to `tohost` means
-# pass, and any other value is `(case << 1) | 1` naming the case that failed.
-# Written that way rather than as a lockstep cosim program because half of what
-# it checks -- counter values, and mcycle in particular -- CANNOT agree with
-# Spike: Spike advances mcycle once per instruction, and its minstret counts the
-# five bootrom instructions this core never executes.  A commit-log diff would
-# report those as failures, so the checking is done inside the program where the
-# properties are absolute rather than relative.
-#
-# The three cases plan A9 names by hand are 2, 3 and 8.  The rest are the ones
-# the trap path needs and riscv-tests does not isolate.
+# Self-checking through riscv-tests' protocol: a store of 1 to `tohost` is
+# pass, anything else is `(case << 1) | 1`.  Not a lockstep program, because
+# counter values cannot agree with Spike (its mcycle advances once per
+# instruction and its minstret counts the bootrom).
 # ============================================================================
         .section .text.init
         .globl _start
@@ -169,9 +162,8 @@ _start:
 1:
 
 # ---- case 13: MRET returns to mepc and restores MIE -----------------------
-        # MIE CLEAR and MPIE SET, so the swap has somewhere to move a value
-        # from.  Setting both would make an MRET that forgets to restore MIE
-        # look correct -- fault injection found exactly that.
+        # MIE clear and MPIE set, so the swap has somewhere to move a value
+        # from.
         li      t0, 0x80
         csrw    mstatus, t0
         la      t0, 130f
@@ -199,10 +191,9 @@ done:
 2:      j       2b
 
 # ---------------------------------------------------------------------------
-# The trap handler.  It records mcause in t3 (as a flag), mepc in t6 and mtval
-# in s6, checks mcause against the t4 the test set beforehand, and RESUMES AT
-# THE INSTRUCTION AFTER the faulting one -- which is what lets each case above
-# read as straight-line code.
+# The trap handler records mcause in t3 (as a flag), mepc in t6 and mtval in
+# s6, checks mcause against the t4 the test set beforehand, and resumes at the
+# instruction after the faulting one.
 # ---------------------------------------------------------------------------
         .align 2
 trap_vector:

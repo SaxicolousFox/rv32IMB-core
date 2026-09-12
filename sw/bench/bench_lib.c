@@ -1,16 +1,9 @@
 /*
- * The handful of <string.h> functions Dhrystone and CoreMark reach for.
- *
- * These are on the benchmark's critical path -- Dhrystone's inner loop is three
- * strcpy calls of a 31-byte literal and one strcmp -- so a clever version here
- * would inflate the score without touching the core.  They are therefore
- * deliberately the obvious byte-at-a-time implementations, which is also what a
- * newlib build for a machine with no unaligned access ends up doing.  The score
- * is reported alongside this fact; see docs/a13-benchmarks.md.
- *
- * Built with -fno-builtin so GCC does not turn a definition into a call to
- * itself, and -fno-tree-loop-distribute-patterns so the memcpy loop is not
- * recognised as memcpy and replaced by one.
+ * The <string.h> functions Dhrystone and CoreMark reach for.  They are on the
+ * benchmark's critical path (Dhrystone's inner loop is three strcpy calls and
+ * one strcmp), so they are deliberately the obvious byte-at-a-time versions.
+ * Built with -fno-builtin and -fno-tree-loop-distribute-patterns so GCC does
+ * not turn a definition into a call to itself.
  */
 #include <stddef.h>
 

@@ -1,15 +1,7 @@
-// BRAM instantiation + readback self-test (plan P0.5).
-//
-// The point is to prove, on real silicon, that:
-//   * Vivado infers a block RAM from this coding style, and
-//   * $readmemh initialisation actually survives into the bitstream.
-// Both matter enormously later: A12 loads the instruction memory exactly this
-// way, and a BRAM that synthesises but comes up zeroed is a very confusing bug
-// to hit for the first time when there is also a CPU to blame.
-//
-// The checksum rotates before accumulating, so it is order-sensitive: a broken
-// address generator that read one address 256 times, or walked backwards, is
-// caught rather than summing to the same value.
+// BRAM instantiation + readback self-test: proves Vivado infers a block RAM
+// from this coding style and that $readmemh initialisation survives into the
+// bitstream.  The checksum rotates before accumulating, so it is order
+// sensitive.
 `default_nettype none
 
 module rvntt_bram_selftest #(
@@ -51,8 +43,7 @@ module rvntt_bram_selftest #(
       done     <= 1'b0;
       checksum <= '0;
     end else if (!done) begin
-      // Issue reads until every address has been requested.  The data for
-      // raddr_q lands in rdata_q on the following cycle, hence rvalid_q.
+      // Data for raddr_q lands in rdata_q on the following cycle.
       rvalid_q <= (raddr_q < CW'(DEPTH));
       if (raddr_q < CW'(DEPTH)) raddr_q <= raddr_q + CW'(1);
 

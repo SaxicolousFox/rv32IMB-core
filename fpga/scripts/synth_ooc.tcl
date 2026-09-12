@@ -1,34 +1,14 @@
 # ============================================================================
-# Out-of-context synthesis of ONE module, for its resource report.
+# Out-of-context synthesis of ONE module, for its resource report and,
+# optionally, its post-route reg-to-reg timing.
 #
-# elab_core.tcl runs `synth_design -rtl`, which stops at the RTL netlist and
-# therefore says NOTHING about mapping: no DSPs, no BRAMs, no LUT count.  That
-# is exactly what MODS_A A14 asks to be checked and not assumed -- "verify DSP
-# inference by reading the synthesis report" -- and it is what A17 will need
-# repeatedly while it moves logic around.  A full SoC implementation run answers
-# the same question in fourteen minutes; this answers it in about one.
-#
-# OUT OF CONTEXT because the module under test is not a top level: without
-# -mode out_of_context Vivado inserts an IBUF/OBUF for every port, which on a
-# 100-pin arithmetic unit both fails placement and buries the numbers being
-# looked for.
-#
-# MODS_A2 A24 ADDED IMPLEMENTATION AND TIMING.  Synthesis alone answers "what
-# did it map to"; it does NOT answer "how fast does it run", because synthesis
-# timing is estimated with no placement and no routing, and A12 measured route
-# delay at 78% of this design's critical path.  A24 needs a real frequency for
-# a datapath Track B has to meet, so when a PERIOD is given this script places
-# and routes as well and reports POST-ROUTE worst negative slack -- the same
-# quantity fmax_search.py binary-searches on for the SoC, so the two numbers
-# are comparable.
-#
-# NO I/O DELAYS ARE ASSUMED, and that is a stated boundary rather than an
-# omission.  A Tier-1 unit's operands arrive through the core's forwarding mux
-# and its result leaves through the core's writeback mux; both are the CORE's
-# paths and are measured by the SoC implementation run, not here.  Budgeting
-# them here would mean inventing a number.  So this reports the unit's internal
-# register-to-register frequency, and prints the worst reg-to-reg DELAY beside
-# it so any budget can be applied afterwards by arithmetic.
+# elab_core.tcl stops at the RTL netlist and says nothing about mapping (DSPs,
+# BRAMs, LUT count); this answers that in about a minute.  Out of context
+# because the module is not a top level: without -mode out_of_context Vivado
+# inserts an IBUF/OBUF for every port.  With a PERIOD given it also places and
+# routes and reports post-route worst negative slack.  No I/O delays are
+# assumed: the module's operands arrive through the core's own paths, which
+# the SoC implementation run measures.
 #
 # Run from the staging directory:
 #   vivado -mode batch -source synth_ooc.tcl -tclargs <top> [period_ns] [G=V ...]
@@ -38,32 +18,22 @@ set PART xc7a100tcsg324-1
 set TOP  [lindex $argv 0]
 if {$TOP eq ""} { set TOP rvntt_muldiv }
 
-# Optional second argument: the clock period in ns.  Absent (or 0) keeps the
-# original synthesis-only behaviour, which A14 and A17 both depend on.
+# Optional second argument: the clock period in ns.  Absent (or 0) means
+# synthesis only.
 set PERIOD 0
 if {[llength $argv] > 1} { set PERIOD [lindex $argv 1] }
 
-# Everything after that is a generic, written `NAME:VALUE`.
-#
-# COLON, NOT EQUALS, AND THAT IS NOT A STYLE CHOICE.  The wrapper reaches
-# Vivado through `cmd.exe /c`, and cmd.exe treats `=` as an argument SEPARATOR
-# exactly like a space.  `-tclargs rvntt_tier1_probe 8.04 STAGES=2` arrives here
-# as `... 8.04 STAGES 2` -- four argv entries, no `=` anywhere, so the pattern
-# below matched nothing and synth_design was called with NO generic at all.
-# Three "configurations" were implemented and all three were the default, with
-# byte-identical WNS at every search point; the only thing that gave it away was
-# a critical-path endpoint naming a generate block that the shallower
-# configurations do not contain.  A report whose green was not about the thing
-# it named -- the seventh in this project.
+# Everything after that is a generic, written `NAME:VALUE`: the wrapper
+# reaches Vivado through `cmd.exe /c`, which treats `=` as an argument
+# separator.
 set GENERICS {}
 foreach a [lrange $argv 2 end] {
   set kv [split $a ":"]
   if {[llength $kv] == 2} { lappend GENERICS "[lindex $kv 0]=[lindex $kv 1]" }
 }
 
-# AND IT MUST NOT BE ABLE TO FAIL QUIETLY AGAIN.  Trailing arguments that
-# produced no generic mean the transport mangled them; that is a failure, not a
-# run with defaults.
+# Trailing arguments that produced no generic mean the transport mangled
+# them; that is a failure, not a run with defaults.
 if {[llength $argv] > 2 && [llength $GENERICS] == 0} {
   puts "OOC_FAIL: [lrange $argv 2 end] parsed to no generic.  Generics are\
         written NAME:VALUE; `=` does not survive cmd.exe."
@@ -90,18 +60,9 @@ if {[llength $GENERICS] > 0} {
   synth_design -mode out_of_context -top $TOP -part $PART
 }
 
-# COUNTED BY REF_NAME, over every primitive in the netlist, with nothing
-# filtered out and no group name written down anywhere.
-#
-# The first version of this did filter, on PRIMITIVE_TYPE, and it reported
-# `DSP=0 FF=0` over a netlist containing four DSP48E1s and 239 flops -- because
-# the group names are FLOP_LATCH and (for this part) the DSP does not match the
-# pattern that was guessed for it.  A checking script that answers "the
-# multiplier was not inferred" when it was is worse than no script, and it is
-# the same failure this project has now hit three times: A10's RISCOF exit code,
-# A11's sby exit code, and this.  TAKE THE VERDICT FROM THE ARTEFACT.  A
-# histogram of every REF_NAME present cannot name a group wrongly, because it
-# names nothing -- it reports what is there.
+# Counted by REF_NAME over every primitive, with nothing filtered: a
+# histogram of what is present cannot name a group wrongly (a PRIMITIVE_TYPE
+# filter once reported DSP=0 over four DSP48E1s).
 array set hist {}
 foreach c [get_cells -hierarchical -filter {IS_PRIMITIVE}] {
   set r [get_property REF_NAME $c]
@@ -137,11 +98,8 @@ if {$PERIOD > 0} {
   set wns [get_property SLACK [get_timing_paths -delay_type max -max_paths 1 -nworst 1]]
   set whs [get_property SLACK [get_timing_paths -delay_type min -max_paths 1 -nworst 1]]
 
-  # The reg-to-reg number, reported separately and by construction: filtered to
-  # paths whose start AND end are sequential, so an unconstrained I/O path
-  # cannot masquerade as the design's limit.  `report_timing_summary`'s WNS
-  # would happily be an input path here, and this script's own history is that
-  # a number taken from the wrong field is the failure mode to design against.
+  # Filtered to paths whose start and end are sequential, so an unconstrained
+  # I/O path cannot masquerade as the design's limit.
   set r2r [get_timing_paths -delay_type max -max_paths 1 -nworst 1 \
              -from [all_registers] -to [all_registers]]
   set r2r_slack "n/a"

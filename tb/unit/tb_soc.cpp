@@ -1,17 +1,8 @@
-// Drives rvntt_soc_top (via rvntt_soc_sim_top) and checks the whole A12
-// done-when path in simulation: a program in BRAM runs, and its output arrives
-// over the UART.
-//
-// It checks more than the banner, on the P0.5 principle that a testbench which
-// stops at the first correct-looking character cannot see a design that is
-// right once and wrong afterwards:
-//
-//   * the exact block contents, including sw/btn read back through GPIO_IN;
-//   * that the block REPEATS and that `iter` increments, so a program that
-//     printed one block and hung is not a pass;
-//   * that a byte sent INTO uart_txd_in comes back in `echo`, which is the only
-//     test of the receive path;
-//   * the RGB status LEDs: heartbeat toggling, alive set, error clear.
+// Drives rvntt_soc_top (via rvntt_soc_sim_top): a program in BRAM runs and its
+// output arrives over the UART.  Checked: the exact block contents including
+// sw/btn read back through GPIO_IN; that the block repeats and `iter`
+// increments; that a byte sent into uart_txd_in comes back in `echo`; and the
+// RGB status LEDs.
 #include "Vrvntt_soc_sim_top.h"
 #include "verilated.h"
 #include <cstdio>
@@ -21,16 +12,10 @@
 
 static const int BIT_CYCLES = 34;     // CORE_HZ / BAUD = 4e6 / 115200 -> 34
 
-// The host deliberately transmits ONE CYCLE PER BIT SLOWER than the receiver's
-// divisor -- a ~2.9% baud mismatch, which is about what a real FTDI plus an
-// integer divisor gives you, and just inside the ~2% per-bit-time budget a UART
-// is supposed to absorb over a 10-bit frame.
-//
-// This is not decoration.  With a perfectly matched host, a receiver that
-// samples on the bit BOUNDARY decodes exactly as well as one that samples at the
-// MIDPOINT, so the mid-bit sampling that makes rvntt_uart_rx work on real
-// hardware is untestable -- and a mutation that moves the sample point escapes.
-// The skew is what gives the midpoint something to be right about.
+// The host transmits one cycle per bit slower than the receiver's divisor, a
+// ~2.9% baud mismatch (about what an FTDI plus an integer divisor gives).  With
+// a perfectly matched host, sampling on the bit boundary decodes as well as
+// sampling at the midpoint, so the skew is what makes mid-bit sampling testable.
 static const int HOST_BIT_CYCLES = BIT_CYCLES + 1;
 static const long MAX_CYCLES = 4000000;
 
@@ -118,7 +103,7 @@ int main(int argc, char** argv) {
     std::vector<std::string> blk;
     size_t pos = 0;
     while (true) {
-        size_t s = rx.find("=== rvntt A12 ===\r\n", pos);
+        size_t s = rx.find("=== rvntt soc ===\r\n", pos);
         if (s == std::string::npos) break;
         size_t e = rx.find("=== end ===\r\n", s);
         if (e == std::string::npos) break;
@@ -189,9 +174,8 @@ int main(int argc, char** argv) {
         failures++;
     }
 
-    // The program's own image check.  An MMIO store that is not gated out of the
-    // RAM aliases onto word 0 of .text.init -- crt0, which runs once and is
-    // never revisited, so nothing else in this testbench can see it happen.
+    // The program's own image check: an MMIO store not gated out of the RAM
+    // aliases onto word 0 of .text.init, which nothing else here can see.
     for (size_t i = 0; i < blk.size(); i++) {
         if (blk[i].find("img=OK\r\n") == std::string::npos) {
             printf("  FAIL: block %zu does not report img=OK -- the program's "

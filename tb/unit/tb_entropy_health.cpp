@@ -1,17 +1,10 @@
 // ============================================================================
-// tb_entropy_health -- MODS_A2 A29's central obligation.
+// tb_entropy_health -- the entropy path's health tests, driven at the stub.
 //
-// "A HEALTH TEST THAT HAS NEVER BEEN OBSERVED TO FIRE IS NOT A HEALTH TEST."
-//
-// The noise source itself cannot be simulated -- it is a combinational ring
-// oscillator, which is why rvntt_entropy has a STUB arm and why this testbench
-// drives that stub directly.  Everything else in the entropy path IS ordinary
-// synchronous logic, and this exercises all of it: the two SP 800-90B
+// The ring oscillator cannot be simulated, so this drives rvntt_entropy's
+// STUB arm directly and exercises everything downstream: the two SP 800-90B
 // continuous tests, the `seed` state machine, the consuming read, and DEAD.
-//
-// Each scenario states what it expects BEFORE it runs, so a scenario that
-// silently stopped exercising anything shows up as a wrong expectation rather
-// than as a pass.
+// Each scenario states its expectation before it runs.
 // ============================================================================
 #include "Vrvntt_seed.h"
 #include "verilated.h"
@@ -29,9 +22,7 @@ static void reset() {
   dut->rst_n = 1;
 }
 
-// A cheap xorshift, so the "ideal" source is reproducible and not the host's
-// rand().  A health test that only ever sees one random stream is a health test
-// tuned to that stream.
+// A cheap xorshift, so the ideal source is reproducible.
 static uint32_t rng_state = 0x1234567u;
 static int rng_bit() {
   rng_state ^= rng_state << 13; rng_state ^= rng_state >> 17;
@@ -41,13 +32,9 @@ static int rng_bit() {
 
 enum Src { STUCK0, STUCK1, BIASED, IDEAL, PERIODIC };
 
-// Run `n` CYCLES from `src` and return the status field after them.
-//
-// `drain` makes the driver consume a seed whenever one is ready, which is what
-// keeps the sampler running: the source is gated on needing to refill, so a
-// scenario that never reads takes 16 samples and then stops.  That is the
-// design working as intended and it makes "run a bad source until the health
-// tests catch it" a scenario that has to CONSUME, exactly as software would.
+// Run `n` cycles from `src` and return the status field after them.
+// `drain` consumes a seed whenever one is ready; the sampler is gated on
+// needing to refill, so a scenario that never reads stops after 16 samples.
 static unsigned run(Src src, int n, bool drain = false) {
   for (int i = 0; i < n; i++) {
     if (drain) {
@@ -57,27 +44,14 @@ static unsigned run(Src src, int n, bool drain = false) {
     switch (src) {
       case STUCK0: dut->stub_bit = 0; break;
       case STUCK1: dut->stub_bit = 1; break;
-      // 7:1 towards 1 -- biased enough that the adaptive proportion test must
-      // see it, but NOT stuck, so the repetition test alone cannot explain a
-      // catch.  A run of 21 identical samples has probability (7/8)^20 = 0.07
-      // per position, so repetition will also fire here; the biased-source
-      // scenario below therefore uses a bias that cannot trip repetition.
+      // 7:1 towards 1: the adaptive proportion test must see it; a run of 21
+      // has probability (7/8)^20 = 0.07 per position, so repetition may too.
       case BIASED: dut->stub_bit = (rng_bit() || rng_bit() || rng_bit()) ? 1 : 0; break;
       case IDEAL:  dut->stub_bit = rng_bit(); break;
-      // SEVEN ONES THEN A ZERO, forever.  This is the scenario the ADAPTIVE
-      // PROPORTION test exists for and the repetition test structurally cannot
-      // catch: the longest run is seven, well under the cutoff of 21, while
-      // 7/8 of every window is the same value against a cutoff of 589/1024.
-      //
-      // It is also the realistic failure mode of the hardware.  A ring
-      // oscillator sampled by a clock it is asynchronous to INJECTION-LOCKS to
-      // that clock and emits exactly this: a short, perfectly periodic
-      // sequence that carries no entropy and looks nothing like "stuck".  It is
-      // why rvntt_entropy uses several rings of coprime length rather than one,
-      // and it is why removing the adaptive test has to be caught HERE -- the
-      // first version of this testbench had four bad sources and every one of
-      // them was catchable by repetition alone, so deleting the adaptive test
-      // entirely changed no verdict.
+      // Seven ones then a zero, forever: the longest run is seven (under the
+      // repetition cutoff of 21) while 7/8 of every window is one value
+      // (against 589/1024), so only the adaptive proportion test can catch
+      // it.  This is what an injection-locked ring oscillator emits.
       case PERIODIC: { static int ph = 0; dut->stub_bit = (ph++ % 8) != 7; break; }
     }
     tick();
@@ -107,25 +81,16 @@ int main(int argc, char **argv) {
   st = run(IDEAL, 2000);
   expect(st == ST_ES16 || st == ST_WAIT,
          "ideal: BIST completes and the source goes live");
-  // NOT "survives forever", because it does not and cannot.  SP 800-90B's
-  // repetition cutoff has a 2^-20 false-positive rate PER SAMPLE by
-  // construction, so a perfect source trips it about once per 2^20 samples --
-  // the first version of this line asserted survival over 42 000 samples,
-  // which is a 4% coin flip, and it duly came up tails on a run of 23.  What
-  // is asserted instead is that the source stays alive while IDLE, which is
-  // the property gating the sampler actually buys: 40 000 cycles with a full
-  // buffer and no reads consume no samples at all.
+  // Not "survives forever": the repetition cutoff has a 2^-20 false-positive
+  // rate per sample, so a perfect source trips it about once per 2^20
+  // samples.  What is asserted is that the source stays alive while idle:
+  // with a full buffer and no reads it consumes no samples.
   st = run(IDEAL, 40000);
   expect(st != ST_DEAD,
          "ideal: 40k IDLE cycles consume no entropy and cannot trip a test");
 
   // ---- 2. a consuming read returns FRESH bits ------------------------------
-  // Two ES16 reads must not hand back the same buffer.  This is the failure
-  // that makes an RNG look like it works: every call succeeds, every call
-  // returns the same number.
-  // Bounded, always.  An unbounded wait for a status that never arrives is a
-  // hang, and a hang in a health-test testbench looks exactly like a slow
-  // machine until someone waits twenty minutes for it.
+  // Two ES16 reads must not hand back the same buffer.  Bounded wait, always.
   int guard = 0;
   while (((dut->rdata >> 30) & 3u) != ST_ES16 && guard++ < 1000) run(IDEAL, 1);
   expect(guard < 1000, "read: ES16 is reachable at all");
@@ -177,11 +142,8 @@ int main(int argc, char **argv) {
          "periodic 7-in-8 (max run 7): DEAD -- the adaptive test's own case");
 
   // ---- 7. the failure must be attributable, not just present ---------------
-  // A 3:1 bias survives the repetition test far longer -- (3/4)^20 = 0.003 per
-  // position -- so reaching DEAD here is much more likely to be the adaptive
-  // proportion test doing its job.  It is stated as a separate expectation so
-  // that if only one of the two tests were implemented, one of these two lines
-  // would go red rather than both staying green.
+  // A 3:1 bias survives the repetition test far longer ((3/4)^20 = 0.003 per
+  // position), so DEAD here is the adaptive proportion test's doing.
   reset();
   rng_state = 0xC0FFEEu;
   int dead3 = 0;

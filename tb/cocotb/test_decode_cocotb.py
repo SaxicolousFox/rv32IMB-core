@@ -1,28 +1,12 @@
 """
-Instruction-decoder verification against the Python decoder (plan A3).
+Instruction-decoder verification against the Python decoder.
 
-A3's "Done when" is zero mismatches on 10^6 random 32-bit words, with the
-illegal-instruction flag correct for all reserved opcodes.  Both are here, plus
-the tests that random words cannot reach on their own.
-
-Why random words are the right headline test AND not sufficient:
-
-  * At 10^6 uniform draws almost every word is illegal, so the random pass is
-    overwhelmingly a test of the legal/illegal boundary -- which is exactly what
-    the root CLAUDE.md says matters ("a lax and a strict decoder disagree on
-    exactly those words").  It is a weak test of the CONTROL FIELDS, because it
-    reaches each legal instruction only occasionally and with random operands.
-
-  * So the legal encodings are also enumerated directly: every opcode crossed
-    with every funct3 and the funct7 values that matter, which covers each legal
-    instruction form deterministically rather than by luck.
-
-  * And the strict-reserved-field rule gets its own exhaustive test, because it
-    is the one rule where this decoder must match model/isa/xkntt.py exactly and
-    where a plausible-looking lax implementation passes everything else.
-
-The Python side delegates custom-0/custom-1 to model/isa/xkntt.py, the frozen
-contract, rather than reimplementing the rules -- see model/rv32i_ref.py.
+Zero mismatches on 10^6 random 32-bit words, with the illegal-instruction
+flag correct for every reserved opcode.  Uniform words are ~99.6% illegal, so
+the random pass mostly tests the legal/illegal boundary; the legal encodings
+are therefore also enumerated directly (every opcode crossed with every
+funct3 and the funct7 values that matter), and the strict reserved fields of
+the SYSTEM instructions get an exhaustive sweep of their own.
 """
 import os
 import random
@@ -94,12 +78,8 @@ async def test_directed_encodings(dut):
     CASES = [
         (0x00000033, "add x0,x0,x0",            0),
         (0x40208033, "sub x0,x1,x2",            0),
-        # M (A14).  All eight are legal; the two funct7 values on either side
-        # of 0000001 are not, which is what pins "M is one funct7" rather than
-        # "the low funct7 bits are ignored".  Written out one by one because a
-        # rule that legalises eight encodings out of 2^32 is exactly the shape
-        # the random sweep covers by luck and a directed test covers on purpose
-        # -- the same lesson A3's missing SYSTEM reserved-field case taught.
+        # M: all eight funct3 values are legal; the two funct7 values either
+        # side of 0000001 are not.
         (0x02C58633, "mul    a2,a1,a2",         0),
         (0x02C59633, "mulh   a2,a1,a2",         0),
         (0x02C5A633, "mulhsu a2,a1,a2",         0),
@@ -163,17 +143,9 @@ async def test_system_reserved_fields(dut):
     """
     ECALL / EBREAK / MRET / WFI reserve rd and rs1; sweep both exhaustively.
 
-    This test exists because fault injection found its absence.  Dropping the
-    `rs1_addr == 0` half of the decoder's check escaped every other test in this
-    file, including the 10^6-word random run -- a SYSTEM word with funct3=0,
-    rd=0, rs1 nonzero and funct12 in {0x000, 0x001, 0x302, 0x105} has
-    probability ~7.1e-8 under the random generator, i.e. 0.07 expected hits in
-    10^6 draws.  The Xkntt reserved fields had an exhaustive test from the
-    start; these did not, and random sampling was never going to cover them.
-
-    The general lesson, worth applying to every future reserved field: a rule
-    that constrains a handful of specific encodings out of 2^32 needs a directed
-    sweep.  Random testing covers the common case, never the rare constraint.
+    Dropping the `rs1_addr == 0` half of the decoder's check escaped the
+    10^6-word random run (probability ~7.1e-8 per draw), so a rule that
+    constrains a handful of encodings out of 2^32 needs a directed sweep.
     """
     failures = []
     n = 0
@@ -204,11 +176,8 @@ async def test_system_reserved_fields(dut):
 async def test_all_opcodes_and_funct3(dut):
     """
     Every 7-bit opcode crossed with every funct3 and the funct7 values that
-    matter, with the remaining fields randomised.
-
-    This is what deterministically covers the legal encodings and the reserved
-    opcodes.  A3's "Done when" names the illegal flag being correct for all
-    reserved opcodes, and 'all reserved opcodes' is a sweep, not a sample.
+    matter, with the remaining fields randomised: deterministic coverage of the
+    legal encodings and the reserved opcodes.
     """
     rng = random.Random(SEED)
     failures = []
@@ -229,7 +198,7 @@ async def test_all_opcodes_and_funct3(dut):
 
 @cocotb.test()
 async def test_random_1m(dut):
-    """A3's acceptance test: 10^6 random 32-bit words, zero mismatches."""
+    """10^6 random 32-bit words, zero mismatches."""
     rng = random.Random(SEED)
     failures = []
     N = 1_000_000

@@ -1,38 +1,14 @@
 #!/usr/bin/env python3
 """
-Lockstep commit-log differ: Spike vs. the RTL, on the same ELF (plan A5).
+Lockstep commit-log differ: Spike vs. the RTL, on the same ELF.
 
-Plan A5 calls this "the highest-return item in Track A", and the reason is that
-it turns every future bug into a localised report instead of a wrong number at
-the end of a program.
-
-HOW EQUALITY IS DEFINED.  Both sides are parsed into records of
-(pc, insn, [(rd, value)]) and then rendered back out through ONE formatter,
-`render()`.  The comparison is on those rendered strings, so "byte-identical
-commit log" is literally true -- but it cannot be defeated by a formatting
-difference, and there is exactly one place to teach about a new annotation.
-
-Three asymmetries between the two logs are handled here rather than by relaxing
-the comparison, because each is a real property of Spike and would otherwise
-either mask bugs or produce a spurious mismatch on line one:
-
-  1. SPIKE'S BOOTROM.  Spike executes 5 instructions at 0x1000 before jumping
-     to 0x80000000.  They are dropped by ADDRESS (pc < load address), not by a
-     hardcoded count of 5, so a change in Spike's bootrom cannot silently shift
-     the alignment.
-
-  2. TRAPPING INSTRUCTIONS ARE NOT LOGGED.  Spike prints no commit line at all
-     for an instruction that traps -- and since A9 neither does this core,
-     which squashes a faulting instruction in EX.  Both sides are truncated at
-     the TRAP HANDLER's first instruction, so the ECALL that ends every test
-     program is absent from both and there is no offset to remember.  Before
-     A9 the RTL retired the ECALL and the asymmetry had to be corrected here.
-
-  3. `mem` AND CSR ANNOTATIONS.  Spike appends `mem 0x<addr>` to loads,
-     `mem 0x<addr> 0x<data>` to stores, and `c<n>_<name> 0x<val>` to CSR writes.
-     The A5 format does not include them and the core has no CSR file until A9.
-     `render()` drops them from both sides; teaching it about CSRs later is a
-     one-place change.
+Both sides are parsed into records of (pc, insn, [(rd, value)]) and rendered
+back out through one formatter, `render()`, so the comparison cannot be
+defeated by a formatting difference.  Three asymmetries are handled here
+rather than by relaxing the comparison: Spike's bootrom (5 instructions at
+0x1000, dropped by address); trapping instructions, which neither side logs
+(both are truncated at the trap handler's first instruction); and Spike's
+`mem` and CSR annotations, which `render()` drops.
 """
 import argparse
 import os
@@ -57,12 +33,8 @@ RTL_LINE_RE = re.compile(
 
 def render(pc, insn, writes):
     """
-    The one and only commit-line formatter.
-
-    Spike left-justifies the register name in three columns (`x5 `, `x11`), so a
-    single-digit register gets two spaces before its value.  Taken from real
-    Spike output; guessing this produces a log that looks right and differs on
-    every line involving x0..x9.
+    The one and only commit-line formatter.  Spike left-justifies the register
+    name in three columns (`x5 `, `x11`).
     """
     line = "core   0: 3 0x%08x (0x%08x)" % (pc, insn)
     for rd, val in writes:
@@ -93,17 +65,8 @@ def spike_records(elf, isa=None):
 
 def rtl_records(path, stop_pc=None):
     """
-    Parse the RTL monitor's log, truncated BEFORE the commit at `stop_pc`.
-
-    `stop_pc` is the trap handler's address -- the same place `spike_records`
-    truncates -- so both sides end on the same instruction with no offset to
-    remember.
-
-    Before A9 this truncated at the ECALL instead, because the ECALL retired on
-    the RTL side and Spike logs no commit line for a trapping instruction. A9
-    made the ECALL trap on both sides, which removed the asymmetry rather than
-    moving it: the ECALL now appears in neither log, and the handler is the
-    natural stop marker for both.
+    Parse the RTL monitor's log, truncated BEFORE the commit at `stop_pc` (the
+    trap handler's address, where `spike_records` truncates too).
     """
     out = []
     with open(path) as f:

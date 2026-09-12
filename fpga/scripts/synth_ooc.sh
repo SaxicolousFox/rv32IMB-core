@@ -1,33 +1,22 @@
 #!/usr/bin/env bash
-# Drive the Windows Vivado from WSL to synthesise ONE Track A module out of context.
-#
-# Same staging trick as build_fpga.sh: Vivado runs natively on Windows and is
-# unreliable reading \\wsl.localhost UNC paths, so sources are copied onto the
-# Windows filesystem first.
-#
-# NOTE: the WSL<->Windows interop socket is blocked under the agent sandbox, so
-# this must run with the sandbox disabled (or from a normal shell).
+# Drive the Windows Vivado from WSL to synthesise one module out of context.
+# Same staging as build_fpga.sh.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 
 TOP="${1:-rvntt_muldiv}"
-# MODS_A2 A24: everything after the top is handed to the Tcl script verbatim --
-# an optional clock period in ns, then any number of NAME=VALUE generics.  With
-# no period the behaviour is exactly A14's: synthesis only, resource report only.
+# Everything after the top is handed to the Tcl script verbatim: an optional
+# clock period in ns, then any number of NAME=VALUE generics.
 shift || true
-# NAME=VALUE is the natural way to write a generic and the one thing that cannot
-# be sent: `cmd.exe /c` splits on `=` as if it were a space, so the Tcl script
-# received the name and the value as two separate argv entries and silently
-# synthesised the default.  Callers still write `=`; it is translated to `:`
-# here, and synth_ooc.tcl hard-fails if trailing arguments parse to no generic.
+# `cmd.exe /c` splits on `=` as if it were a space, so NAME=VALUE is
+# translated to NAME:VALUE here; synth_ooc.tcl hard-fails if trailing
+# arguments parse to no generic.
 EXTRA=()
 for a in "$@"; do EXTRA+=("${a/=/:}"); done
 
-# The log name carries the generics, because A24 runs the same module at three
-# different STAGES values and a shared log would silently overwrite the number
-# from the previous configuration with the number from this one.
+# The log name carries the generics, so a sweep does not overwrite itself.
 TAG="$TOP"
 for a in "${EXTRA[@]}"; do
   case "$a" in
@@ -45,29 +34,19 @@ mkdir -p "$STAGE_WSL/rtl"
 
 cp "$ROOT"/rtl/core/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
 cp "$ROOT"/rtl/common/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
-# The whole tree is staged even though one module is synthesised: the top may
-# instantiate others, and out-of-context synthesis prunes what it does not
-# reach.  The RVFI port is excluded -- it is compiled only under RISCV_FORMAL,
-# and reading it here would need the define plus riscv-formal's macros.
+# The whole tree is staged: the top may instantiate others.  The RVFI port is
+# excluded (compiled only under RISCV_FORMAL).
 cp "$ROOT"/rtl/soc/*.sv "$STAGE_WSL/rtl/" 2>/dev/null
 cp "$ROOT"/fpga/generated/*.svh "$STAGE_WSL/" 2>/dev/null
 cp "$ROOT"/fpga/generated/*.svh "$STAGE_WSL/rtl/" 2>/dev/null
-# $readmemh resolves against Vivado's WORKING directory, not the source file's.
-# Not needed for a module with no memory, but staged anyway so that this script
-# works for rvntt_ram and the SoC tops too.
+# $readmemh resolves against Vivado's working directory.
 cp "$ROOT"/fpga/generated/*.mem "$STAGE_WSL/" 2>/dev/null
 rm -f "$STAGE_WSL/rtl/rvntt_rvfi.sv"
 cp "$ROOT"/fpga/scripts/synth_ooc.tcl "$STAGE_WSL/"
 
 cd "$STAGE_WSL"
-# No inner quotes: cmd.exe mangles nested quoting in /c, and neither path
-# contains spaces.  Keep it that way (or switch to a .cmd shim if it ever does).
-#
-# -log/-journal MUST come before -tclargs.  Everything after -tclargs is handed
-# to the Tcl script as argv, so the original ordering silently turned the log
-# option into a script argument and Vivado wrote to the default vivado.log --
-# the run itself succeeded and the wrapper still reported failure because it had
-# no log to grep.
+# No inner quotes: cmd.exe mangles nested quoting in /c.  -log/-journal must
+# come before -tclargs, since everything after -tclargs is argv.
 cmd.exe /c "cd /d $STAGE_WIN && $VIVADO_WIN -mode batch -log ooc_$TAG.log -journal ooc_$TAG.jou -source synth_ooc.tcl -tclargs $TOP ${EXTRA[*]}" 2>&1
 rc=$?
 

@@ -1,60 +1,26 @@
 #!/usr/bin/env python3
 """
-An independent cycle model for the pipeline, and why one is needed at all.
+An independent cycle model for the pipeline.
 
 A commit-log diff proves the pipeline computes the right values in the right
-order.  It cannot see TIMING.  A stall that should not have happened changes no
-architectural state, so a program with a phantom stall on every LUI produces a
-byte-identical log and runs measurably slower -- and the first symptom is an IPC
-number that disagrees with the LLVM scheduling model, at a point in the project
-where nothing points back to the interlock.  Plan A7 asks for exactly this
-guarantee ("a stalled cycle must not retire an instruction"); A9 will bind it to
-`minstret`, but the property is checkable now and cheaper to keep honest from
-the start than to reconstruct later.
-
-WHAT IS PREDICTED.  The SPAN: the cycle distance from the first retirement to
-the last.  Using the span rather than a total cycle count means the model does
-not need to know how long reset is held or how many cycles the pipeline takes to
-fill -- both are constants that cancel, and both are properties of the testbench
-rather than of the design.
+order; it cannot see timing, because a phantom stall changes no architectural
+state.  This predicts the SPAN -- the cycle distance from the first retirement
+to the last, so reset length and pipeline fill cancel:
 
     span = (retired - 1) + stalls + flush_penalties + muldiv_stalls
 
-Once A19 lands, `flush_penalties` is `2 x mispredicts` rather than
-`2 x redirects`, and which one this function uses is the `predictor` argument.
-The predictor itself comes from `model/bpred.py`, which implements
-`docs/a19-bpred-spec.md` and reads nothing out of the RTL -- MODS_A section 3.3
-names that as the one way this model can quietly stop being a check.
+  * `retired - 1`: a full five-stage pipeline retires one instruction per cycle.
+  * `stalls`: one cycle per load-use hazard at distance 1.
+  * `flush_penalties`: two cycles per redirect (the branch resolves in EX with
+    two younger instructions in flight), or per mispredict with `predictor`,
+    where the predictor is model/bpred.py.
+  * `muldiv_stalls`: `occupancy - 1` per M instruction, predictable only
+    because the latency is data-independent.  The numbers live in
+    model/rv32i_ref.MULDIV_CYCLES, duplicated from rv32i_pkg.sv and compared.
 
-  * `retired - 1` because a five-stage pipeline with no hazards retires one
-    instruction per cycle once it is full.
-  * `stalls`: one cycle for each load-use hazard at distance 1 (plan A7).
-  * `flush_penalties`: two cycles for each instruction that redirects the PC,
-    because the branch resolves in EX with two younger instructions in flight
-    (plan A8).
-  * `muldiv_stalls`: `occupancy - 1` for each M instruction (MODS_A A14), which
-    holds EX for as many cycles as its unit needs and bubbles EX/MEM on each of
-    the others.  This term is only predictable because the latency is DATA-
-    INDEPENDENT: the divider runs its 32 iterations whatever the operands are,
-    so the cost is a property of the opcode and the model can read it off the
-    retired stream like everything else here.  An early-out divider would be
-    free performance and would make this model unbuildable.
-
-    The latency numbers live in `model/rv32i_ref.MULDIV_CYCLES`, duplicated from
-    `rv32i_pkg.sv` and compared by `check_pkg_agreement()` -- not read out of the
-    RTL, which would make the prediction agree with the pipeline by construction.
-
-WHERE THE INDEPENDENCE COMES FROM.  The hazards are found by decoding the
-retired instruction stream with `model/rv32i_ref.py`, which is derived from the
-ISA spec and is the same frozen model the RTL decoder is checked against -- not
-from the RTL, and not from `rvntt_hazard.sv`'s own predicate.  Redirects are not
-decoded at all: an instruction redirected if and only if the next retired pc is
-not its own plus four, which is a property of the trace rather than of any
-decoder.
-
-The stream itself is the DYNAMIC one, taken from the commit log, so the model
-works unchanged once branches exist: it sees the instructions that actually
-executed, in the order they executed.
+Hazards are found by decoding the retired (dynamic) stream with
+model/rv32i_ref.py, not with the RTL's predicate; a redirect is an
+instruction whose successor is not pc+4, which needs no decoder.
 """
 import os
 import sys
@@ -79,12 +45,8 @@ def analyse(records, predictor=False):
     muldiv_n = 0
     mispredicts = []
 
-    # A multi-cycle instruction's bubbles sit BEFORE its own retirement, which
-    # is the opposite of a load-use stall (attributed to the load, paid by its
-    # consumer) and of a flush (attributed to the branch, paid by its
-    # successor).  So the last retired instruction's extra cycles DO count --
-    # they delayed the retirement the span ends at -- and the FIRST one's do
-    # not, because they happened before the span began.  Hence range(1, n).
+    # A multi-cycle instruction's bubbles sit before its own retirement, so the
+    # last instruction's extra cycles count and the first one's do not.
     for i in range(1, n):
         _pc0, insn, _ = records[i]
         ctrl, _regs0 = rv32i_ref.decode(insn)
@@ -104,48 +66,20 @@ def analyse(records, predictor=False):
                     (nctrl["uses_rs2"] and nregs["rs2"] == regs["rd"])):
                 stalls.append(pc)
 
-        # A redirect is normally visible in the trace itself: the next
-        # instruction to retire is not the one at pc+4.  That is deliberately
-        # decoder-free, so a decoder that is wrong about which opcodes branch
-        # cannot hide a flush.
-        #
-        # The one shape it misses is an unconditional jump whose target happens
-        # to BE pc+4.  The pipeline redirects and flushes for every jump without
-        # checking, so that costs two cycles while looking like straight-line
-        # flow -- hence the `jump` term.  A taken BRANCH to pc+4 has the same
-        # shape and is not covered; it is not emitted by the generator (targets
-        # are at least three instructions ahead) and would be a strange thing to
-        # write by hand.
+        # A redirect is visible in the trace itself: the next instruction is
+        # not the one at pc+4.  The one shape that misses is a jump whose target
+        # is pc+4, which still flushes -- hence the `jump` term.
         if nxt_pc != (pc + 4) & 0xFFFFFFFF or ctrl["jump"]:
             flushes.append(pc)
 
-    # ---- A19: the same span, with a predictor in front of the fetch ---------
-    # MODS_A section 3.3 is explicit that after A19 the flush term stops being
-    # `2 x redirects` and becomes `2 x MISPREDICTS`, and that the model has to
-    # know the difference from the predictor's SPECIFICATION rather than from
-    # its RTL.  model/bpred.py is that specification -- docs/a19-bpred-spec.md
-    # implemented from the document -- and it is driven here off the same
-    # retired stream everything else in this file reads.
-    #
-    # THE ONE THING THAT CANNOT BE READ OFF THE STREAM ALONE is *when* an
-    # update becomes visible.  A predictor update lands in EX and cannot reach
-    # a lookup that already happened, so a transfer fewer than four retire
-    # cycles after the one that would have taught the predictor about it sees
-    # the old state -- spec section 8.  That is not a detail: on a
-    # three-instruction loop it is every other iteration, and ignoring it made
-    # this model predict 916 cycles for sw/tests/a19_bpred.S where the RTL
-    # measured 992.
-    #
-    # So this walk is CYCLE-ACCURATE rather than instruction-ordered: it
-    # accumulates the same span the return value reports, one instruction at a
-    # time, and hands each transfer's retire cycle to DelayedBPred.  The
-    # dependency is feed-forward -- a mispredict costs two cycles, which pushes
-    # later transfers further from their updates, which can only make more of
-    # them visible -- so one pass is exact.
-    #
-    # A jump whose target happens to be pc + 4 is taken, and the trace cannot
-    # say so; the decoder can, and does, for the same reason the flush term
-    # above has a `jump` clause.
+    # ---- the same span, with a predictor in front of the fetch --------------
+    # With a predictor the flush term is 2 x mispredicts, decided by
+    # model/bpred.py off the same retired stream.  What cannot be read off the
+    # stream alone is when an update becomes visible: a transfer fewer than
+    # four cycles after the one that would have taught the predictor sees the
+    # old state.  So this walk is cycle-accurate, accumulating the span one
+    # instruction at a time and handing each transfer's retire cycle to
+    # DelayedBPred; the dependency is feed-forward, so one pass is exact.
     if predictor:
         bp = bpred.DelayedBPred()
         stall_at = set(stalls)
@@ -182,20 +116,10 @@ def analyse(records, predictor=False):
             nxt_pc, _, _ = records[i + 1]
             taken = bool(ctrl["jump"]) or nxt_pc != (pc + 4) & 0xFFFFFFFF
             target = nxt_pc if taken else 0
-            # THE RULE IS ON FETCH CYCLES, NOT RETIREMENTS.  `retire - fetch` is
-            # not constant: an instruction held in ID by a load-use interlock or
-            # behind a multi-cycle EX has already had its prediction made.  See
-            # model/bpred.py's VISIBILITY_GAP -- expressing this on retirements
-            # was wrong on 39 of Dhrystone's 396 mispredicts, and right on every
-            # one of CoreMark's, which is exactly how it hid.
-            # A REDIRECT TARGET IS NOT PREDICTED.  The lookup reads only
-            # registered sources, so during the cycle a redirect fires the
-            # predictor is looking at the address the front end would otherwise
-            # have fetched -- not at the target.  See model/bpred.py's
-            # SUPPRESS_AFTER_REDIRECT and docs/a19-bpred-spec.md section 2.  The
-            # cycle model can apply this exactly, because unlike a transfer
-            # trace it sees EVERY instruction and therefore knows whether this
-            # one is the redirect's successor.
+            # The rule is on fetch cycles, not retirements: an instruction held
+            # in ID has already had its prediction made (VISIBILITY_GAP).  A
+            # redirect target is not predicted (SUPPRESS_AFTER_REDIRECT); the
+            # cycle model sees every instruction, so it applies this exactly.
             suppressed = bpred.SUPPRESS_AFTER_REDIRECT and pc == pending_target
             if suppressed:
                 bp.predict(pc, cyc - prev_hold)      # drain, then ignore

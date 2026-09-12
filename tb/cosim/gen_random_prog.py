@@ -1,48 +1,24 @@
 #!/usr/bin/env python3
 """
-Random RV32IM program generator for lockstep cosimulation (plan A5, MODS_A A15).
+Random RV32IMB program generator for lockstep cosimulation.
 
-Plan A5 is explicit that riscv-dv is not needed here: "a 300-line Python script
-that emits valid RV32I with a controlled hazard density, a bounded register set,
-memory accesses clamped to a valid range, and forward-only branches will find
-more bugs per hour than anything else you do."  This is that script.
+The generated program must never trap before its final ECALL (Spike prints no
+commit line for a trapping instruction, so the diff would point at the wrong
+place).  Four rules keep that true: only legal encodings are emitted (no
+Zifencei; M is safe because RISC-V division never traps); every memory access
+uses the reserved base register with an offset inside the scratch area; every
+access is naturally aligned; branches are forward-only onto emitted labels.
 
-THE GENERATED PROGRAM MUST NEVER TRAP before its final ECALL.  A trap would
-diverge the two logs for a reason that has nothing to do with the pipeline, and
-Spike does not even print a commit line for the trapping instruction, so the
-report would point at the wrong place.  Four rules keep that true:
+The density knobs are each the probability of ALLOWING a hazard rather than
+padding it away:
 
-  * only legal RV32IM encodings are emitted (no Zifencei).  M is safe to emit
-    freely, unlike everything else here: RISC-V division raises NO exceptions,
-    so a zero divisor and the -2^31 / -1 overflow are architecturally defined
-    results rather than traps, and Spike is still the reference for both;
-  * every memory access uses the reserved base register, never a computed one,
-    with an offset inside the scratch area;
-  * every access is naturally aligned, because Spike traps on a misaligned lw
-    and the core does not;
-  * branches are forward-only and land on emitted labels.
-
-THE DENSITY KNOBS are what make one generator serve A5 through A8.  Each is the
-probability of ALLOWING a hazard rather than padding it away:
-
-  --raw-density        0.0 pads every RAW to 3 instructions -- what A4/A5 need,
-                       since the core has no forwarding.  A6 raises it.
+  --raw-density        0.0 pads every RAW to 3 instructions.
   --load-use-density   0.0 keeps a load's result unused for 2 instructions.
-                       A7 raises it.
-  --mul-density        0.0 emits no M instructions, which is the pre-A14
-                       setting and reproduces every earlier seed byte for byte.
-                       A14 raises it.  Kept low in practice: a 34-cycle divide
-                       is 34 cycles in which nothing else is exercised, so a
-                       high density buys stalls rather than coverage.
-  --branch-density     0.0 emits no control flow at all, which A5 requires:
-                       the A4 core's PC is pc+4 and rvntt_core's
-                       dbg_unsupported fires on any branch or jump.  A8 raises
-                       it.  Unlike the other two this one is not run at 1.0:
-                       a program that is entirely branches executes almost
-                       nothing, so ~0.12 is the useful setting.
-
-At every density the program stays architecturally well-defined, so Spike is
-always the reference for what it should do.
+  --mul-density        M instructions.  Kept low: a 34-cycle divide is 34
+                       cycles in which nothing else is exercised.
+  --bm-density         B, Zbkb and Zicond instructions.
+  --branch-density     control flow.  ~0.12 is the useful setting; a program
+                       that is entirely branches executes almost nothing.
 """
 import argparse
 import random
@@ -65,14 +41,12 @@ STORES = [("sw", 4), ("sh", 2), ("sb", 1)]
 BRANCHES = ["beq", "bne", "blt", "bge", "bltu", "bgeu"]
 MULDIV = ["mul", "mulh", "mulhsu", "mulhu", "div", "divu", "rem", "remu"]
 
-# A21 (MODS_A2).  B (Zba + Zbb + Zbs) and Zbkb, split by operand shape.
+# B (Zba + Zbb + Zbs) and Zbkb, split by operand shape.
 BM_RR = ["sh1add", "sh2add", "sh3add", "andn", "orn", "xnor",
          "min", "minu", "max", "maxu", "rol", "ror",
          "bset", "bclr", "binv", "bext", "pack", "packh",
-         # Zicond (A22).  R-type, and its interesting case is rs2 == 0, which
-         # _any_src() supplies through P_X0_SOURCE -- the same mechanism that
-         # already covers x0 as an operand everywhere else.  Without a zero rs2
-         # every czero.eqz simply returns rs1 and the instruction is untested.
+         # Zicond.  Its interesting case is rs2 == 0, which _any_src() supplies
+         # through P_X0_SOURCE.
          "czero.eqz", "czero.nez"]
 BM_RI = ["rori", "bseti", "bclri", "binvi", "bexti"]      # rd, rs1, shamt
 BM_UN = ["clz", "ctz", "cpop", "sext.b", "sext.h", "zext.h",
@@ -149,15 +123,9 @@ class Gen:
     def _r(self):
         return self.rng.choice(self.pool)
 
-    # x0 is worth exercising -- it is the only register whose value is
-    # architecturally fixed, so reading it is how a forwarding bug that ignores
-    # rd == x0 shows up -- but it must stay RARE.  At 10% of every source
-    # operand it was collapsing the program's value entropy: combined with
-    # slt/sltu, which produce 0 or 1, most registers ended up holding 0 or 1,
-    # and a shift of 0 or 1 gives the same answer however broken the shifter is.
-    # Fault injection found this: a mutation making the shift amount b[5:0]
-    # instead of b[4:0] escaped, because all seven shifts with bit 5 set were
-    # shifting 0, 1, or all-ones.
+    # x0 is worth exercising (a forwarding bug that ignores rd == x0 shows up
+    # only there) but must stay rare: at 10% of every source operand it
+    # collapsed the program's value entropy to 0 and 1.
     P_X0_SOURCE = 0.05
 
     def _any_src(self):
@@ -173,30 +141,22 @@ class Gen:
             return self.muldiv()
         if pick < self.br_d + self.mul_d + self.bm_d:
             return self.bitmanip()
-        # Everything below is offset by ALL THREE control knobs, so mul_d = 0
-        # draws exactly the same instruction as before A14 for the same rng
-        # state, and bm_d = 0 the same as before A21 -- every earlier seed still
-        # reproduces byte for byte.  That property is why the knobs are added
-        # at the front of the chain rather than folded into the ranges below.
+        # Offset by all three control knobs, so a knob at 0 draws exactly the
+        # same instruction as before it existed and every earlier seed still
+        # reproduces byte for byte.
         base = self.br_d + self.mul_d + self.bm_d
         if pick < base + 0.18:
             return self.mem()
-        # LUI/AUIPC are the only instructions that inject entropy without
-        # reading anything, so they are also the program's defence against every
-        # register drifting to 0 or 1 over a few hundred instructions.  See
-        # P_X0_SOURCE above for how that drift hid a real bug.
+        # LUI/AUIPC inject entropy without reading anything, which is the
+        # defence against every register drifting to 0 or 1.
         if pick < base + 0.34:
             return self.upper()
         if pick < base + 0.62:
             return self.reg_imm()
         return self.reg_reg()
 
-    # THE SHIFT AMOUNTS RANDOM WILL NEVER DRAW ENOUGH OF.  A uniform 5-bit
-    # amount is 0 one time in 32, and `rol rd, rs, 0` -- which must be the
-    # identity and is a zero-shift-plus-32-shift in the obvious implementation
-    # -- is the single most likely rotate bug there is.  31 is the other end of
-    # the same mistake.  Constructed rather than hoped for, exactly as the
-    # divide edge cases above are.
+    # Shift amounts random will never draw enough of: 0 (`rol rd, rs, 0` must
+    # be the identity) and 31.  Constructed rather than hoped for.
     P_BM_EDGE = 0.30
 
     def bitmanip(self):
@@ -206,11 +166,8 @@ class Gen:
         if kind == 0:
             op = self.rng.choice(BM_RR)
             rs2 = self._any_src()
-            # Zicond's ONLY interesting operand is a zero rs2 -- with a nonzero
-            # one czero.eqz just returns rs1 and the instruction is untested.
-            # P_X0_SOURCE alone gave 1 zero-rs2 czero in 400 instructions, which
-            # is not coverage, so it is constructed here the way the divide edge
-            # cases and the rotate amounts are.
+            # Zicond's only interesting operand is a zero rs2, so it is
+            # constructed here like the divide edge cases.
             if op.startswith("czero.") and self.rng.random() < self.P_BM_EDGE:
                 rs2 = 0
             self._pad_for([rs1, rs2])
@@ -236,12 +193,8 @@ class Gen:
         self._emit(f"{op:<6} x{rd}, x{rs1}, x{rs2}")
         self._wrote(rd)
 
-    # THE THREE OPERAND SHAPES THAT MATTER ARE THE THREE RANDOM WILL NEVER DRAW.
-    # A uniform 32-bit divisor is zero with probability 2^-32 and -1 with the
-    # same; a uniform dividend is -2^31 with the same.  Those are exactly the
-    # cases the specification legislates for and every implementation gets
-    # wrong, so they are CONSTRUCTED rather than hoped for.  Without this the
-    # knob would raise the M instruction count and cover none of the hard part.
+    # The three operand shapes that matter are the three random will never
+    # draw: a zero divisor, a divisor of -1 and a dividend of -2^31.
     P_MULDIV_EDGE = 0.30
 
     def muldiv(self):
@@ -284,21 +237,11 @@ class Gen:
         self._emit(f"{op:<6} x{rd}, x{rs1}, {imm}")
         self._wrote(rd)
 
-    # LUI and AUIPC have no rs1 operand: instruction bits 19:15 are part of
-    # their immediate.  Left to chance those bits name a live register only
-    # rarely, and that is the ONLY shape in which a hazard unit keying on the
-    # FIELD rather than on `uses_rs1` misbehaves -- it stalls behind a load into
-    # a register the instruction never reads.  Such a phantom stall changes no
-    # value, so the commit-log diff is byte-identical and only the cycle model
-    # sees it.
-    #
-    # Fault injection found this directly: the mutation that ties `uses_rs1`
-    # high was caught by the directed test and escaped the random suite,
-    # because reaching it needed a specific immediate bit pattern immediately
-    # after a load into that exact register (about 0.5% per load).  Filling the
-    # field with the MOST RECENTLY WRITTEN register makes the shape common
-    # instead of accidental, and does so generically -- nothing here knows or
-    # cares that the interesting predecessor is a load.
+    # LUI and AUIPC have no rs1 operand: bits 19:15 are part of their
+    # immediate.  Filling that field with the most recently written register
+    # makes the shape that catches a hazard unit keying on the field rather
+    # than on `uses_rs1` (a phantom stall behind a load) common instead of
+    # accidental.
     P_UPPER_FIELD_LIVE = 0.5
 
     def _most_recent_write(self):
@@ -319,21 +262,11 @@ class Gen:
         self._emit(f"{op:<6} x{rd}, {imm}")
         self._wrote(rd)
 
-    # A17 added a second adder for the effective address, and doing so exposed
-    # two things this generator could never reach with x8 as the only base.
-    #
-    #   * x8 is NEVER WRITTEN -- that is what keeps every access inside the
-    #     scratch area -- so the address operand was never a forwarded value.
-    #     A mutation that read the address's rs1 straight out of ID/EX instead
-    #     of out of the forwarding mux was invisible to every random program
-    #     this generator has ever produced, in all of A6 through A16.
-    #   * an aligned base plus an aligned offset never carries out of bit 1, so
-    #     the bottom of the adder was only ever exercised in its easy case.
-    #
-    # Both are fixed by ALIASING THE BASE: `addi xN, x8, k` immediately before
-    # the access, with the offset reduced by k so the address is unchanged.  k
-    # is not aligned, which puts arbitrary bits in the base's low two, and the
-    # access still lands exactly where it would have.
+    # Aliasing the base: `addi xN, x8, k` immediately before the access, with
+    # the offset reduced by k so the address is unchanged.  x8 is never
+    # written, so without this the address operand was never a forwarded
+    # value, and an aligned base plus an aligned offset never carried out of
+    # bit 1.  k is not aligned, so the base's low two bits are arbitrary.
     P_ALIAS_BASE = 0.25
 
     def mem(self):
@@ -348,15 +281,9 @@ class Gen:
             off = total - k
             self._emit(f"addi   x{base}, x{BASE_REG}, {k}")
             self._wrote(base)
-            # THE ADDI AND ITS ACCESS ARE ONE IDIOM AND A LABEL MUST NOT SPLIT
-            # THEM.  A branch landing between the two enters with the base
-            # register holding whatever it held before -- an arbitrary 32-bit
-            # value -- and the access goes somewhere outside scratch, usually
-            # misaligned.  That breaks the generator's first promise, that the
-            # program never traps before its final ECALL, and the symptom is
-            # not a wrong answer: Spike takes the trap, the program never
-            # reaches ECALL, and the run HANGS.  Found exactly that way, by a
-            # 600-second Spike timeout in the mutation suite.
+            # The addi and its access are one idiom and a label must not split
+            # them: a branch landing between the two enters with an arbitrary
+            # base, and the access leaves scratch and traps (a hang on Spike).
             self.label_hold = True
 
         if load:
@@ -370,34 +297,22 @@ class Gen:
             self._emit(f"{op:<6} x{rs2}, {off}(x{base})")
         self.label_hold = False
 
-    # A branch between two independently random 32-bit values is almost never
-    # taken for beq and almost always taken for bne, and the fall-through and
-    # taken paths need each other's coverage.  Comparing a register WITH ITSELF
-    # a quarter of the time fixes both ends at once: beq/bge/bgeu become
+    # Comparing a register with itself a quarter of the time makes beq/bge/bgeu
     # certainly taken and bne/blt/bltu certainly not, whatever the values are.
     P_BRANCH_SAME_REG = 0.25
 
-    # A share of the control transfers are unconditional jumps.  JAL is worth
-    # having in the random mix and not only in the directed test, because it is
-    # the one instruction whose writeback is an ADDRESS rather than a datum --
-    # and because it always redirects, so it exercises the flush on every
-    # execution rather than on a data-dependent fraction of them.  Kept low: a
-    # jump skips everything up to its target, so a high rate would shrink the
-    # dynamic program to almost nothing.
+    # A share of the control transfers are unconditional jumps: JAL's
+    # writeback is an address, and it always redirects.  Kept low, since a
+    # jump skips everything up to its target.
     P_JUMP = 0.15
 
     def branch(self):
         self.label_n += 1
         lbl = f".Lb{self.label_n}"
         # Forward only, and far enough ahead that the target is still in front
-        # of the branch after any padding the intervening instructions need.
-        #
-        # A taken branch changes the DYNAMIC distance between a producer and a
-        # consumer, and can shorten it: the generator's padding is computed on
-        # static indices.  That is deliberate and harmless from A8 onwards --
-        # the pipeline forwards and interlocks at every distance, so any dynamic
-        # sequence is legal -- but it does mean the density knobs stop being an
-        # exact statement about what the pipeline sees once branches are on.
+        # of the branch after any padding.  A taken branch can shorten the
+        # dynamic distance between producer and consumer; the pipeline forwards
+        # and interlocks at every distance, so that is legal.
         target = self.idx + self.rng.randrange(3, 12)
 
         if self.rng.random() < self.P_JUMP:
@@ -415,8 +330,8 @@ class Gen:
         self._emit(f"{op:<6} x{rs1}, x{rs2}, {lbl}")
 
     def generate(self):
-        # Base register, hand-expanded: `la` is auipc+addi with a
-        # zero-separation RAW, which the A4 core cannot execute.
+        # Base register, hand-expanded (`la` is auipc+addi with a
+        # zero-separation RAW).
         self.out.append("1:      auipc   x%d, %%pcrel_hi(scratch)" % BASE_REG)
         self.idx += 1
         for _ in range(RAW_DISTANCE):
@@ -432,13 +347,10 @@ class Gen:
         for r in self.pool:
             self._emit(f"lui    x{r}, {self.rng.randrange(0, 1 << 20)}")
             self._wrote(r)
-        # ...then fill the LOW 12 bits, which LUI leaves at zero.  Without this
-        # every register starts with bits 11:0 clear, and fault injection found
-        # two mutations escaping because of it: a shift amount taken as b[5:0]
-        # instead of b[4:0] needs bit 5 of some register to be set, and a byte
-        # load that fails to sign-extend needs a byte with bit 7 set.  Both were
-        # unreachable from an all-LUI seed.  Padded, because each xori reads the
-        # register its own LUI just wrote.
+        # ...then fill the low 12 bits, which LUI leaves at zero: a shift
+        # amount taken as b[5:0] needs bit 5 of some register set, and a byte
+        # load that fails to sign-extend needs a byte with bit 7 set.  Padded,
+        # because each xori reads the register its own LUI just wrote.
         for r in self.pool:
             self._pad_for([r])
             self._emit(f"xori   x{r}, x{r}, {self.rng.randrange(-2048, 2048)}")
@@ -507,13 +419,9 @@ fromhost: .dword 0
 
 def _scratch_init():
     """
-    Non-zero, non-uniform initial contents for the scratch area.
-
-    An all-zero scratch (`.space`) makes every load before the first store read
-    0, so a byte load that forgets to sign-extend is indistinguishable from a
-    correct one -- fault injection caught exactly that.  The pattern is
-    generated, not hand-typed, and every fourth word is forced to have the high
-    bit of each byte set so that lb/lh have something negative to read.
+    Non-zero, non-uniform initial contents for the scratch area.  Every fourth
+    word has the high bit of each byte set so that lb/lh have something
+    negative to read.
     """
     words = []
     x = 0x12345678
@@ -540,18 +448,10 @@ ALIAS_RE = re.compile(r"^\s+addi\s+x(\d+), x%d, \d+$" % BASE_REG)
 def check_alias_bases(lines):
     """Every aliased base is initialised on every path that reaches its access.
 
-    The generator's first promise is that the program never traps before its
-    final ECALL, and the aliased base of `mem()` is the one construct that can
-    break it: a branch target emitted between the `addi` and the access lets
-    control arrive with the base register holding an arbitrary value, and the
-    access then leaves the scratch area.  `label_hold` prevents that; this
-    checks it, because the failure mode is a HANG rather than a wrong answer --
-    mtvec is not armed until the epilogue, so a trap in the body jumps to zero
-    and runs forever, and what the harness reports is a 600-second timeout with
-    no indication of which instruction caused it.
-
-    Raises AssertionError rather than returning a flag: a generator that emits
-    a trapping program has no correct output to fall back on.
+    A branch target emitted between the `addi` and the access would let
+    control arrive with the base holding an arbitrary value; `label_hold`
+    prevents that and this checks it, because the failure is a hang (mtvec is
+    not armed until the epilogue).  Raises AssertionError.
     """
     for i, line in enumerate(lines):
         m = MEM_RE.match(line)
@@ -593,8 +493,7 @@ def main():
     ap.add_argument("--branch-density", type=float, default=0.0)
     ap.add_argument("--mul-density", type=float, default=0.0)
     ap.add_argument("--bm-density", type=float, default=0.0,
-                    help="A21: density of B / Zbkb instructions. 0.0 "
-                         "reproduces every pre-A21 seed byte for byte.")
+                    help="density of B / Zbkb / Zicond instructions")
     ap.add_argument("-o", default=None)
     a = ap.parse_args()
 

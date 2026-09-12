@@ -1,17 +1,13 @@
 #!/usr/bin/env python3
 """
-Parse a UART capture from the A12 SoC and decide whether the board is running.
+Parse a UART capture from the SoC and decide whether the board is running.
 
-This is the checker that turns "Hello arrived" from something a person reads
-into something a script decides, which is what makes the hardware loop
-automatic.  It is therefore itself a checking mechanism, and gets the same
-treatment as every other one in this project: `--selftest` feeds it captures
-that are wrong in nine specific ways and requires it to reject every one.  A
-parser that has only ever seen good input is indistinguishable from `return 0`.
+`--selftest` feeds it captures that are wrong in nine specific ways and
+requires it to reject every one.
 
 Expected block, repeating (see sw/soc/hello.c):
 
-    === rvntt A12 ===
+    === rvntt soc ===
     hello=Hello, world!
     sw=0xN btn=0xN
     mcycle=0xXXXXXXXX minstret=0xXXXXXXXX
@@ -22,7 +18,7 @@ Expected block, repeating (see sw/soc/hello.c):
 """
 import argparse, re, sys
 
-START = "=== rvntt A12 ==="
+START = "=== rvntt soc ==="
 END   = "=== end ==="
 
 RE_HELLO = re.compile(r"^hello=Hello, world!$")
@@ -39,12 +35,8 @@ class Block(object):
 
 
 def parse_blocks(text):
-    """Every COMPLETE, well-formed block in `text`.  Malformed ones are dropped.
-
-    Dropping rather than raising is deliberate: a capture legitimately starts
-    mid-block, and the first partial one is not an error.  The checks that
-    matter are applied to what survives, in check().
-    """
+    """Every complete, well-formed block in `text`; malformed ones are dropped
+    (a capture legitimately starts mid-block)."""
     blocks, errors = [], []
     lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
     i = 0
@@ -113,9 +105,8 @@ def check(text, expect_echo=None, min_blocks=2, expect_sw=None, expect_btn=None)
                         % (len(blocks), min_blocks))
         return False, findings
 
-    # The program loops forever, so consecutive blocks must show it moving.  A
-    # board that emitted one block and hung, or a capture file left over from a
-    # previous run, passes every per-block check and fails these two.
+    # The program loops forever, so consecutive blocks must show it moving: a
+    # board that emitted one block and hung passes every per-block check.
     for a, b in zip(blocks, blocks[1:]):
         if b.iter != a.iter + 1:
             findings.append("iter did not advance by one: 0x%08X -> 0x%08X"
@@ -127,11 +118,9 @@ def check(text, expect_echo=None, min_blocks=2, expect_sw=None, expect_btn=None)
             findings.append("minstret did not advance: 0x%08X -> 0x%08X"
                             % (a.minstret, b.minstret))
 
-    # The program re-reads its own .text.init and compares it against the value
-    # taken before the first store.  BAD means something wrote over the running
-    # image -- an MMIO store aliasing into RAM is the case this exists for, and
-    # nothing else here can see it, because the clobbered words are crt0's and
-    # crt0 never runs again.
+    # The program re-reads its own .text.init and compares it against the
+    # value taken before the first store; BAD means an MMIO store aliased into
+    # RAM over crt0, which nothing else can see.
     for b in blocks:
         if b.img != "OK":
             findings.append("program image changed under itself: %s" % b.img)
@@ -150,7 +139,7 @@ def check(text, expect_echo=None, min_blocks=2, expect_sw=None, expect_btn=None)
 
 
 GOOD = "".join(
-    "=== rvntt A12 ===\r\n"
+    "=== rvntt soc ===\r\n"
     "hello=Hello, world!\r\n"
     "sw=0x0 btn=0x0\r\n"
     "mcycle=0x%08X minstret=0x%08X\r\n"

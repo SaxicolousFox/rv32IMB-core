@@ -2,24 +2,11 @@
 """
 Check every constraint file's pin assignments against the board's own pinout.
 
-This exists because of a specific bug, and the bug is worth stating plainly.
-A12's SoC assigned the RGB LED by reading three lines out of the Digilent master
-XDC by eye.  The master lists them in the order `led0_b`, `led0_g`, `led0_r`;
-they were read as r, g, b; red and blue were swapped.
-
-Nothing caught it.  It elaborated, it synthesised, it met timing, it programmed,
-it ran, the UART was byte-perfect and every automated check passed -- because a
-swapped output pin is invisible to all of them.  The only symptom was the wrong
-colour lighting up on the board, and it took a person looking at it to see.
-
-So the fix is not "be careful next time": it is to stop reading pin tables by
-hand.  fpga/constraints/arty_a7_100t_pins.txt is extracted mechanically from the
-vendor file, and this compares every port in every XDC against it.
-
-What this does NOT check: whether the design drives the right SIGNAL onto a
-correctly-named port.  `led0_r` connected to the heartbeat instead of the error
-flag would pass here and still be wrong.  Pin identity is the part that can be
-mechanised; intent still needs review.
+fpga/constraints/arty_a7_100t_pins.txt is extracted mechanically from the
+vendor XDC, and this compares every port in every XDC against it -- a swapped
+output pin is invisible to elaboration, synthesis, timing and every UART
+check.  It does not check whether the design drives the right signal onto a
+correctly-named port.
 """
 import os, re, sys
 
@@ -70,7 +57,7 @@ def check_file(path, ref):
 SELFTESTS = [
     ("rgb_swapped",
      "set_property -dict { PACKAGE_PIN E1 IOSTANDARD LVCMOS33 } [get_ports { led0_r }]",
-     "the exact A12 bug: red and blue transposed"),
+     "red and blue transposed"),
     ("led_shifted",
      "set_property -dict { PACKAGE_PIN J5 IOSTANDARD LVCMOS33 } [get_ports { led[0] }]",
      "an off-by-one across a bus, which looks entirely plausible"),
@@ -118,9 +105,7 @@ def main() -> int:
     if "--selftest" in sys.argv:
         return selftest(ref)
 
-    # The self-test runs first, every time, rather than being a separate opt-in
-    # target.  It costs microseconds, and a pin checker that has only ever seen
-    # correct constraints is exactly the shape of thing this file exists to stop.
+    # The self-test runs first, every time; it costs microseconds.
     if selftest(ref) != 0:
         return 1
     print()

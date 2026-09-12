@@ -1,11 +1,6 @@
-// Emits a status line over UART, repeating about once a second:
-//
-//   rvntt P0.5 clk=75MHz bram=0xD76C0E8D PASS\r\n
-//
-// The checksum is printed rather than only reduced to a pass/pass bit, so that
-// if it ever fails on hardware the actual value is visible -- "FAIL 0x00000000"
-// (BRAM not initialised) and "FAIL <garbage>" (addressing wrong) are completely
-// different bugs, and a lone FAIL LED cannot tell them apart.
+// Emits a status line over UART about once a second:
+//   rvntt blinky clk=75MHz bram=0xD76C0E8D PASS\r\n
+// The checksum is printed so a failure on hardware shows the actual value.
 `default_nettype none
 
 module rvntt_uart_report #(
@@ -19,10 +14,10 @@ module rvntt_uart_report #(
     input  wire        pass,
     output wire        tx
 );
-  // "rvntt P0.5 clk=75MHz bram=0x"
-  localparam int PRE_LEN = 28;
+  // "rvntt blinky clk=75MHz bram=0x"
+  localparam int PRE_LEN = 30;
   localparam logic [7:0] PRE [0:PRE_LEN-1] = '{
-      "r","v","n","t","t"," ","P","0",".","5"," ",
+      "r","v","n","t","t"," ","b","l","i","n","k","y"," ",
       "c","l","k","=","7","5","M","H","z"," ",
       "b","r","a","m","=","0","x"};
 
@@ -34,13 +29,10 @@ module rvntt_uart_report #(
   typedef enum logic [2:0] {S_IDLE, S_PRE, S_HEX, S_SUF, S_WAIT} state_e;
   state_e state_q;
 
-  logic [4:0]  idx_q;        // index within PRE (0..27) or SUF (0..6)
+  logic [4:0]  idx_q;        // index within PRE (0..29) or SUF (0..6)
   logic [2:0]  nib_q;        // which nibble, 7 down to 0
   logic [31:0] sum_q;
-  // Gap between lines.  Size the counter from the constant rather than picking a
-  // width and then scaling the constant to fit it -- the original code used a
-  // hardcoded 27-bit counter and CLK_HZ/16, which silently produced 15 lines a
-  // second while the comment claimed one.
+  // Gap between lines; the counter is sized from the constant.
   localparam int GAP_CYCLES = CLK_HZ;                 // one second
   localparam int GAP_W      = $clog2(GAP_CYCLES + 1);
   logic [GAP_W-1:0] wait_q;

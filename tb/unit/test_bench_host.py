@@ -1,17 +1,12 @@
 #!/usr/bin/env python3
 """
-Build and run the A13 benchmarks NATIVELY, purely to check they are correct.
+Build and run the benchmarks natively, as a correctness check only.
 
-This is not a measurement and cannot be one: the host has no mcycle, so
-bench_main.c prints `host=1` and tb/fpga/parse_bench_uart.py refuses to derive a
-score from the capture.  What it does check is everything that is not timing --
-CoreMark's own CRCs against its published known-good values, and Dhrystone's
-published final variable values via dhry_verify() -- in about a second, against
-the SAME sources the bitstream is built from.
-
-That separation is the whole point.  If the CRCs are wrong on the board and
-right here, the core is wrong; if they are wrong in both, the port is.  Without
-this run those two are the same symptom.
+The host has no mcycle, so bench_main.c prints `host=1` and
+tb/fpga/parse_bench_uart.py refuses to derive a score.  What is checked is
+CoreMark's CRCs and Dhrystone's final variable values, from the same sources
+the bitstream is built from: wrong on the board and right here means the core
+is wrong; wrong in both means the port is.
 """
 import argparse, os, subprocess, sys, tempfile
 
@@ -33,8 +28,7 @@ def build(exe, dhry_runs, iterations):
               '-DBENCH_FLAGS="host functional run -- NOT a measurement"'] + incs
     cm = ["-DPERFORMANCE_RUN=1", "-DTOTAL_DATA_SIZE=2000",
           '-DCOMPILER_FLAGS="host functional run"']
-    # bench_lib.c is deliberately absent: glibc supplies memcpy/strcpy here, and
-    # linking a second definition of them is not a thing this run is testing.
+    # bench_lib.c is absent on purpose: glibc supplies memcpy/strcpy here.
     srcs = [(os.path.join(BENCH, "bench_main.c"), []),
             (os.path.join(BENCH, "bench_io.c"), []),
             (os.path.join(BENCH, "dhry_glue.c"), ["-std=gnu89"]),

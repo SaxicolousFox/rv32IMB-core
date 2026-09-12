@@ -1,20 +1,11 @@
 #!/usr/bin/env python3
 """
-A4 acceptance: build sw/tests/a4_checksum.S, run it on the RTL, check the result.
+Build sw/tests/a4_checksum.S, run it on the RTL, check the result.
 
-The expected value comes from two independent places, neither of which is the
-RTL:
-
-  1. A Python model of the program's arithmetic, over data literals PARSED OUT
-     OF THE .S FILE.  The data is not duplicated here -- the same principle
-     fpga/scripts/gen_bram_init.py states as "the expected checksum is derived
-     from the same data in the same script, so the two can never disagree".
-
-  2. Spike, running the identical ELF.  If the Python model and the program ever
-     disagree, Spike says which one is wrong instead of leaving a bare mismatch.
-
-Both must agree before the RTL is even started, so a disagreement between the
-two references is reported as its own distinct failure rather than as a DUT bug.
+The expected value comes from two places, neither of them the RTL: a Python
+model of the program's arithmetic over data literals parsed out of the .S
+file, and Spike running the same ELF.  Both must agree before the RTL is
+started; a disagreement between them is reported as its own failure.
 """
 import os, re, subprocess, sys, tempfile
 
@@ -36,10 +27,8 @@ RTL = [
     os.path.join(ROOT, "rtl/core/rvntt_csr.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_muldiv.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_bitmanip.sv"),
-    # A29.  Three files, one list, and this list is imported by
-    # test_riscv_tests.py, the cosim harnesses and the mutation runner -- which
-    # is why it is the one that has to be right.  A21 missed rvntt_bitmanip.sv
-    # in three harnesses for exactly this reason.
+    # One source list, imported by test_riscv_tests.py, the cosim harnesses
+    # and the mutation runner.
     os.path.join(ROOT, "rtl/core/rvntt_seed.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_entropy.sv"),
     os.path.join(ROOT, "rtl/core/rvntt_entropy_health.sv"),
@@ -143,17 +132,10 @@ def spike_final_reg(elf, reg):
     """
     Value of x<reg> according to Spike at the moment the program stops.
 
-    The scan STOPS at the trap handler's first instruction, not at the end of
-    the trace: Spike carries on past the ECALL into the handler and then spins
-    until it notices the HTIF write, so the full log is an order of magnitude
-    longer than the program.  Taking the last write in the whole log gives the
-    right answer today only because the handler happens to use t0/t1.
-
-    The stop marker is the HANDLER, not the ECALL, because **Spike's
-    --log-commits prints no line at all for a trapping instruction** -- the same
-    behaviour spike_asm.skipped_traps() is built around.  Looking for the ECALL
-    here finds nothing, in a trace where everything else is present, which is a
-    confusing way to learn that.
+    The scan stops at the trap handler's first instruction: Spike carries on
+    past the ECALL into the handler and spins until it notices the HTIF write.
+    The marker is the handler, not the ECALL, because --log-commits prints no
+    line for a trapping instruction.
     """
     rc, trace, text = spike_asm.run(elf, isa=spike_asm.ISA_BASE, log_commits=True)
     if not trace:
@@ -166,12 +148,9 @@ def spike_final_reg(elf, reg):
     n_prog = 0
     for pc, _word, writes in trace:
         if pc == handler:
-            # No +1 any more.  Before A9 the ECALL retired on the RTL side and
-            # was absent from Spike's, so the counts differed by one; now it
-            # traps on both and the testbench's --stop-pc is exclusive, so the
-            # two sides count exactly the same instructions.  Commits below the
-            # load address are Spike's bootrom -- it executes 5 instructions at
-            # 0x1000 before jumping to 0x80000000 -- which the RTL never runs.
+            # The ECALL traps on both sides and --stop-pc is exclusive, so both
+            # count the same instructions.  Commits below the load address are
+            # Spike's bootrom (5 instructions at 0x1000), which the RTL never runs.
             return val, n_prog
         if pc >= BASE:
             n_prog += 1

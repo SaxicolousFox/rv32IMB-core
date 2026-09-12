@@ -1,38 +1,22 @@
 """
 Helpers for building bare-metal RV32 programs that Spike runs and this harness
 reads back through --log-commits.
-
-The commit log is not a convenience here: it is the exact artifact the A5
-cosimulation differ will compare RTL against, so exercising it now means the
-format is already proven by the time Track A needs it.
 """
 import os, re, subprocess, tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 LD   = os.path.join(ROOT, "sw", "tests", "link.ld")
 
-# The M in these strings is A14's (MODS_A).  ISA_BASE is what the extension-
-# gating test in test_spike_xkntt.py runs against to prove an Xkntt encoding
-# traps when the extension is absent -- adding M does not weaken that, because
-# M and Xkntt occupy disjoint opcodes (MODS_A 3.1).
-# B (Zba+Zbb+Zbs) and Zbkb as of A21 (MODS_A2).  Spike knows all four natively
-# -- no fork change, which is why toolchain/patches.sh export spike is
-# unaffected and patches_in_sync stays green.  Verified rather than assumed:
-# spike rejects an unsupported extension outright ("unsupported extension"), so
-# these strings being accepted is evidence and not a silent default.
 # The -march string for every testbench that compiles a program for this
-# core.  ONE constant, because it was six copies of "rv32im_zicsr" until
-# A21 added B and five of the six were still compiling without it -- which
-# does not fail at compile time, it fails at ASSEMBLE time on the first B
-# mnemonic, in whichever harness happens to emit one first.
+# core, and the ISA Spike is run with.  One constant each: they were six
+# copies once, and five of them were stale.
 MARCH = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr"
 
 ISA_BASE  = "rv32im_zba_zbb_zbs_zbkb_zicond_zkr_zkt_zicsr_zicntr"
 
 # A bare-metal program that takes a trap with no handler installed loops
-# forever re-taking it.  Every program therefore installs a handler that exits
-# with a distinctive code, which turns "did this encoding trap?" into an exit
-# status instead of a string match on Spike's stderr.
+# forever re-taking it, so every program installs a handler that exits with a
+# distinctive code.
 TRAP_EXIT_CODE = 42
 
 PROLOGUE = """        .section .text.init
@@ -52,9 +36,8 @@ trap_handler:
 8:      j       8b
 """ % TRAP_EXIT_CODE
 
-# The other handler: step over the faulting instruction and carry on.  This is
-# what lets one program probe thousands of candidate encodings in a single run,
-# which is plan A3's decoder-comparison method applied to Spike.
+# The other handler: step over the faulting instruction and carry on, so one
+# program can probe many candidate encodings in a single run.
 TRAP_HANDLER_SKIP = """
         .text
         .align 2
@@ -138,12 +121,9 @@ def symbol(elf, name):
 
 def skipped_traps(elf, trace):
     """
-    Faulting PCs, for programs built with trap_mode="skip".
-
-    --log-commits does not print exceptions -- a trapping instruction simply
-    has no commit line -- so the handler's own `csrr t0, mepc` is what makes
-    the trap observable.  Reading it back out of the commit log means the trap
-    set comes from the same artifact as everything else.
+    Faulting PCs, for programs built with trap_mode="skip".  --log-commits
+    prints no line for a trapping instruction, so the handler's own
+    `csrr t0, mepc` is what makes the trap observable.
     """
     handler = symbol(elf, "trap_handler")
     if handler is None:
