@@ -30,7 +30,7 @@ passes.
 Five-stage pipeline (IF, ID, EX, MEM, WB), one instruction per cycle when there
 is no hazard.
 
-- **Forwarding** from MEM and WB into EX and select precomputed in ID.
+- **Forwarding** from MEM and WB into EX, with select precomputed in ID.
   The register file reads through on a same-cycle write. A load followed by a
   dependent instruction costs one interlock cycle.
 - **Branches and jumps** resolve in EX. A redirect costs two cycles. The
